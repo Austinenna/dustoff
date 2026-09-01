@@ -40,10 +40,18 @@ const DB_PATH = process.env.DUST_DB || join(DUST_HOME, 'index.sqlite');
 
 // ── 状态机 ────────────────────────────────────────────────────────
 //
-//   (新扫到) ──→ pending ──┬──→ downloaded ──┬──→ extracted   笔记已生成
-//                          │                 └──→ failed      提取重试超限
+//   (新扫到) ──→ pending ──┬──→ downloaded ──┬──→ transcribed ──┬──→ extracted  笔记已生成
+//                          │                 │                  └──→ failed     提炼重试超限
+//                          │                 └──→ failed         转写重试超限
 //                          ├──→ skipped      主动跳过，带 skip_reason
 //                          └──→ failed       下载重试超限
+//
+// 为什么 transcribed 和 extracted 要分开：
+//   转写（ASR，机器干的）和提炼（LLM 写笔记，prompt 说了算）失败原因不同、
+//   重跑代价也不同。合成一个状态的话，笔记模板一改就得连 ASR 一起重跑，
+//   等于为改 prompt 重复付一次转写的钱。
+//   另外 mp4 只有到 extracted 才可删——OCR 增强（见 docs/待办-OCR增强.md）
+//   还要靠它抽帧，笔记没写完就删掉等于把原料丢了。
 //
 //   任何状态 ──→ removed   对账时发现已不在收藏夹里
 //
@@ -51,7 +59,8 @@ const DB_PATH = process.env.DUST_DB || join(DUST_HOME, 'index.sqlite');
 // 直接 requeue 改回 pending 即可，不用改表结构。
 export const STATUS = {
   PENDING: 'pending',        // 已知，素材还没下
-  DOWNLOADED: 'downloaded',  // 素材已落盘，等提取
+  DOWNLOADED: 'downloaded',  // 素材已落盘，等转写
+  TRANSCRIBED: 'transcribed',// 文字已转出，等提炼成笔记。mp4 仍不可删
   EXTRACTED: 'extracted',    // 笔记已生成，mp4 可删
   SKIPPED: 'skipped',        // 主动跳过（图集 / 超长 / 无地址）
   FAILED: 'failed',          // 重试超限，放弃
@@ -86,8 +95,12 @@ CREATE TABLE IF NOT EXISTS items (
                                     -- 无音轨的没法做 ASR，需要重下（见 requeueSilent）
 
   -- ── 提取产物 ─────────────────────────────────────
-  text_source   TEXT,               -- ocr / whisper / none，用于回溯质量问题
-  text_chars    INTEGER,            -- 提取到多少字。太少说明这条可能没字幕
+  text_source   TEXT,               -- asr / asr+ocr / none，用于回溯质量问题
+  text_chars    INTEGER,            -- 转出多少字。太少说明这条八成是纯画面，
+                                    -- 将来 OCR 增强就靠这个筛
+  text_path     TEXT,               -- 转写稿落在哪。刻意不放 media 目录下——
+                                    -- mp4 会被清理，文字稿要活得比它久
+  audio_seconds INTEGER,            -- 送进 ASR 的音频秒数，即计费单位
   keyframes     INTEGER,            -- 关键帧张数
   note_path     TEXT,               -- 笔记落在哪
 
@@ -125,7 +138,24 @@ export function db() {
   _db.exec('PRAGMA journal_mode = WAL');   // 两个定时任务可能重叠，WAL 允许读写并发
   _db.exec('PRAGMA busy_timeout = 5000');
   _db.exec(SCHEMA);
+  migrate(_db);
   return _db;
+}
+
+/**
+ * 补齐后加的列。
+ * 建表用的是 IF NOT EXISTS，所以老库不会被新 SCHEMA 更新——
+ * 早期靠「删库重建」凑合，40 条时无所谓，但全量 5800 条之后
+ * 重扫一次要十几分钟，不能再靠重建了。
+ * 期望的列直接从 SCHEMA 字符串里读，免得两处定义各自漂移。
+ */
+function migrate(d) {
+  const want = [...SCHEMA.matchAll(/^ {2}(\w+)\s+(TEXT|INTEGER)/gm)]
+    .map(m => [m[1], m[2]]);
+  const have = new Set(d.prepare('PRAGMA table_info(items)').all().map(r => r.name));
+  for (const [name, type] of want) {
+    if (!have.has(name)) d.exec(`ALTER TABLE items ADD COLUMN ${name} ${type}`);
+  }
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -232,7 +262,19 @@ export function claim(status, limit = 50, platform = 'douyin', maxAttempts = 3) 
   `).all(platform, status, maxAttempts, limit);
 }
 
-/** 记录一次提取成功。 */
+/** 记录一次转写成功。mp4 保持不动——提炼笔记之后才轮到清理。 */
+export function markTranscribed(id, fields, platform = 'douyin') {
+  return db().prepare(`
+    UPDATE items SET status = 'transcribed', text_source = ?, text_chars = ?,
+                     text_path = ?, audio_seconds = ?, attempts = 0, last_error = NULL,
+                     updated_at = ?
+    WHERE platform = ? AND id = ?
+  `).run(fields.text_source || null, fields.text_chars ?? null,
+    fields.text_path || null, fields.audio_seconds ?? null,
+    now(), platform, id);
+}
+
+/** 记录一次提炼成功。 */
 export function markExtracted(id, fields, platform = 'douyin') {
   return db().prepare(`
     UPDATE items SET status = 'extracted', text_source = ?, text_chars = ?, keyframes = ?,

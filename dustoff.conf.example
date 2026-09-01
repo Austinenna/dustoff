@@ -109,3 +109,41 @@ DUST_MIN_FREE_GB=5
 
 # 设为 0 关闭 macOS 系统通知（标记文件仍然会写）。
 # DUST_NOTIFY=0
+
+# ─────────────────────────────────────────────────────────────
+# 转写（ASR）
+# ─────────────────────────────────────────────────────────────
+
+# 阿里云百炼 API key。这是唯一的凭据项，只存在于本文件里，
+# 不进仓库、不进日志、不进运行记录。
+# DUST_DASHSCOPE_KEY=sk-xxxxxxxx
+
+# ASR 模型。选型依据见 docs/ASR选型-2026-09-02.md。
+# 换成 fun-asr / paraformer-v2 不能直接改这里——它们走的是异步端点，
+# 接口形态完全不同（提交 → 轮询 + 文件上传），脚本目前只实现了同步那套。
+DUST_ASR_MODEL=qwen3-asr-flash
+
+# 识别语种。zh / en / ja / ko 等，也可留空让模型自己判断。
+DUST_ASR_LANG=zh
+
+# 领域热词文件。喂给模型偏置识别，专名认对率提升明显：
+# 不给热词认成 "cloud code"，给了就是 "Claude Code"。
+# 一行一批、逗号分隔都行，想到新词随时加。
+DUST_ASR_CONTEXT_FILE=~/.dustoff/asr-context.txt
+
+# 也可以直接写在这里（会覆盖上面的文件）。适合词很少的情况。
+# DUST_ASR_CONTEXT=Claude Code, MCP, RAG
+
+# 并发。同步接口，单条 1-6 秒，2 条并发已经够快。
+DUST_ASR_CONCURRENCY=2
+
+# 连续失败多少条就中止整轮。
+# 无人值守时的止损闸：余额耗尽或 key 失效会让每条都失败，
+# 没有这道闸就会把剩下几千条挨个撞一遍。
+DUST_ASR_MAX_FAILS=5
+
+# 单条最多重试几次，超了标 failed 不再自动重试。
+DUST_MAX_ATTEMPTS=3
+
+# 转写稿落盘位置。刻意不放 media 目录下——mp4 会被清理，文字稿要活得更久。
+DUST_TEXT=~/.dustoff/text
