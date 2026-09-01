@@ -1,0 +1,346 @@
+#!/usr/bin/env node
+// dustoff / ledger.mjs
+// 账本：三段流程之间唯一的共享状态。
+//
+// 为什么需要它：
+//   v0.1.0 的「状态」全靠文件系统——「media 目录里有没有这个文件夹」就是全部。
+//   这够用到下载为止，但撑不到提取阶段，因为下面这些问题文件系统答不了：
+//     · 哪些下好了但还没提取？
+//     · 哪些提取失败了、失败几次了、还该不该重试？
+//     · 哪些提取完了、mp4 可以删了？          ← 按状态删而不是按时间删
+//     · 哪些是我主动跳过的（图集 / 超长）？
+//     · 哪些已经从收藏夹里被移除了？
+//
+// 为什么是 SQLite 而不是 JSON：
+//   五千条量级下 JSON 每次都要全量读写；而这里最频繁的操作是
+//   「按状态查一批」，正是索引擅长的事。另外两个定时任务可能重叠，
+//   SQLite 的事务比手工读写 JSON 安全。
+//
+// 零依赖：用 Node 22 内置的 node:sqlite。
+//
+// 命令行用法（也可作为模块 import）:
+//   node ledger.mjs stats                    看总览
+//   node ledger.mjs list <status> [n]        列出某状态的条目
+//   node ledger.mjs show <id>                看单条全部字段
+//   node ledger.mjs import <coll.json>       把扫描结果并入账本
+//   node ledger.mjs sweep <result.json>      把下载结果并入账本
+//   node ledger.mjs reconcile <coll.json>    对账：标记已从收藏夹移除的
+//   node ledger.mjs requeue <id|status>      重新排队（清零重试计数）
+
+import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { readFileSync } from 'node:fs';
+
+const DUST_HOME = (process.env.DUST_HOME || join(homedir(), '.dustoff'))
+  .replace(/^~(?=$|\/)/, homedir());
+const DB_PATH = process.env.DUST_DB || join(DUST_HOME, 'index.sqlite');
+
+// ── 状态机 ────────────────────────────────────────────────────────
+//
+//   (新扫到) ──→ pending ──┬──→ downloaded ──┬──→ extracted   笔记已生成
+//                          │                 └──→ failed      提取重试超限
+//                          ├──→ skipped      主动跳过，带 skip_reason
+//                          └──→ failed       下载重试超限
+//
+//   任何状态 ──→ removed   对账时发现已不在收藏夹里
+//
+// skipped 是状态而非标记，这样将来想捞某条超长视频，
+// 直接 requeue 改回 pending 即可，不用改表结构。
+export const STATUS = {
+  PENDING: 'pending',        // 已知，素材还没下
+  DOWNLOADED: 'downloaded',  // 素材已落盘，等提取
+  EXTRACTED: 'extracted',    // 笔记已生成，mp4 可删
+  SKIPPED: 'skipped',        // 主动跳过（图集 / 超长 / 无地址）
+  FAILED: 'failed',          // 重试超限，放弃
+  REMOVED: 'removed',        // 已从收藏夹移除
+};
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS items (
+  -- ── 身份 ──────────────────────────────────────────
+  id            TEXT NOT NULL,      -- 平台内的唯一 id（抖音是 aweme_id）
+  platform      TEXT NOT NULL,      -- douyin / bilibili / ...，为扩展其他平台预留
+
+  -- ── 来源元数据（采集时写入，之后不再变）──────────────
+  title         TEXT,               -- 作品标题
+  author        TEXT,               -- 作者昵称
+  created_at    INTEGER,            -- 发布时间 unix 秒。注意不是收藏时间
+  duration_s    INTEGER,            -- 时长秒。图集为 NULL
+  media_type    TEXT,               -- video / gallery
+
+  -- ── 采集状态 ─────────────────────────────────────
+  first_seen    INTEGER NOT NULL,   -- 首次扫到的时间 ≈ 收藏时间
+  last_seen     INTEGER NOT NULL,   -- 最后一次在收藏夹里见到 → 据此发现取消收藏
+  status        TEXT NOT NULL,      -- 见 STATUS
+  skip_reason   TEXT,               -- gallery / too_long / no_url
+
+  -- ── 素材 ────────────────────────────────────────
+  media_path    TEXT,               -- 视频落盘位置
+  media_bytes   INTEGER,            -- 体积
+  gear          TEXT,               -- 下的哪一档码率
+  media_deleted INTEGER DEFAULT 0,  -- mp4 是否已清理。1 表示提取完删掉了
+
+  -- ── 提取产物 ─────────────────────────────────────
+  text_source   TEXT,               -- ocr / whisper / none，用于回溯质量问题
+  text_chars    INTEGER,            -- 提取到多少字。太少说明这条可能没字幕
+  keyframes     INTEGER,            -- 关键帧张数
+  note_path     TEXT,               -- 笔记落在哪
+
+  -- ── AI 判断结果 ──────────────────────────────────
+  category      TEXT,               -- AI技术 / 游戏攻略 / 生活方式 / 其他
+  decay         TEXT,               -- none / slow / fast / event  时效档位
+
+  -- ── 失败处理 ─────────────────────────────────────
+  attempts      INTEGER DEFAULT 0,  -- 已尝试次数。超限则转 failed，避免无限重试烧钱
+  last_error    TEXT,               -- 最后一次错误，排查用
+
+  -- ── 时间戳 ──────────────────────────────────────
+  downloaded_at INTEGER,
+  extracted_at  INTEGER,
+  updated_at    INTEGER NOT NULL,
+
+  PRIMARY KEY (platform, id)        -- 跨平台时 id 可能撞车，所以联合主键
+);
+
+-- 最频繁的查询是「按状态捞一批待处理的」
+CREATE INDEX IF NOT EXISTS idx_status     ON items(status, platform);
+-- 对账时按 last_seen 找出已消失的条目
+CREATE INDEX IF NOT EXISTS idx_last_seen  ON items(last_seen);
+-- 组织阶段会按分类和时效筛
+CREATE INDEX IF NOT EXISTS idx_category   ON items(category, decay);
+-- 清理 mp4 时找「已提取但没删」的
+CREATE INDEX IF NOT EXISTS idx_cleanable  ON items(status, media_deleted);
+`;
+
+let _db = null;
+export function db() {
+  if (_db) return _db;
+  mkdirSync(dirname(DB_PATH), { recursive: true });
+  _db = new DatabaseSync(DB_PATH);
+  _db.exec('PRAGMA journal_mode = WAL');   // 两个定时任务可能重叠，WAL 允许读写并发
+  _db.exec('PRAGMA busy_timeout = 5000');
+  _db.exec(SCHEMA);
+  return _db;
+}
+
+const now = () => Math.floor(Date.now() / 1000);
+
+/**
+ * 把一次扫描的结果并入账本。
+ * 已存在的只更新 last_seen 和元数据，绝不覆盖处理状态——
+ * 否则每天的扫描会把已经提取好的条目打回 pending。
+ * @returns {{added:number, seen:number}}
+ */
+export function importScan(items, platform = 'douyin') {
+  const d = db(), t = now();
+  const ins = d.prepare(`
+    INSERT INTO items (id, platform, title, author, created_at, duration_s, media_type,
+                       first_seen, last_seen, status, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(platform, id) DO UPDATE SET
+      last_seen  = excluded.last_seen,
+      title      = COALESCE(excluded.title, items.title),
+      author     = COALESCE(excluded.author, items.author),
+      duration_s = COALESCE(excluded.duration_s, items.duration_s),
+      updated_at = excluded.updated_at
+  `);
+  const countBefore = d.prepare('SELECT COUNT(*) n FROM items WHERE platform = ?').get(platform).n;
+  d.exec('BEGIN');
+  try {
+    for (const it of items) {
+      ins.run(it.aweme_id, platform, it.desc || null, it.author || null,
+        it.create_time || null, it.duration_s || null,
+        it.is_gallery ? 'gallery' : 'video',
+        t, t, STATUS.PENDING, t);
+    }
+    d.exec('COMMIT');
+  } catch (e) { d.exec('ROLLBACK'); throw e; }
+  const countAfter = d.prepare('SELECT COUNT(*) n FROM items WHERE platform = ?').get(platform).n;
+  return { added: countAfter - countBefore, seen: items.length };
+}
+
+/** 把一次下载的结果并入账本。 */
+export function importDownload(results, platform = 'douyin') {
+  const d = db(), t = now();
+  const map = {
+    done:            r => ({ status: STATUS.DOWNLOADED, reason: null }),
+    cached:          r => ({ status: STATUS.DOWNLOADED, reason: null }),
+    skipped_gallery: r => ({ status: STATUS.SKIPPED, reason: 'gallery' }),
+    skipped_too_long:r => ({ status: STATUS.SKIPPED, reason: 'too_long' }),
+    skipped_no_url:  r => ({ status: STATUS.SKIPPED, reason: 'no_url' }),
+    skipped_expired: r => null,     // 地址过期不是终态，下次扫描重新拿地址即可
+    failed:          r => null,     // 交给 attempts 逻辑，不直接判死
+  };
+  const upd = d.prepare(`
+    UPDATE items SET status = ?, skip_reason = ?, media_path = ?, media_bytes = ?,
+                     gear = ?, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
+    WHERE platform = ? AND id = ? AND status IN ('pending','skipped')
+  `);
+  const bump = d.prepare(`
+    UPDATE items SET attempts = attempts + 1, last_error = ?, updated_at = ?
+    WHERE platform = ? AND id = ?
+  `);
+  let touched = 0, bumped = 0;
+  d.exec('BEGIN');
+  try {
+    for (const r of results) {
+      const m = map[r.status]?.(r);
+      if (!m) {
+        if (r.status === 'failed') { bump.run((r.errors || []).join('; ').slice(0, 300), t, platform, r.aweme_id); bumped++; }
+        continue;
+      }
+      const res = upd.run(m.status, m.reason, r.path || null, r.bytes || null,
+        r.gear || null, t, t, platform, r.aweme_id);
+      touched += res.changes;
+    }
+    d.exec('COMMIT');
+  } catch (e) { d.exec('ROLLBACK'); throw e; }
+  return { touched, bumped };
+}
+
+/**
+ * 对账：本次扫描没见到、但账本里还是活跃状态的条目，标为 removed。
+ * 只在全量扫描后调用——增量扫描本来就见不到旧条目，会误杀。
+ */
+export function reconcile(scannedIds, platform = 'douyin', scanTime = null) {
+  const d = db(), t = scanTime || now();
+  const seen = new Set(scannedIds);
+  const active = d.prepare(
+    `SELECT id FROM items WHERE platform = ? AND status NOT IN ('removed')`
+  ).all(platform);
+  const gone = active.filter(r => !seen.has(r.id)).map(r => r.id);
+  const upd = d.prepare(`UPDATE items SET status = 'removed', updated_at = ? WHERE platform = ? AND id = ?`);
+  d.exec('BEGIN');
+  try { for (const id of gone) upd.run(t, platform, id); d.exec('COMMIT'); }
+  catch (e) { d.exec('ROLLBACK'); throw e; }
+  return { removed: gone.length };
+}
+
+/** 捞一批待办。提取阶段用 status='downloaded'。 */
+export function claim(status, limit = 50, platform = 'douyin', maxAttempts = 3) {
+  return db().prepare(`
+    SELECT * FROM items
+    WHERE platform = ? AND status = ? AND attempts < ?
+    ORDER BY first_seen DESC
+    LIMIT ?
+  `).all(platform, status, maxAttempts, limit);
+}
+
+/** 记录一次提取成功。 */
+export function markExtracted(id, fields, platform = 'douyin') {
+  return db().prepare(`
+    UPDATE items SET status = 'extracted', text_source = ?, text_chars = ?, keyframes = ?,
+                     note_path = ?, category = ?, decay = ?, extracted_at = ?, updated_at = ?
+    WHERE platform = ? AND id = ?
+  `).run(fields.text_source || null, fields.text_chars || null, fields.keyframes || null,
+    fields.note_path || null, fields.category || null, fields.decay || null,
+    now(), now(), platform, id);
+}
+
+/** 记录一次失败。超过上限则转 failed，避免无限重试烧 API 额度。 */
+export function markFailed(id, error, platform = 'douyin', maxAttempts = 3) {
+  const d = db();
+  d.prepare(`UPDATE items SET attempts = attempts + 1, last_error = ?, updated_at = ?
+             WHERE platform = ? AND id = ?`).run(String(error).slice(0, 300), now(), platform, id);
+  const row = d.prepare('SELECT attempts FROM items WHERE platform = ? AND id = ?').get(platform, id);
+  if (row && row.attempts >= maxAttempts) {
+    d.prepare(`UPDATE items SET status = 'failed', updated_at = ? WHERE platform = ? AND id = ?`)
+      .run(now(), platform, id);
+    return { gaveUp: true, attempts: row.attempts };
+  }
+  return { gaveUp: false, attempts: row?.attempts ?? 0 };
+}
+
+/** 标记 mp4 已清理。提取完之后调用，磁盘峰值因此可控。 */
+export function markMediaDeleted(ids, platform = 'douyin') {
+  const d = db();
+  const upd = d.prepare(`UPDATE items SET media_deleted = 1, updated_at = ? WHERE platform = ? AND id = ?`);
+  d.exec('BEGIN');
+  try { for (const id of ids) upd.run(now(), platform, id); d.exec('COMMIT'); }
+  catch (e) { d.exec('ROLLBACK'); throw e; }
+}
+
+/** 找出可以删 mp4 的条目：已提取、还没删、文件还在。 */
+export function cleanable(platform = 'douyin', limit = 1000) {
+  return db().prepare(`
+    SELECT id, media_path, media_bytes FROM items
+    WHERE platform = ? AND status = 'extracted' AND media_deleted = 0 AND media_path IS NOT NULL
+    LIMIT ?
+  `).all(platform, limit);
+}
+
+/** 某个 id 是否已知——扫描层增量判断「撞到已知就停」用。 */
+export function knownIds(platform = 'douyin') {
+  return new Set(db().prepare('SELECT id FROM items WHERE platform = ?').all(platform).map(r => r.id));
+}
+
+export function stats(platform = null) {
+  const d = db();
+  const where = platform ? 'WHERE platform = ?' : '';
+  const args = platform ? [platform] : [];
+  return {
+    total: d.prepare(`SELECT COUNT(*) n FROM items ${where}`).get(...args).n,
+    byStatus: d.prepare(`SELECT status, COUNT(*) n FROM items ${where} GROUP BY status ORDER BY n DESC`).all(...args),
+    bySkip: d.prepare(`SELECT skip_reason, COUNT(*) n FROM items ${where || 'WHERE 1=1'} AND skip_reason IS NOT NULL GROUP BY skip_reason`).all(...args),
+    byPlatform: d.prepare('SELECT platform, COUNT(*) n FROM items GROUP BY platform').all(),
+    media: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND media_deleted = 0 AND media_bytes IS NOT NULL`).get(...args),
+    reclaimable: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND status='extracted' AND media_deleted=0`).get(...args),
+  };
+}
+
+// ── CLI ───────────────────────────────────────────────────────────
+const isMain = process.argv[1] && process.argv[1].endsWith('ledger.mjs');
+if (isMain) {
+  const [cmd, a1, a2] = process.argv.slice(2);
+  const fmtMB = b => b ? (b / 1024 / 1024).toFixed(1) + ' MB' : '0';
+  const readJson = f => JSON.parse(readFileSync(f, 'utf8'));
+
+  if (!cmd || cmd === 'stats') {
+    const s = stats();
+    console.log(`账本 ${DB_PATH}\n`);
+    console.log(`  总条目 ${s.total}`);
+    if (s.byPlatform.length > 1 || s.total) {
+      console.log('\n  按平台:');
+      for (const r of s.byPlatform) console.log(`    ${r.platform.padEnd(12)} ${r.n}`);
+    }
+    console.log('\n  按状态:');
+    for (const r of s.byStatus) console.log(`    ${String(r.status).padEnd(12)} ${r.n}`);
+    if (s.bySkip.length) {
+      console.log('\n  跳过原因:');
+      for (const r of s.bySkip) console.log(`    ${String(r.skip_reason).padEnd(12)} ${r.n}`);
+    }
+    console.log(`\n  素材占用 ${fmtMB(s.media.bytes)}（${s.media.n} 条未清理）`);
+    console.log(`  可回收   ${fmtMB(s.reclaimable.bytes)}（${s.reclaimable.n} 条已提取但 mp4 还在）`);
+  } else if (cmd === 'list') {
+    const rows = claim(a1 || 'pending', Number(a2) || 20, 'douyin', 99);
+    console.log(`${a1 || 'pending'} 状态共列出 ${rows.length} 条:\n`);
+    for (const r of rows) {
+      console.log(`  ${r.id}  ${String(r.duration_s ?? '图集').padStart(5)}s  @${(r.author || '').slice(0, 10).padEnd(10)} ${(r.title || '').slice(0, 34)}`);
+    }
+  } else if (cmd === 'show') {
+    const r = db().prepare('SELECT * FROM items WHERE id = ?').get(a1);
+    if (!r) { console.error('未找到'); process.exit(1); }
+    for (const [k, v] of Object.entries(r)) console.log(`  ${k.padEnd(14)} ${v === null ? '—' : v}`);
+  } else if (cmd === 'import') {
+    const j = readJson(a1);
+    console.log('  ', JSON.stringify(importScan(j.items)));
+  } else if (cmd === 'sweep') {
+    const j = readJson(a1);
+    console.log('  ', JSON.stringify(importDownload(j.results)));
+  } else if (cmd === 'reconcile') {
+    const j = readJson(a1);
+    console.log('  ', JSON.stringify(reconcile(j.items.map(i => i.aweme_id))));
+  } else if (cmd === 'requeue') {
+    const d = db();
+    const byStatus = Object.values(STATUS).includes(a1);
+    const r = byStatus
+      ? d.prepare(`UPDATE items SET status='pending', attempts=0, last_error=NULL, updated_at=? WHERE status=?`).run(now(), a1)
+      : d.prepare(`UPDATE items SET status='pending', attempts=0, last_error=NULL, updated_at=? WHERE id=?`).run(now(), a1);
+    console.log(`  重新排队 ${r.changes} 条`);
+  } else {
+    console.error('未知命令。可用: stats | list | show | import | sweep | reconcile | requeue');
+    process.exit(2);
+  }
+}
