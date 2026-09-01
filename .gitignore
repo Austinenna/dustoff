@@ -1,0 +1,24 @@
+# 运行时数据（默认在 ~/VideoKB/，但防止有人把 DUST_HOME 指到仓库里）
+.cache/
+.runs/
+.state/
+.chrome-profile/
+NEEDS_LOGIN
+
+# 扫描/下载的中间产物与结果
+coll*.json
+result*.json
+*.log
+
+# 媒体文件绝不入库
+*.mp4
+*.wav
+*.mp3
+*.png
+*.jpg
+
+# 系统与编辑器
+.DS_Store
+node_modules/
+.vscode/
+.idea/
