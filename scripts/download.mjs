@@ -43,6 +43,9 @@ const limit = Number(process.env.DUST_LIMIT || 0) || Infinity;
 // 实测阈值取 10 分钟只拦下 4.6% 的条目，却省掉约 12.6 GB。
 // 拦下的不丢弃，计入汇总，想要的可以单独捞。
 const maxDurationS = (Number(process.env.DUST_MAX_DURATION_MIN ?? 10) || 0) * 60;
+// 下载后校验音轨。后半段用 ASR 提取内容，没有音轨这一条就等于白下。
+// 实测最低码率档有 58% 是纯视频流，所以这个校验不是可选项。
+const requireAudio = process.env.DUST_REQUIRE_AUDIO !== '0';
 const dryRun = process.env.DUST_DRY_RUN === '1';
 
 const log = (...a) => console.error('>>', ...a);
@@ -72,6 +75,32 @@ function run(cmd, args) {
   });
 }
 
+/** 探测文件里有没有音轨。 */
+function hasAudio(file) {
+  try {
+    const r = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'a',
+      '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', file], { encoding: 'utf8' });
+    return !!(r.stdout || '').trim();
+  } catch { return false; }
+}
+
+/** 按给定地址列表逐个尝试下载，三关校验（大小 / MIME / 可选音轨）。 */
+async function tryUrls(urls, mp4, { needAudio }) {
+  const errors = [];
+  for (const url of urls) {
+    try {
+      await run('curl', ['-sL', '--fail', '--max-time', '180',
+        '-H', 'Referer: https://www.douyin.com/', '-H', `User-Agent: ${UA}`, '-o', mp4, url]);
+      if (!(existsSync(mp4) && statSync(mp4).size > MIN_VALID_BYTES)) { errors.push('文件过小'); continue; }
+      const mime = spawnSync('file', ['-b', '--mime-type', mp4], { encoding: 'utf8' }).stdout.trim();
+      if (!mime.startsWith('video/')) { errors.push(`MIME 不是视频: ${mime}`); continue; }
+      if (needAudio && !hasAudio(mp4)) { errors.push('无音轨'); return { ok: false, noAudio: true, errors }; }
+      return { ok: true, errors };
+    } catch (e) { errors.push(e.message.slice(0, 80)); }
+  }
+  return { ok: false, errors };
+}
+
 /** 下一条。返回 { aweme_id, status, ... }
  *  status: done | cached | skipped_gallery | skipped_too_long | skipped_no_url
  *          | skipped_expired | failed */
@@ -84,9 +113,11 @@ async function downloadOne(item) {
   const dir = join(mediaRoot, id);
   const mp4 = join(dir, 'video.mp4');
 
-  // 断点续：已经下好且体积合理就跳过
+  // 断点续：已经下好且体积合理就跳过。
+  // 注意也要报音轨状态——早期版本下的文件可能是纯视频，上层据此决定要不要重下。
   if (existsSync(mp4) && statSync(mp4).size > MIN_VALID_BYTES) {
-    return { ...base, status: 'cached', bytes: statSync(mp4).size, path: mp4 };
+    return { ...base, status: 'cached', bytes: statSync(mp4).size, path: mp4,
+             has_audio: requireAudio ? hasAudio(mp4) : null };
   }
 
   // 时长上限。放在 cached 之后：已经下好的就如实报 cached，
@@ -109,25 +140,26 @@ async function downloadOne(item) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'meta.json'), JSON.stringify(item, null, 2));
 
-  // 多 CDN 逐个 fallback + 大小/MIME 双校验（单地址无兜底会在批量时静默丢数据）
-  const errors = [];
-  for (const url of urls) {
-    try {
-      await run('curl', ['-sL', '--fail', '--max-time', '180',
-        '-H', 'Referer: https://www.douyin.com/', '-H', `User-Agent: ${UA}`,
-        '-o', mp4, url]);
-      if (existsSync(mp4) && statSync(mp4).size > MIN_VALID_BYTES) {
-        const mime = spawnSync('file', ['-b', '--mime-type', mp4], { encoding: 'utf8' }).stdout.trim();
-        if (mime.startsWith('video/')) {
-          return { ...base, status: 'done', bytes: statSync(mp4).size, gear: item.gear, path: mp4 };
-        }
-        errors.push(`MIME 不是视频: ${mime}`);
-      } else {
-        errors.push('文件过小');
-      }
-    } catch (e) { errors.push(e.message.slice(0, 80)); }
+  // ① 先试选中的档位（多 CDN 逐个 fallback）
+  let r = await tryUrls(urls, mp4, { needAudio: requireAudio });
+  if (r.ok) {
+    return { ...base, status: 'done', bytes: statSync(mp4).size, gear: item.gear,
+             path: mp4, has_audio: requireAudio ? true : null };
   }
-  return { ...base, status: 'failed', tried: urls.length, errors: errors.slice(0, 3) };
+
+  // ② 选中的档位没音轨 → 回落到 play_addr。
+  //    网页播放器用的就是它，必然带音轨，代价是体积大 2.5-3.3 倍。
+  const fb = item.play_urls_fallback || [];
+  if (r.noAudio && fb.length) {
+    const r2 = await tryUrls(fb, mp4, { needAudio: true });
+    if (r2.ok) {
+      return { ...base, status: 'done', bytes: statSync(mp4).size, gear: 'play_addr(音轨回落)',
+               path: mp4, has_audio: true, fell_back: true };
+    }
+    r.errors.push(...r2.errors);
+  }
+
+  return { ...base, status: 'failed', tried: urls.length + fb.length, errors: r.errors.slice(0, 3) };
 }
 
 (async () => {
@@ -183,6 +215,10 @@ async function downloadOne(item) {
   const bytes = results.reduce((s, r) => s + (r.bytes || 0), 0);
   const elapsed = (Date.now() - t0) / 1000;
 
+  const fellBack = results.filter(r => r.fell_back).length;
+  const silent = results.filter(r => r.has_audio === false).length;
+  if (fellBack) log(`   ${fellBack} 条因所选档位无音轨，已回落 play_addr 重下`);
+  if (silent) log(`   ⚠️ ${silent} 条缓存文件没有音轨（早期版本下的），ASR 用不了，需重下`);
   log(`完成，用时 ${elapsed.toFixed(0)}s，落盘 ${fmtMB(bytes)}`);
   for (const [k, v] of Object.entries(by).sort((a, b) => b[1] - a[1])) log(`   ${k}: ${v}`);
   if (by.failed) log(`   ⚠️ ${by.failed} 条全部 CDN 地址都失败，详见输出 JSON 的 errors 字段`);

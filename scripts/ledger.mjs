@@ -26,6 +26,7 @@
 //   node ledger.mjs sweep <result.json>      把下载结果并入账本
 //   node ledger.mjs reconcile <coll.json>    对账：标记已从收藏夹移除的
 //   node ledger.mjs requeue <id|status>      重新排队（清零重试计数）
+//   node ledger.mjs requeue-silent           把无音轨的打回重下（ASR 需要音轨）
 
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
@@ -81,6 +82,8 @@ CREATE TABLE IF NOT EXISTS items (
   media_bytes   INTEGER,            -- 体积
   gear          TEXT,               -- 下的哪一档码率
   media_deleted INTEGER DEFAULT 0,  -- mp4 是否已清理。1 表示提取完删掉了
+  has_audio     INTEGER,            -- 文件有没有音轨。NULL=未检测 0=无 1=有
+                                    -- 无音轨的没法做 ASR，需要重下（见 requeueSilent）
 
   -- ── 提取产物 ─────────────────────────────────────
   text_source   TEXT,               -- ocr / whisper / none，用于回溯质量问题
@@ -175,7 +178,7 @@ export function importDownload(results, platform = 'douyin') {
   };
   const upd = d.prepare(`
     UPDATE items SET status = ?, skip_reason = ?, media_path = ?, media_bytes = ?,
-                     gear = ?, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
+                     gear = ?, has_audio = ?, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
     WHERE platform = ? AND id = ? AND status IN ('pending','skipped')
   `);
   const bump = d.prepare(`
@@ -192,7 +195,8 @@ export function importDownload(results, platform = 'douyin') {
         continue;
       }
       const res = upd.run(m.status, m.reason, r.path || null, r.bytes || null,
-        r.gear || null, t, t, platform, r.aweme_id);
+        r.gear || null, r.has_audio === undefined ? null : (r.has_audio ? 1 : 0),
+        t, t, platform, r.aweme_id);
       touched += res.changes;
     }
     d.exec('COMMIT');
@@ -262,6 +266,16 @@ export function markMediaDeleted(ids, platform = 'douyin') {
   catch (e) { d.exec('ROLLBACK'); throw e; }
 }
 
+/** 把「已下载但没有音轨」的条目打回 pending，好用新的挑档逻辑重下。
+ *  ASR 需要音轨，纯视频文件对后半段没有价值。 */
+export function requeueSilent(platform = 'douyin') {
+  const d = db();
+  const r = d.prepare(`UPDATE items SET status='pending', attempts=0, media_path=NULL,
+                       media_bytes=NULL, gear=NULL, has_audio=NULL, updated_at=?
+                       WHERE platform=? AND status='downloaded' AND has_audio = 0`).run(now(), platform);
+  return { requeued: r.changes };
+}
+
 /** 找出可以删 mp4 的条目：已提取、还没删、文件还在。 */
 export function cleanable(platform = 'douyin', limit = 1000) {
   return db().prepare(`
@@ -286,6 +300,7 @@ export function stats(platform = null) {
     bySkip: d.prepare(`SELECT skip_reason, COUNT(*) n FROM items ${where || 'WHERE 1=1'} AND skip_reason IS NOT NULL GROUP BY skip_reason`).all(...args),
     byPlatform: d.prepare('SELECT platform, COUNT(*) n FROM items GROUP BY platform').all(),
     media: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND media_deleted = 0 AND media_bytes IS NOT NULL`).get(...args),
+    audio: d.prepare(`SELECT COALESCE(SUM(has_audio=1),0) y, COALESCE(SUM(has_audio=0),0) n, COALESCE(SUM(has_audio IS NULL),0) u FROM items ${where || 'WHERE 1=1'} AND status='downloaded'`).get(...args),
     reclaimable: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND status='extracted' AND media_deleted=0`).get(...args),
   };
 }
@@ -311,7 +326,9 @@ if (isMain) {
       console.log('\n  跳过原因:');
       for (const r of s.bySkip) console.log(`    ${String(r.skip_reason).padEnd(12)} ${r.n}`);
     }
-    console.log(`\n  素材占用 ${fmtMB(s.media.bytes)}（${s.media.n} 条未清理）`);
+    console.log(`\n  音轨   有 ${s.audio.y} · 无 ${s.audio.n} · 未检测 ${s.audio.u}` +
+      (s.audio.n ? `   ⚠️ 无音轨的做不了 ASR，跑 requeue-silent 重下` : ''));
+    console.log(`  素材占用 ${fmtMB(s.media.bytes)}（${s.media.n} 条未清理）`);
     console.log(`  可回收   ${fmtMB(s.reclaimable.bytes)}（${s.reclaimable.n} 条已提取但 mp4 还在）`);
   } else if (cmd === 'list') {
     const rows = claim(a1 || 'pending', Number(a2) || 20, 'douyin', 99);
@@ -332,6 +349,8 @@ if (isMain) {
   } else if (cmd === 'reconcile') {
     const j = readJson(a1);
     console.log('  ', JSON.stringify(reconcile(j.items.map(i => i.aweme_id))));
+  } else if (cmd === 'requeue-silent') {
+    console.log('  ', JSON.stringify(requeueSilent()));
   } else if (cmd === 'requeue') {
     const d = db();
     const byStatus = Object.values(STATUS).includes(a1);
@@ -340,7 +359,7 @@ if (isMain) {
       : d.prepare(`UPDATE items SET status='pending', attempts=0, last_error=NULL, updated_at=? WHERE id=?`).run(now(), a1);
     console.log(`  重新排队 ${r.changes} 条`);
   } else {
-    console.error('未知命令。可用: stats | list | show | import | sweep | reconcile | requeue');
+    console.error('未知命令。可用: stats | list | show | import | sweep | reconcile | requeue | requeue-silent');
     process.exit(2);
   }
 }

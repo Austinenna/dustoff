@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
-import { pickLowestGear, isGallery, expiryOf } from './lib.mjs';
+import { pickGear, playAddrUrls, isGallery, expiryOf } from './lib.mjs';
 import { guardSession } from './session_guard.mjs';
 
 const CHROME = process.env.DUST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -24,6 +24,7 @@ const PORT = Number(process.env.DUST_CDP_PORT || 9335);
 const LIMIT = Number(process.argv[2] || 200);
 const MAX_ROUNDS = Number(process.env.DUST_MAX_ROUNDS || 400);
 const STALL_LIMIT = Number(process.env.DUST_STALL || 4);  // 连续几轮没新条目就收工
+const REQUIRE_AUDIO = process.env.DUST_REQUIRE_AUDIO !== '0';  // ASR 需要音轨，默认优先带音轨的档
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 if (!existsSync(PROFILE)) { console.error('ERROR: 未找到登录 profile，请先跑 login.mjs'); process.exit(4); }
@@ -124,7 +125,8 @@ function cdp(ws) {
             // listcollection 的响应里已经带了 play_addr / bit_rate / images，
             // 所以批量流程不需要再对每条视频单独跑 get_meta.mjs（省约 6s/条）。
             const gallery = isGallery(a);
-            const gear = gallery ? null : pickLowestGear(a);
+            // requireAudio：ASR 需要音轨，而最低档常常是纯视频（实测 58%）
+            const gear = gallery ? null : pickGear(a, { requireAudio: REQUIRE_AUDIO });
             items.push({
               aweme_id: a.aweme_id,
               aweme_type: a.aweme_type ?? null,      // 0=视频 68=图集
@@ -133,7 +135,7 @@ function cdp(ws) {
               author: (a.author && a.author.nickname) || '',
               create_time: a.create_time || null,
               duration_s: a.video && a.video.duration ? Math.round(a.video.duration / 1000) : null,
-              // 下载用：码率最低的档位（只要文字，不要清晰度）
+              // 下载用：码率尽量低、但优先带音轨的档位
               gear: gear ? gear.gear : null,
               gear_source: gear ? gear.source : null,
               gear_count: gear ? gear.gear_count : 0,
@@ -141,6 +143,8 @@ function cdp(ws) {
               height: gear ? gear.height : null,
               size_bytes: gear ? gear.size : null,
               play_urls: gear ? gear.urls : [],
+              // 兜底：万一选中的档位没音轨，下载端回落到这个（网页播放器用的地址）
+              play_urls_fallback: gallery ? [] : playAddrUrls(a),
               // CDN 地址带签名有时效（实测 3~24 小时不等），过期返回 403
               url_expires_at: gear ? expiryOf(gear.urls) : null,
             });

@@ -40,37 +40,60 @@ export function isExpired(urls = [], now = Math.floor(Date.now() / 1000)) {
   return exp === null ? false : exp <= now + 60;
 }
 
-/** 从一条 aweme 对象里挑出「码率最低」的可用档位。
- *  返回 { gear, width, height, size, urls }；没有可用 bit_rate 时回退到 play_addr。 */
-export function pickLowestGear(aweme) {
+const gearInfo = (g, source, count) => ({
+  gear: g.gear_name || null,
+  width: g.play_addr.width || null,
+  height: g.play_addr.height || null,
+  size: g.play_addr.data_size || null,
+  urls: g.play_addr.url_list.slice(),
+  source,
+  gear_count: count,
+});
+
+/** 从一条 aweme 里挑下载用的档位。
+ *
+ *  requireAudio=true（默认）时，优先挑「码率最低、但很可能带音轨」的档：
+ *  若最低档的 gear_name 在更高码率处再次出现，取那个更高的——
+ *  实测这种成对结构里，高的那个才带音频。
+ *
+ *  requireAudio=false 时退化成纯粹取码率最低（只要画面、不要声音的场景）。
+ *
+ *  返回 { gear, width, height, size, urls, source, gear_count }；
+ *  没有可用 bit_rate 时回退到 play_addr。 */
+export function pickGear(aweme, { requireAudio = true } = {}) {
   const v = (aweme && aweme.video) || {};
   const gears = (v.bit_rate || [])
     .filter(b => b && b.play_addr && Array.isArray(b.play_addr.url_list) && b.play_addr.url_list.length)
     .sort((a, b) => (a.bit_rate || 0) - (b.bit_rate || 0));
 
   if (gears.length) {
-    const g = gears[0];
-    return {
-      gear: g.gear_name || null,
-      width: g.play_addr.width || null,
-      height: g.play_addr.height || null,
-      size: g.play_addr.data_size || null,
-      urls: g.play_addr.url_list.slice(),
-      source: 'bit_rate',
-      gear_count: gears.length,
-    };
+    let chosen = gears[0];
+    if (requireAudio) {
+      const name = gears[0].gear_name;
+      // 同名但码率更高的那一档：成对结构里它才是带音轨的那个
+      const paired = gears.find(g => g !== gears[0] && g.gear_name === name &&
+                                     (g.bit_rate || 0) > (gears[0].bit_rate || 0));
+      if (paired) chosen = paired;
+    }
+    return gearInfo(chosen, 'bit_rate', gears.length);
   }
 
   const pa = v.play_addr || {};
   return {
-    gear: null,
-    width: pa.width || null,
-    height: pa.height || null,
+    gear: null, width: pa.width || null, height: pa.height || null,
     size: pa.data_size || null,
     urls: Array.isArray(pa.url_list) ? pa.url_list.slice() : [],
-    source: 'play_addr',
-    gear_count: 0,
+    source: 'play_addr', gear_count: 0,
   };
+}
+
+/** 保留旧名，等价于 pickGear(aweme, {requireAudio:false})。 */
+export const pickLowestGear = aweme => pickGear(aweme, { requireAudio: false });
+
+/** play_addr 的地址。网页播放器用的就是它，必然带音轨，作为最终兜底。 */
+export function playAddrUrls(aweme) {
+  const pa = ((aweme && aweme.video) || {}).play_addr || {};
+  return Array.isArray(pa.url_list) ? pa.url_list.slice() : [];
 }
 
 /** aweme_type：0 = 视频，68 = 图集。图集没有视频轨也没有音频轨。 */
