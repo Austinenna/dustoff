@@ -114,6 +114,16 @@ node scripts/get_collection.mjs 200 | node scripts/download.mjs - 3
 
 ## 脚本一览
 
+**两个入口**（根目录）。它们是平级的独立阶段，互不调用，只通过账本对话——
+所以入口放在根目录，跟被调用的零件分开。
+
+| 入口 | 作用 |
+|---|---|
+| `sync.mjs` | ① 采集：扫收藏夹 → 下载 → 写账本 |
+| `extract.mjs` | ② 提取：清理过期 mp4 → 转写成文字 → 写账本 |
+
+以下都在 `scripts/` 下，是被入口调用的零件（或独立的小工具），不是入口。
+
 **批量路径**（收藏夹 → 下载）
 
 | 脚本 | 作用 |
@@ -126,8 +136,12 @@ node scripts/get_collection.mjs 200 | node scripts/download.mjs - 3
 
 | 脚本 | 作用 |
 |---|---|
-| `lib.mjs` | 挑最低码率档、解析 CDN 地址时效、判定图集 |
+| `lib.mjs` | 挑码率档（要求带音轨）、解析 CDN 地址时效、判定图集 |
 | `session_guard.mjs` | 按自然日节流检查登录态剩余天数，预警 |
+| `stage.mjs` | 阶段骨架：PID 锁、日志落盘、运行记录、通知、退出码。两个入口共用 |
+| `config.mjs` | 配置解析（命令行 > 环境变量 > 配置文件 > 默认） |
+| `ledger.mjs` | 账本。两段之间唯一的共享状态，也可当 CLI 用 |
+| `timeline.mjs` | 把转写稿和逐词时间戳合成「分句 + 时间戳」视图 |
 
 **单条链接路径**（与批量无关，给「随手丢一个链接」用）
 
@@ -254,8 +268,9 @@ node scripts/get_collection.mjs 200 | node scripts/download.mjs - 3
 
 ```
 dustoff/
-├── sync.mjs                 第一段（采集）入口：配置、加锁、运行记录、告警、退出码
-├── scripts/                 10 个脚本，见上方「脚本一览」
+├── sync.mjs                 ① 采集入口：扫收藏夹 → 下载 → 写账本
+├── extract.mjs              ② 提取入口：读账本 → 转写 → 清理 mp4
+├── scripts/                 零件，不单独当入口用。见上方「脚本一览」
 ├── docs/                    架构、选型依据、待办（见下方「文档」）
 ├── dustoff.conf.example     配置模板，复制到 ~/.dustoff/ 后修改
 ├── README.md

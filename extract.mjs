@@ -12,14 +12,14 @@
 // 手动跑全链路就是依次跑这两条命令；以后两个定时器跑的也是同样这两条。
 //
 // 用法:
-//   node scripts/extract.mjs                 转所有 downloaded 的
-//   node scripts/extract.mjs --limit 5        只转 5 条（先试水用这个）
-//   node scripts/extract.mjs --id 7676...     指定一条
-//   node scripts/extract.mjs --dry-run        只列计划和音频总时长，不调 API
-//   node scripts/extract.mjs --force          已转过的也重转
-//   node scripts/extract.mjs --clean-only     只清理过期 mp4，不转写
-//   node scripts/extract.mjs --keep-days 0    临时改保留期（默认 7 天）
-//   node scripts/extract.mjs --clean-only --clean-limit 1   小步试删
+//   node extract.mjs                 转所有 downloaded 的
+//   node extract.mjs --limit 5        只转 5 条（先试水用这个）
+//   node extract.mjs --id 7676...     指定一条
+//   node extract.mjs --dry-run        只列计划和音频总时长，不调 API
+//   node extract.mjs --force          已转过的也重转
+//   node extract.mjs --clean-only     只清理过期 mp4，不转写
+//   node extract.mjs --keep-days 0    临时改保留期（默认 7 天）
+//   node extract.mjs --clean-only --clean-limit 1   小步试删
 //
 // 退出码见 stage.mjs 的约定（0 正常 / 1 出错 / 3 已在跑 / 5 磁盘 / 6 缺配置）。
 
@@ -27,9 +27,9 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { makeCfg, DUST_HOME, CONF_FILE } from './config.mjs';
-import { claim, markTranscribed, markFailed, markMediaDeleted, cleanable, db } from './ledger.mjs';
-import { createStage, freeGB, EXIT } from './stage.mjs';
+import { makeCfg, DUST_HOME, CONF_FILE } from './scripts/config.mjs';
+import { claim, markTranscribed, markFailed, markMediaDeleted, cleanable, db } from './scripts/ledger.mjs';
+import { createStage, freeGB, EXIT } from './scripts/stage.mjs';
 
 const argv = process.argv.slice(2);
 const has = f => argv.includes(f);

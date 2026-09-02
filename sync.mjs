@@ -257,7 +257,7 @@ if (LIST) {
       const st = stats('douyin');
       const pending = (st.byStatus || []).find(r => r.status === 'downloaded');
       if (pending && pending.n) {
-        log(`\n第二段待转写 ${pending.n} 条 → node ${join(SCRIPTS, 'extract.mjs')}`);
+        log(`\n第二段待转写 ${pending.n} 条 → node ${join(__dirname, 'extract.mjs')}`);
       }
     } catch {}
   }

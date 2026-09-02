@@ -89,7 +89,7 @@ function main() {
   if (!existsSync(wordsPath)) {
     console.error(`没有时间戳: ${wordsPath}`);
     console.error('这条多半是用 qwen3-asr-flash 转的（那个模型不返回时间戳）。');
-    console.error(`要补的话: node scripts/ledger.mjs requeue ${id} && node scripts/extract.mjs --id ${id}`);
+    console.error(`要补的话: node scripts/ledger.mjs requeue ${id} && node extract.mjs --id ${id}`);
     process.exit(1);
   }
   const rows = timeline(text, JSON.parse(readFileSync(wordsPath, 'utf8')));
