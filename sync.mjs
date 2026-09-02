@@ -36,7 +36,7 @@ import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
-import { importScan, importDownload, reconcile, stats } from './scripts/ledger.mjs';
+import { importScan, importDownload, reconcile, stats, pendingAmong } from './scripts/ledger.mjs';
 import { createStage, freeGB, EXIT } from './scripts/stage.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -150,6 +150,7 @@ if (LIST) {
   stage.acquireLock();
 
   const collFile = join(runDir, 'coll.json');
+  const todoFile = join(runDir, 'todo.json');
   const resultFile = join(runDir, 'result.json');
 
   log(`dustoff ${RESUME ? '重试下载' : MODE_INIT ? '首次初始化' : '日常增量'}　run=${runId}`);
@@ -214,22 +215,45 @@ if (LIST) {
     }
   }
 
-  // ② 下载
-  const dlArgs = [collFile, String(CONCURRENCY)];
-  const env = { ...process.env, DUST_MEDIA: MEDIA, DUST_MAX_DURATION_MIN: String(MAX_DUR_MIN) };
-  if (DRY_RUN) env.DUST_DRY_RUN = '1';
-  log(`下载${DRY_RUN ? '（DRY RUN）' : ''}，并发 ${CONCURRENCY} ...`);
-  const dl = await new Promise(res => {
-    const p = spawn('node', [join(SCRIPTS, 'download.mjs'), ...dlArgs], { stdio: ['ignore', 'pipe', 'pipe'], env });
-    let out = '';
-    p.stdout.on('data', d => out += d);
-    p.stderr.on('data', d => String(d).split('\n').filter(Boolean).forEach(l => log('   ' + l.replace(/^>>\s*/, ''))));
-    p.on('close', code => { if (out.trim()) { try { writeFileSync(resultFile, out); } catch {} } res({ code, out }); });
-  });
-  if (dl.code !== 0) die(1, `下载失败（退出码 ${dl.code}）`);
+  // ② 按账本筛出真正要下的，写成 todo.json
+  //
+  // 为什么要这一步：download.mjs 只会问磁盘「文件在不在」，而磁盘的「不在」
+  // 是个歧义答案——分不清「从没下过」和「转写完被正常清理了」。后者如果重下，
+  // 会形成一个循环：下载 → 转写 → 保留期到了删掉 → 但它还在扫描窗口里 → 再下回来。
+  // 扫描窗口（200 条 ≈ 13 天）比保留期（7 天）长，所以每一条都会中招。
+  //
+  // 账本能分清，所以由它来筛。筛完 download.mjs 就只管「给我什么下什么」，
+  // 不需要认识账本，也不需要改一行代码。
+  //
+  // 只放行 status='pending'，没有例外。文件不在就是不在，不追究原因——
+  // 用户手工删掉的东西，工具不该自作主张下回来。
+  const items = coll.items || [];
+  // --dry-run 不写账本，所以预演时把「账本还没见过的」也算进来——
+  // 真跑时 importScan 会把它们记成 pending，效果一样。
+  const keep = pendingAmong(items.map(i => i.aweme_id), { includeUnknown: DRY_RUN });
+  const todo = { ...coll, items: items.filter(i => keep.has(i.aweme_id)), count: keep.size };
+  writeFileSync(todoFile, JSON.stringify(todo));
+  log(`账本筛选：${keep.size} 条待下载，剔除 ${items.length - keep.size} 条（已处理 / 已跳过 / 已放弃）`);
 
+  // ③ 下载
   let result = {};
-  try { result = JSON.parse(dl.out); } catch {}
+  if (keep.size) {
+    const env = { ...process.env, DUST_MEDIA: MEDIA, DUST_MAX_DURATION_MIN: String(MAX_DUR_MIN) };
+    if (DRY_RUN) env.DUST_DRY_RUN = '1';
+    log(`下载${DRY_RUN ? '（DRY RUN）' : ''}，并发 ${CONCURRENCY} ...`);
+    const dl = await new Promise(res => {
+      const p = spawn('node', [join(SCRIPTS, 'download.mjs'), todoFile, String(CONCURRENCY)],
+        { stdio: ['ignore', 'pipe', 'pipe'], env });
+      let out = '';
+      p.stdout.on('data', d => out += d);
+      p.stderr.on('data', d => String(d).split('\n').filter(Boolean).forEach(l => log('   ' + l.replace(/^>>\s*/, ''))));
+      p.on('close', code => { if (out.trim()) { try { writeFileSync(resultFile, out); } catch {} } res({ code, out }); });
+    });
+    if (dl.code !== 0) die(1, `下载失败（退出码 ${dl.code}）`);
+    try { result = JSON.parse(dl.out); } catch {}
+  } else {
+    log('没有需要下载的，跳过下载');
+  }
   const sum = result.summary || {};
 
   if (!DRY_RUN && result.results) {
@@ -237,7 +261,7 @@ if (LIST) {
     log(`账本：更新 ${imp.touched} 条${imp.bumped ? `，${imp.bumped} 条计入失败重试` : ''}`);
   }
 
-  // ③ 收尾：磁盘告警 + 清理超期运行记录
+  // ④ 收尾：磁盘告警 + 清理超期运行记录
   const after = freeGB(MEDIA);
   if (after !== null && after < MIN_FREE_GB) {
     log(`⚠️ 目标盘仅剩 ${after.toFixed(1)} GB，低于阈值 ${MIN_FREE_GB} GB`);

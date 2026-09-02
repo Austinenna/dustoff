@@ -405,6 +405,37 @@ export function cleanable(platform = 'douyin', { keepDays = 7, limit = 1000 } = 
 }
 
 /** 某个 id 是否已知——扫描层增量判断「撞到已知就停」用。 */
+/**
+ * 在给定的 id 里，挑出账本认为「还该下载」的那些。
+ *
+ * 为什么需要它：download.mjs 只会问磁盘「文件在不在」，而磁盘的「不在」
+ * 是个歧义答案——分不清「从没下过」和「转写完被清理了」。后者如果重下，
+ * 会形成一个循环：下载 → 转写 → 保留期到了删掉 → 又在扫描窗口里 → 再下回来。
+ * 扫描窗口（200 条 ≈ 13 天）比保留期（7 天）长，所以每条都会中招。
+ *
+ * 账本能分清，所以由它来筛，筛完再交给下载器。
+ */
+export function pendingAmong(ids, { platform = 'douyin', includeUnknown = false } = {}) {
+  if (!ids.length) return new Set();
+  const d = db();
+  const out = new Set();
+  const seen = new Set();
+  // SQLite 有参数个数上限，分批查
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const ph = chunk.map(() => '?').join(',');
+    const q = d.prepare(`SELECT id, status FROM items WHERE platform = ? AND id IN (${ph})`);
+    for (const r of q.all(platform, ...chunk)) {
+      seen.add(r.id);
+      if (r.status === STATUS.PENDING) out.add(r.id);
+    }
+  }
+  // --dry-run 用：账本还没写入，但 importScan 之后这些会变成 pending。
+  // 不带这个的话预览会把新条目全剔掉，报出一个假的「无事可做」。
+  if (includeUnknown) for (const id of ids) if (!seen.has(id)) out.add(id);
+  return out;
+}
+
 export function knownIds(platform = 'douyin') {
   return new Set(db().prepare('SELECT id FROM items WHERE platform = ?').all(platform).map(r => r.id));
 }

@@ -427,7 +427,10 @@ async function main() {
       } catch (e) {
         stat.fail++;
         failures.push({ id: item.id, title: item.title, error: e.message });
-        const res = markFailed(item.id, e.message, 'douyin', MAX_ATTEMPTS);
+        // 永久性错误（文件不在、音频超长、参数错）重试没有意义，一次就放弃。
+        // 尤其是「媒体文件不存在」——那多半是用户自己删的，撞三次只是噪音。
+        const res = markFailed(item.id, e.message, 'douyin',
+          e instanceof PermanentError ? 1 : MAX_ATTEMPTS);
         log(`  ✗ ${label} — ${e.message}${res.gaveUp ? '（已放弃）' : `（第 ${res.attempts} 次）`}`);
         if (++consecutiveFails >= MAX_CONSECUTIVE_FAILS) {
           aborted = true;
