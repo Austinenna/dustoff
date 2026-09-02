@@ -194,3 +194,46 @@ DUST_MEDIA_KEEP_DAYS=7
 
 # 极速版的模型标识，固定值，一般不用改
 DUST_VOLC_RESOURCE_ID=volc.bigasr.auc_turbo
+
+# ─────────────────────────────────────────────────────────────
+# 第三段：提炼笔记用的大模型（智谱 GLM）
+# ─────────────────────────────────────────────────────────────
+#
+# 协议是 OpenAI 兼容的 Chat Completions，所以不需要装任何 SDK——
+# 跟第二段调 DashScope 一样裸 fetch 就行，项目继续保持零依赖。
+#
+# 怎么拿 key：智谱开放平台 bigmodel.cn → 控制台 → API Keys。
+
+DUST_LLM_KEY=
+DUST_LLM_BASE=https://open.bigmodel.cn/api/paas/v4/chat/completions
+
+# 默认模型。glm-5.3-flash 是「强制思考」模型：
+#   · 不能关思考——传 thinking:{type:'disabled'} 会被拒
+#   · effort 只接受 low / high / max，传 medium 直接 400（错误码 1210）
+#   · 支持 tool call，也支持看图——将来做 OCR 增强时，
+#     同一个模型就能读关键帧，不必再引一个 OCR 引擎
+DUST_LLM_MODEL=glm-5.3-flash
+DUST_LLM_EFFORT=high
+
+# ── 调它的三个坑（都是实测出来的，别踩）────────────────────
+#
+# ① effort 的参数名是 `reasoning_effort`（OpenAI 那套），不是 `thinking.effort`。
+#    传 thinking:{type:'enabled', effort:'low'} **不报错，但 effort 被无视**——
+#    实测同一个输入这样传烧了 659 个思考 token，而 reasoning_effort:'low' 是 0 个。
+#    这是最坑的一个：它静默失败。
+#
+# ② 不传 effort 比传 high 贵得多。同一个 157 token 的输入实测：
+#       不传 effort            出 412 token（思考 361）  11.1s
+#       reasoning_effort=low   出  45 token（思考   0）   2.2s
+#       reasoning_effort=high  出  71 token（思考  11）   3.6s
+#    所以必须显式传。
+#
+# ③ 思考 token 计入 completion_tokens，也就计入 max_tokens。
+#    第一次测试给 max_tokens=800，模型拿 798 个去思考，正文一个字没剩下，
+#    content 直接是空字符串——HTTP 200，不报错。max_tokens 要给够。
+#
+# response_format:{type:'json_object'} 可用，四次测试都能 JSON.parse。
+
+# 并发和连续失败上限，语义同 DUST_ASR_*
+DUST_LLM_CONCURRENCY=2
+DUST_LLM_MAX_FAILS=5
