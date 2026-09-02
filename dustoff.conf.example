@@ -224,14 +224,19 @@ DUST_LLM_EFFORT=high
 #    实测同一个输入这样传烧了 659 个思考 token，而 reasoning_effort:'low' 是 0 个。
 #    这是最坑的一个：它静默失败。
 #
-# ② 不传 effort 比传 high 贵一个数量级。真稿 1010 字，每档跑 4 次，
-#    数字是 reasoning_tokens：
-#       不传 effort              [ 301 1578  403  703]   均 746
-#       reasoning_effort=high    [   0    5  144  104]   均  63
-#       reasoning_effort=low     [   0    0    0    0]   均   0
-#    注意 high 和不传的**波动都极大**（不传最高 1578，最低 301），
-#    只跑一次得出的结论不可信；low 是唯一稳定的一档。
-#    思考 token 按输出计费，所以这一项直接决定第三段的账单。
+# ② 不传 effort 走的是 max，不是 high。真稿 1010 字，每档跑 4 次，
+#    数字是 reasoning_tokens（思考 token 按输出计费）：
+#       不传 effort              [ 2281  1121   634   126]   均 1041
+#       reasoning_effort=max     [ 1320  1327  2529   529]   均 1426
+#       reasoning_effort=high    [    7    94     5     5]   均   28
+#       reasoning_effort=low     [    0     0     0     0]   均    0
+#
+#    两件事：
+#    · 「不传」和 max 是同一个量级，跟 high 差约 40 倍。所以**必须显式传**——
+#      漏掉是静默的，HTTP 200、结果照样对，只有账单悄悄变厚。
+#    · 三档不是均匀的：low 和 high 几乎没差别（0 vs 28），
+#      high 到 max 是 ~50 倍的断崖。high 不是中间档，它离 low 更近。
+#      所以没必要为省钱去用 low——真正要躲的是漏传参数。
 #
 # ③ 思考 token 计入 completion_tokens，也就计入 max_tokens。
 #    第一次测试给 max_tokens=800，模型拿 798 个去思考，正文一个字没剩下，
