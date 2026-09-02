@@ -84,7 +84,12 @@ CREATE TABLE IF NOT EXISTS items (
   media_type    TEXT,               -- video / gallery
 
   -- ── 采集状态 ─────────────────────────────────────
-  first_seen    INTEGER NOT NULL,   -- 首次扫到的时间 ≈ 收藏时间
+  collected_at  INTEGER,            -- 真·收藏时刻。来源是 listcollection 顶层的 cursor
+                                    -- （微秒级时间戳 = 该页最后一条的收藏时刻），
+                                    -- 页内按位次插值，误差约 ±1.7 小时。
+                                    -- 逐条对象里没有这个东西，见 get_collection.assignCollectedAt
+  first_seen    INTEGER NOT NULL,   -- 首次扫到的时间。**不是收藏时间**——存量补录时
+                                    -- 几千条会共用同一天，真收藏时刻看 collected_at
   last_seen     INTEGER NOT NULL,   -- 最后一次在收藏夹里见到 → 据此发现取消收藏
   status        TEXT NOT NULL,      -- 见 STATUS
   skip_reason   TEXT,               -- gallery / too_long / no_url / need_ocr
@@ -178,13 +183,16 @@ export function importScan(items, platform = 'douyin') {
   const d = db(), t = now();
   const ins = d.prepare(`
     INSERT INTO items (id, platform, title, author, created_at, duration_s, media_type,
-                       first_seen, last_seen, status, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                       collected_at, first_seen, last_seen, status, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(platform, id) DO UPDATE SET
       last_seen  = excluded.last_seen,
       title      = COALESCE(excluded.title, items.title),
       author     = COALESCE(excluded.author, items.author),
       duration_s = COALESCE(excluded.duration_s, items.duration_s),
+      -- 只认第一次算出来的值：页边界每次扫描落点不同，插值结果会有一两小时的抖动，
+      -- 每天覆盖一遍等于让收藏时刻天天变，文件名也就跟着变
+      collected_at = COALESCE(items.collected_at, excluded.collected_at),
       updated_at = excluded.updated_at
   `);
   const countBefore = d.prepare('SELECT COUNT(*) n FROM items WHERE platform = ?').get(platform).n;
@@ -194,7 +202,7 @@ export function importScan(items, platform = 'douyin') {
       ins.run(it.aweme_id, platform, it.desc || null, it.author || null,
         it.create_time || null, it.duration_s || null,
         it.is_gallery ? 'gallery' : 'video',
-        t, t, STATUS.PENDING, t);
+        it.collected_at || null, t, t, STATUS.PENDING, t);
     }
     d.exec('COMMIT');
   } catch (e) { d.exec('ROLLBACK'); throw e; }

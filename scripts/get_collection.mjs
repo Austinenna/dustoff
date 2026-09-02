@@ -81,6 +81,73 @@ function cdp(ws) {
   return { send, on: fn => listeners.push(fn) };
 }
 
+/**
+ * 还原每条的收藏时刻。
+ *
+ * 抖音的 aweme 对象里**没有**收藏时间——132 个字段全查过，只有 create_time（发布）、
+ * mix_info.*（合集）、play_progress.last_modified_time（我看到哪儿了）。
+ * 唯一的来源是 listcollection 响应顶层的 `cursor`：微秒级 unix 时间戳，
+ * 等于**这一页最后一条的收藏时刻**，逐页严格递减。
+ *
+ * 实测验证：账本里「昨天扫描之后才新增」的 8 条，全部落在第 1 页，一条不落。
+ *
+ * ## 精度：只有页边界是准的
+ *
+ * 每页最后一条精确到秒；页内其余按位次线性插值——但**插值假设页内均匀分布，
+ * 而真实收藏是成簇的**（一次刷十分钟连收五条，然后隔一天）。实测 40 条里
+ * 有 4 条（10%）被插值推到了发布时间之前，最多早 8.7 小时，说明误差可以很大。
+ *
+ * 真正的保证只有一条：**每条落在它所属那一页的区间内**。抖音一页 10 条，
+ * 页跨度实测 9~34 小时；收藏稀疏的年份会更宽。所以这是个「大致哪天」的估计，
+ * 不是精确时刻——对文件名的日期前缀够用，别拿它做别的推断。
+ *
+ * 用三个约束把估计值收紧：
+ *   ① 收藏不可能早于发布 → 下限 create_time
+ *   ② 收藏不可能晚于本页上界 → 上限 upper
+ *   ③ 列表顺序就是收藏顺序 → 某条的下限对它上面所有条目同样成立，
+ *      所以从页尾往页首走，把下限一路顶上去。这不只是为了单调好看：
+ *      一条「8-25 发布、被顶到 8-25」的条目，等于告诉你它上面那些
+ *      至少也是 8-25 之后收藏的——是白捡的信息
+ *
+ * @returns {{dated:number, clamped:number}} 赋值条数 / 被 create_time 抬上来的条数
+ */
+function assignCollectedAt(items, pages, fetchedAt) {
+  const US = 1e6;
+  const born = new Map(items.map(i => [i.aweme_id, i.create_time || 0]));
+  const ok = pages
+    // has_more=0 的最后一页 cursor 可能是 0 或垃圾值，按合理区间挡掉
+    .filter(p => Number.isFinite(p.cursor) && p.cursor / US > 1.4e9 && p.cursor / US < 2e9 && p.ids.length)
+    // 响应体是异步读的，到达顺序不保证；按 cursor 倒序才是真实页序
+    .sort((a, b) => b.cursor - a.cursor);
+
+  const when = new Map();
+  let clamped = 0;
+  let upperUs = fetchedAt * US;        // 第一页的上界就是本次扫描时刻
+  for (const pg of ok) {
+    const lowerUs = pg.cursor, k = pg.ids.length;
+    const upper = Math.round(upperUs / US), lower = Math.round(lowerUs / US);
+    // 页尾 → 页首。ids[0] 是最新收藏的，所以倒着走才是时间递增的方向
+    let floor = lower;
+    for (let j = k - 1; j >= 0; j--) {
+      const id = pg.ids[j];
+      // 第 j+1 条（从 1 数）；最后一条正好落在 lower 上，即精确值
+      const interp = Math.round((upperUs - (upperUs - lowerUs) * (j + 1) / k) / US);
+      floor = Math.max(floor, born.get(id) || 0);
+      if (floor > interp) clamped++;
+      floor = Math.min(Math.max(interp, floor), upper);
+      if (!when.has(id)) when.set(id, floor);
+    }
+    upperUs = lowerUs;
+  }
+
+  let dated = 0;
+  for (const it of items) {
+    const t = when.get(it.aweme_id);
+    if (t) { it.collected_at = t; dated++; } else { it.collected_at = null; }
+  }
+  return { dated, clamped };
+}
+
 (async () => {
   const ws = new WebSocket(await getWsUrl());
   await new Promise((res, rej) => { ws.addEventListener('open', res); ws.addEventListener('error', rej); });
@@ -119,6 +186,7 @@ function cdp(ws) {
   // 收集 listcollection 响应。注意必须在 loadingFinished 时立刻读 body，
   // 否则请求一多，Chrome 会把早期响应体从缓冲区淘汰掉，最后统一读会大面积失败。
   const items = [];
+  const pages = [];        // 每页的 { cursor, ids }，用来还原收藏时间，见 assignCollectedAt
   const seen = new Set();
   const tracked = new Set();
   let sawNoMore = false;
@@ -133,6 +201,9 @@ function cdp(ws) {
       send('Network.getResponseBody', { requestId: m.params.requestId }, sessionId)
         .then(r => {
           const j = JSON.parse(r.body);
+          // cursor 是这一页最后一条的收藏时刻（微秒）。逐条对象里没有收藏时间，
+          // 只有这里有——丢掉就再也拿不回来了。
+          pages.push({ cursor: j.cursor, ids: (j.aweme_list || []).map(a => a.aweme_id) });
           if (j.has_more === 0) sawNoMore = true;
           for (const a of (j.aweme_list || [])) {
             if (!a.aweme_id || seen.has(a.aweme_id)) continue;
@@ -198,6 +269,11 @@ function cdp(ws) {
   for (let i = 0; i < 20 && pending > 0; i++) await sleep(200);
   console.error(`   滚动结束，共 ${items.length} 条（has_more=0 ${sawNoMore ? '已出现' : '未出现'}）`);
 
+  const fetchedAt = Math.floor(Date.now() / 1000);
+  const ca = assignCollectedAt(items, pages, fetchedAt);
+  console.error(`   收藏时刻：${ca.dated}/${items.length} 条已还原（${pages.length} 页游标，` +
+    `${ca.clamped} 条被发布时间抬正）`);
+
   const out = items.slice(0, LIMIT);
   const vids = out.filter(i => !i.is_gallery);
   const withUrls = vids.filter(i => i.play_urls.length);
@@ -205,7 +281,7 @@ function cdp(ws) {
   emit({
     ok: true, logged_in: true, count: out.length,
     truncated: items.length > LIMIT || !sawNoMore,   // 还有更多没取
-    fetched_at: Math.floor(Date.now() / 1000),       // 下载端据此判断地址是否还新鲜
+    fetched_at: fetchedAt,                           // 下载端据此判断地址是否还新鲜
     session: { level: guard.level, days_left: guard.days_left },
     items: out,
   }, 0, () => { ws.close(); cleanup(); });
