@@ -119,9 +119,15 @@ DUST_MIN_FREE_GB=5
 # DUST_DASHSCOPE_KEY=sk-xxxxxxxx
 
 # ASR 模型。选型依据见 docs/ASR选型-2026-09-02.md。
+#
+# 脚本内置了两族同步模型的适配，改这一行即可切换：
+#   qwen-audio-3.0-asr-flash   默认。2026-07 发布，附带逐词时间戳
+#   qwen3-asr-flash            上一代，2025-09。无时间戳
+# 两者同价（¥0.00022/秒，华北2），同为 300 秒上限。
+#
 # 换成 fun-asr / paraformer-v2 不能直接改这里——它们走的是异步端点，
-# 接口形态完全不同（提交 → 轮询 + 文件上传），脚本目前只实现了同步那套。
-DUST_ASR_MODEL=qwen3-asr-flash
+# 接口形态完全不同（提交 → 轮询 + 文件上传），脚本没实现那套。
+DUST_ASR_MODEL=qwen-audio-3.0-asr-flash
 
 # 识别语种。zh / en / ja / ko 等，也可留空让模型自己判断。
 DUST_ASR_LANG=zh
@@ -146,4 +152,5 @@ DUST_ASR_MAX_FAILS=5
 DUST_MAX_ATTEMPTS=3
 
 # 转写稿落盘位置。刻意不放 media 目录下——mp4 会被清理，文字稿要活得更久。
+# 每条产出 <id>.txt（纯文本）；模型给了时间戳的还会有 <id>.words.json。
 DUST_TEXT=~/.dustoff/text

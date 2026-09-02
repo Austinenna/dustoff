@@ -35,7 +35,7 @@ const LIMIT   = Number(valOf('--limit') || 0);
 
 const cfg = makeCfg();
 const API_KEY     = cfg('DUST_DASHSCOPE_KEY', '');
-const MODEL       = cfg('DUST_ASR_MODEL', 'qwen3-asr-flash');
+const MODEL       = cfg('DUST_ASR_MODEL', 'qwen-audio-3.0-asr-flash');
 const LANG        = cfg('DUST_ASR_LANG', 'zh');
 const CONCURRENCY = Number(cfg('DUST_ASR_CONCURRENCY', 2));
 const MAX_ATTEMPTS = Number(cfg('DUST_MAX_ATTEMPTS', 3));
@@ -129,6 +129,36 @@ function sliceAudio(src, out, start, end) {
 
 const ENDPOINT = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
 
+// 同一个端点上的两族模型，请求和返回的形状都不一样。
+// 隔在这里，换模型就只是改配置——paraformer 那次的教训是模型会过时，
+// 下次再出新的不该动业务代码。
+//
+// 两族都走同步端点、都是 300 秒上限、热词都放 system 里，差别只有：
+const DIALECTS = [
+  {
+    // qwen-audio-3.0 系（当前默认）。比 qwen3-asr 新一代，同价，
+    // 且额外返回逐词时间戳——笔记里能标「这句在第几秒」。
+    match: m => m.startsWith('qwen-audio-'),
+    extraParams: { format: 'mp3' },          // 不传这个直接 UNSUPPORTED_FORMAT
+    text: j => j.output?.text ?? '',
+    seconds: j => j.usage?.duration ?? 0,
+    words: j => {
+      const s = j.output?.sentence;
+      return (Array.isArray(s) ? s : [s]).flatMap(x => x?.words || []);
+    },
+  },
+  {
+    // qwen3-asr 系。没有时长戳，usage 字段名也不同。
+    match: m => m.startsWith('qwen3-asr'),
+    extraParams: {},
+    text: j => j.output?.choices?.[0]?.message?.content?.[0]?.text ?? '',
+    seconds: j => j.usage?.seconds ?? 0,
+    words: () => [],
+  },
+];
+
+const dialect = DIALECTS.find(d => d.match(MODEL)) || DIALECTS[0];
+
 class PermanentError extends Error {}
 
 /** 转写一个切片。返回 { text, seconds }。 */
@@ -145,22 +175,34 @@ async function asrOnce(file) {
           { role: 'user', content: [{ audio: `data:audio/mp3;base64,${b64}` }] },
         ],
       },
-      parameters: { asr_options: { language: LANG, enable_itn: true } },
+      parameters: { ...dialect.extraParams, asr_options: { language: LANG, enable_itn: true } },
     }),
   });
 
   const body = await res.json().catch(() => ({}));
 
+  // 「没识别到任何词」不是失败，是一个有效结论：这条没人声。
+  // qwen3-asr 遇到这种情况返回 200 + 空文本，qwen-audio-3.0 却报 400。
+  // 当成错误处理会有三个后果：白重试三次、状态错标成 failed，
+  // 而且这类纯画面视频正是 OCR 增强要挑的目标（见 docs/待办-OCR增强.md），
+  // 标成 failed 就再也进不了候选名单。
+  if (res.status === 400 && /HAVE_NO_WORDS/i.test(`${body.code || ''} ${body.message || ''}`)) {
+    return { text: '', seconds: 0, words: [] };
+  }
+
   if (!res.ok) {
     const msg = `HTTP ${res.status} ${body.code || ''} ${body.message || ''}`.trim();
-    // 4xx 是请求本身的问题（参数错、音频超长、key 无效），重试无意义；
+    // 其余 4xx 是请求本身的问题（参数错、音频超长、key 无效），重试无意义；
     // 429 例外——那是限流，等一等就好。
     if (res.status >= 400 && res.status < 500 && res.status !== 429) throw new PermanentError(msg);
     throw new Error(msg);
   }
 
-  const text = body.output?.choices?.[0]?.message?.content?.[0]?.text ?? '';
-  return { text: String(text).trim(), seconds: body.usage?.seconds ?? 0 };
+  return {
+    text: String(dialect.text(body) ?? '').trim(),
+    seconds: dialect.seconds(body) || 0,
+    words: dialect.words(body) || [],
+  };
 }
 
 /** 带退避重试。限流和 5xx 值得再试，参数错不值得。 */
@@ -194,6 +236,7 @@ async function transcribeOne(item, tmpRoot) {
     const chunks = planChunks(dur, dur > CHUNK_MAX ? silenceMidpoints(audio) : []);
 
     const parts = [];
+    const words = [];
     let seconds = 0;
     for (const [i, [s, e]] of chunks.entries()) {
       let piece = audio;
@@ -203,15 +246,26 @@ async function transcribeOne(item, tmpRoot) {
       }
       const r = await asr(piece);
       if (r.text) parts.push(r.text);
+      // 切片的时间戳是相对片内的，得加回片头偏移，否则第二段会从 0 重新开始
+      const off = Math.round(s * 1000);
+      for (const w of r.words) {
+        words.push({ t: (w.begin_time ?? 0) + off, e: (w.end_time ?? 0) + off, w: w.text || '' });
+      }
       seconds += r.seconds || (e - s);
     }
 
     const text = parts.join('\n');
     mkdirSync(TEXT_DIR, { recursive: true });
     const textPath = join(TEXT_DIR, `${item.id}.txt`);
+    // 转写稿保持纯文本：text_chars 才是诚实的字数，下游读它也不用剥格式
     writeFileSync(textPath, text, 'utf8');
+    // 时间戳单独放边车文件。有了它，笔记里的每句话都能回指原片的秒数
+    if (words.length) {
+      writeFileSync(join(TEXT_DIR, `${item.id}.words.json`), JSON.stringify(words), 'utf8');
+    }
 
-    return { text, textPath, chars: text.length, chunks: chunks.length, seconds: Math.round(seconds) };
+    return { text, textPath, chars: text.length, chunks: chunks.length,
+             seconds: Math.round(seconds), words: words.length };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -238,6 +292,7 @@ async function main() {
 
   if (!items.length) { log('没有待转写的条目。'); return; }
 
+  log(`模型 ${MODEL}`);
   if (CONTEXT) log(`热词 ${CONTEXT.length} 字${existsSync(CTX_FILE) ? `（${CTX_FILE}）` : ''}`);
   else log('未配置热词——专名容易认错，建议写 ' + CTX_FILE);
 
@@ -280,7 +335,8 @@ async function main() {
         stat.ok++; stat.chars += r.chars; stat.seconds += r.seconds; stat.reqs += r.chunks;
         if (!r.chars) stat.empty++;
         const tag = r.chars ? `${r.chars} 字` : '0 字（纯画面？）';
-        log(`  ✓ ${label} — ${tag}，${r.chunks} 次请求，${((Date.now() - t0) / 1000).toFixed(1)}s`);
+        const wtag = r.words ? `，${r.words} 词时间戳` : '';
+        log(`  ✓ ${label} — ${tag}${wtag}，${r.chunks} 次请求，${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         stat.fail++;
         const res = markFailed(item.id, e.message, 'douyin', MAX_ATTEMPTS);

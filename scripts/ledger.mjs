@@ -342,8 +342,12 @@ export function stats(platform = null) {
     bySkip: d.prepare(`SELECT skip_reason, COUNT(*) n FROM items ${where || 'WHERE 1=1'} AND skip_reason IS NOT NULL GROUP BY skip_reason`).all(...args),
     byPlatform: d.prepare('SELECT platform, COUNT(*) n FROM items GROUP BY platform').all(),
     media: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND media_deleted = 0 AND media_bytes IS NOT NULL`).get(...args),
-    audio: d.prepare(`SELECT COALESCE(SUM(has_audio=1),0) y, COALESCE(SUM(has_audio=0),0) n, COALESCE(SUM(has_audio IS NULL),0) u FROM items ${where || 'WHERE 1=1'} AND status='downloaded'`).get(...args),
+    audio: d.prepare(`SELECT COALESCE(SUM(has_audio=1),0) y, COALESCE(SUM(has_audio=0),0) n, COALESCE(SUM(has_audio IS NULL),0) u FROM items ${where || 'WHERE 1=1'} AND status IN ('downloaded','transcribed','extracted')`).get(...args),
     reclaimable: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND status='extracted' AND media_deleted=0`).get(...args),
+    // 累计送进 ASR 的音频秒数——这是计费单位，乘以单价就是花了多少
+    text: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(text_chars),0) chars, COALESCE(SUM(audio_seconds),0) secs,
+                            COALESCE(SUM(text_chars=0),0) empty
+                     FROM items ${where || 'WHERE 1=1'} AND text_source IS NOT NULL`).get(...args),
   };
 }
 
@@ -372,6 +376,15 @@ if (isMain) {
       (s.audio.n ? `   ⚠️ 无音轨的做不了 ASR，跑 requeue-silent 重下` : ''));
     console.log(`  素材占用 ${fmtMB(s.media.bytes)}（${s.media.n} 条未清理）`);
     console.log(`  可回收   ${fmtMB(s.reclaimable.bytes)}（${s.reclaimable.n} 条已提取但 mp4 还在）`);
+    if (s.text.n) {
+      const secs = s.text.secs;
+      const hh = Math.floor(secs / 3600), mm = Math.round((secs % 3600) / 60);
+      console.log(`\n  已转写 ${s.text.n} 条 · ${s.text.chars.toLocaleString()} 字` +
+        (s.text.empty ? ` · ${s.text.empty} 条空（纯画面）` : ''));
+      // 秒数是计费单位。不在这里换算成钱：单价随模型和地域变，
+      // 写死一个数迟早会过期，反而误导。
+      console.log(`  计费音频 ${hh ? hh + ' 小时 ' : ''}${mm} 分（${secs.toLocaleString()} 秒）`);
+    }
   } else if (cmd === 'list') {
     const rows = claim(a1 || 'pending', Number(a2) || 20, 'douyin', 99);
     console.log(`${a1 || 'pending'} 状态共列出 ${rows.length} 条:\n`);

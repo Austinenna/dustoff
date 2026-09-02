@@ -152,6 +152,11 @@ node scripts/get_collection.mjs 200 | node scripts/download.mjs - 3
 | `DUST_MAX_DURATION_MIN` | `10` | 超过多少分钟不下载，`0` 不限 |
 | `DUST_REQUIRE_AUDIO` | 开 | 设 `0` 允许下无音轨的档（只要画面时用） |
 | `DUST_DASHSCOPE_KEY` | — | 阿里百炼 API Key，ASR 与提炼用 |
+| `DUST_ASR_MODEL` | `qwen-audio-3.0-asr-flash` | 转写模型，另支持 `qwen3-asr-flash` |
+| `DUST_ASR_CONTEXT_FILE` | `~/.dustoff/asr-context.txt` | 领域热词，专名认对率的关键 |
+| `DUST_ASR_CONCURRENCY` | `2` | 转写并发 |
+| `DUST_ASR_MAX_FAILS` | `5` | 连续失败几条就中止整轮（止损闸） |
+| `DUST_TEXT` | `~/.dustoff/text` | 转写稿落盘位置 |
 | `DUST_DRY_RUN` | — | 设 `1` 只报计划不下载 |
 | `DUST_MAX_ROUNDS` | `400` | 滚动轮数上限（安全阀） |
 | `DUST_STALL` | `4` | 连续几轮无新条目就收工 |
@@ -195,9 +200,15 @@ node scripts/get_collection.mjs 200 | node scripts/download.mjs - 3
 
 后半段还没开工，但选型已经用实测数据定下来了，不必重新论证。
 
-**转文字用云端 ASR，不用本地 whisper。** 同一条视频、真值取自画面硬字幕，`qwen3-asr-flash` 错 1/8，本地 `whisper base` **错 8/8**（Claude Code→Cloud Code、图表→图标、时序图→实序图、重绘→重惠…）。ASR 按时长计费而非按调用次数，一条 3.5 分钟视频约 0.017 元。**whisper 已淘汰**，不留作兜底。
+**转文字用云端 ASR，不用本地 whisper。** 同一条视频、真值取自画面硬字幕，云端 ASR 错 1/8，本地 `whisper base` **错 8/8**（Claude Code→Cloud Code、图表→图标、时序图→实序图、重绘→重惠…）。**whisper 已淘汰**，不留作兜底。
 
-阿里百炼的 `paraformer` 系列是上一代，官方建议迁移到 `qwen3-asr` 或 `fun-asr`。调用走 `multimodal-generation` 端点，音频可 base64 内联。
+**模型是 `qwen-audio-3.0-asr-flash`**，走同步 `multimodal-generation` 端点，音频 base64 内联。同价的 `qwen3-asr-flash` 也支持，改 `DUST_ASR_MODEL` 即可切换——两族的请求与返回差异隔在 `extract.mjs` 的 `DIALECTS` 里。选型全过程见 [`docs/ASR选型-2026-09-02.md`](docs/ASR选型-2026-09-02.md)。
+
+**热词不只提准确率，也管输出格式。** `~/.dustoff/asr-context.txt` 里的词会被优先识别：不给热词认成 `cloud code`，给了就是 `Claude Code`；且**在表里的缩写输出干净（`SVG`），不在表里的会被拆成字母（`S V G`）**。想到新词随时加。
+
+**单价 ¥0.00022/秒**（华北2，已核实；≈¥0.79/小时）。按收藏夹真实分布算：日常增量 **¥0.28/天 ≈ ¥8.4/月**，存量全量约 **¥109** 一次性。`qwen-audio-3.0` 另有 10 小时免费额度（到 2026/10/27），够用 28 天日常增量。
+
+**300 秒是硬上限**，超了自动按静音中点切片（占 9%，实测接缝不劈词）。异步端点（`fun-asr`）不限时长但故障面从 1 处涨到 8 处，这段代码跑在凌晨无人值守，不划算。
 
 **OCR 暂缓，但迟早要加回来。** ASR 拿不到屏幕上的文字——实测一条屏幕录制视频，ASR 171 字 vs OCR 9396 字。完整依据与实现方案见 [`docs/待办-OCR增强.md`](docs/待办-OCR增强.md)。
 
