@@ -8,6 +8,9 @@
 // 为什么必须先下 mp4 再转：抖音不提供纯音频流，也没有字幕轨，
 // 拿到声音的唯一途径就是从视频里剥。
 //
+// 它是跟 sync.mjs 平级的独立阶段，不由 sync.mjs 调用——两段只通过账本对话。
+// 手动跑全链路就是依次跑这两条命令；以后两个定时器跑的也是同样这两条。
+//
 // 用法:
 //   node scripts/extract.mjs                 转所有 downloaded 的
 //   node scripts/extract.mjs --limit 5        只转 5 条（先试水用这个）
@@ -15,7 +18,7 @@
 //   node scripts/extract.mjs --dry-run        只列计划和音频总时长，不调 API
 //   node scripts/extract.mjs --force          已转过的也重转
 //
-// 退出码: 0 正常 / 1 出错 / 6 未配置 API key
+// 退出码见 stage.mjs 的约定（0 正常 / 1 出错 / 3 已在跑 / 5 磁盘 / 6 缺配置）。
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync } from 'node:fs';
@@ -23,6 +26,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeCfg, DUST_HOME, CONF_FILE } from './config.mjs';
 import { claim, markTranscribed, markFailed, db } from './ledger.mjs';
+import { createStage, freeGB, EXIT } from './stage.mjs';
 
 const argv = process.argv.slice(2);
 const has = f => argv.includes(f);
@@ -61,7 +65,17 @@ const CHUNK_MIN = 150;
 // 余额耗尽或 key 失效会让每一条都失败，没有这道闸就会把剩下几千条挨个撞一遍。
 const MAX_CONSECUTIVE_FAILS = Number(cfg('DUST_ASR_MAX_FAILS', 5));
 
-const log = (...a) => console.log(...a);
+const NOTIFY   = cfg('DUST_NOTIFY', '1') !== '0';
+const KEEP_RUNS = Number(cfg('DUST_KEEP_RUNS', 30));
+
+// --dry-run 和 --id 是探查/点名跑法，不建运行记录也不抢锁
+const CASUAL = DRY_RUN || !!ONLY_ID;
+const stage = createStage({
+  name: 'extract', dustHome: DUST_HOME,
+  notify: NOTIFY, keepRuns: KEEP_RUNS, record: !CASUAL,
+});
+const { log, die, notify } = stage;
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fmtDur = s => s >= 60 ? `${Math.floor(s / 60)}分${String(Math.round(s % 60)).padStart(2, '0')}秒` : `${Math.round(s)}秒`;
 
@@ -275,15 +289,17 @@ async function transcribeOne(item, tmpRoot) {
 
 async function main() {
   if (!API_KEY && !DRY_RUN) {
-    console.error('未配置 DUST_DASHSCOPE_KEY。');
-    console.error(`把它写进 ${CONF_FILE}：DUST_DASHSCOPE_KEY=sk-xxxx`);
-    process.exit(6);
+    die(EXIT.CONFIG, `未配置 DUST_DASHSCOPE_KEY。写进 ${CONF_FILE}：DUST_DASHSCOPE_KEY=sk-xxxx`);
+  }
+  if (!CASUAL) {
+    stage.acquireLock();
+    log(`dustoff 提取　run=${stage.runId}`);
   }
 
   let items;
   if (ONLY_ID) {
     items = db().prepare('SELECT * FROM items WHERE id = ?').all(ONLY_ID);
-    if (!items.length) { console.error(`账本里没有 ${ONLY_ID}`); process.exit(1); }
+    if (!items.length) die(EXIT.ERROR, `账本里没有 ${ONLY_ID}`);
   } else {
     const status = FORCE ? 'transcribed' : 'downloaded';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
@@ -312,10 +328,16 @@ async function main() {
     return;
   }
 
+  // 剥音频要临时空间。10 分钟的视频压出来约 2.5 MB，并发几条也就十几 MB，
+  // 但盘满时 ffmpeg 会写出个残缺文件然后一路错到 API，不如先拦住。
+  const free = freeGB(tmpdir());
+  if (free !== null && free < 1) die(EXIT.DISK, `临时目录所在盘仅剩 ${free.toFixed(1)} GB`);
+
   const tmpRoot = join(tmpdir(), `dustoff-asr-${process.pid}`);
   mkdirSync(tmpRoot, { recursive: true });
 
   const stat = { ok: 0, empty: 0, fail: 0, chars: 0, seconds: 0, reqs: 0 };
+  const failures = [];
   let consecutiveFails = 0;
   let aborted = false;
   const queue = [...items];
@@ -339,6 +361,7 @@ async function main() {
         log(`  ✓ ${label} — ${tag}${wtag}，${r.chunks} 次请求，${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         stat.fail++;
+        failures.push({ id: item.id, title: item.title, error: e.message });
         const res = markFailed(item.id, e.message, 'douyin', MAX_ATTEMPTS);
         log(`  ✗ ${label} — ${e.message}${res.gaveUp ? '（已放弃）' : `（第 ${res.attempts} 次）`}`);
         if (++consecutiveFails >= MAX_CONSECUTIVE_FAILS) {
@@ -361,7 +384,32 @@ async function main() {
     log(`转写稿 → ${TEXT_DIR}`);
   }
   if (stat.empty) log(`其中 ${stat.empty} 条没转出字——多半是纯画面无人声，见 docs/待办-OCR增强.md`);
-  if (aborted) process.exit(1);
+
+  if (!CASUAL) {
+    // 留下现场：凌晨无人值守时这是唯一能回溯的东西
+    try {
+      // 注意别把 stat 摊平到顶层——stat.ok 是「成功几条」，
+      // 跟「整轮是否正常结束」是两回事，撞名会把后者悄悄覆盖掉。
+      stage.ensureDir();
+      writeFileSync(join(stage.runDir, 'result.json'), JSON.stringify({
+        ok: !aborted, model: MODEL, elapsed_s: Math.round((Date.now() - t0) / 1000),
+        counts: stat, failures,
+      }, null, 2));
+    } catch {}
+    const pruned = stage.pruneRuns();
+    if (pruned) log(`清理了 ${pruned} 份超过 ${KEEP_RUNS} 天的运行记录`);
+    log(`记录 ${stage.runDir}`);
+  }
+
+  // 失败要能被人看见。中止是硬故障，零散失败到一定比例也值得提醒。
+  if (aborted) {
+    notify('dustoff 转写中止', `连续 ${MAX_CONSECUTIVE_FAILS} 条失败，多半是 key 失效或余额不足`);
+    process.exit(EXIT.ERROR);
+  }
+  if (stat.fail && stat.fail >= Math.max(3, (stat.ok + stat.fail) * 0.3)) {
+    log(`⚠️ 失败率 ${(stat.fail / (stat.ok + stat.fail) * 100).toFixed(0)}%，超出正常范围`);
+    notify('dustoff 转写失败偏多', `${stat.fail}/${stat.ok + stat.fail} 条失败，详见 ${stage.runDir}`);
+  }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch(e => { console.error(e); process.exit(EXIT.ERROR); });

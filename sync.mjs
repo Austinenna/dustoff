@@ -30,14 +30,14 @@
 
 import { spawn } from 'node:child_process';
 import {
-  mkdirSync, existsSync, readFileSync, writeFileSync, rmSync,
-  readdirSync, statSync, appendFileSync, openSync, closeSync, unlinkSync,
+  mkdirSync, existsSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync,
 } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 import { importScan, importDownload, reconcile, stats } from './scripts/ledger.mjs';
+import { createStage, freeGB, EXIT } from './scripts/stage.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = join(__dirname, 'scripts');
@@ -101,53 +101,16 @@ const MIN_FREE_GB  = Number(cfg('DUST_MIN_FREE_GB', 5));
 const MAX_DUR_MIN  = cfg('DUST_MAX_DURATION_MIN', '10');
 const NOTIFY       = cfg('DUST_NOTIFY', '1') !== '0';
 
-const RUNS_DIR = join(DUST_HOME, 'runs');
-const LOCK     = join(DUST_HOME, '.lock');
-const FLAG     = join(DUST_HOME, 'NEEDS_LOGIN');
+const FLAG = join(DUST_HOME, 'NEEDS_LOGIN');
 
-// ── 日志：同时打屏幕和写文件（定时任务没有终端，必须落盘）────────────
-let logFile = null;
-const stamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
-function log(...a) {
-  const line = `[${stamp()}] ${a.join(' ')}`;
-  console.error(line);
-  if (logFile) { try { appendFileSync(logFile, line + '\n'); } catch {} }
-}
-function die(code, msg) {
-  log(`✗ ${msg}`);
-  releaseLock();
-  process.exit(code);
-}
-
-function notify(title, message) {
-  if (!NOTIFY || process.platform !== 'darwin') return;
-  const esc = s => String(s).replace(/["\\]/g, '\\$&').replace(/\n/g, ' ');
-  try {
-    execSync(`osascript -e 'display notification "${esc(message)}" with title "${esc(title)}" sound name "Basso"'`,
-      { timeout: 5000, stdio: 'ignore' });
-  } catch {}
-}
-
-// ── 锁：防止上一次没跑完又被触发（两个 Chrome 抢同一个 profile 会炸）──
-function acquireLock() {
-  if (existsSync(LOCK)) {
-    const pid = Number(readFileSync(LOCK, 'utf8').trim());
-    let alive = false;
-    try { process.kill(pid, 0); alive = true; } catch {}
-    if (alive) {
-      console.error(`[${stamp()}] ✗ 已有实例在跑（pid ${pid}），本次退出`);
-      process.exit(3);
-    }
-    log(`发现过期的锁（pid ${pid} 已不存在），接管`);
-    try { unlinkSync(LOCK); } catch {}
-  }
-  mkdirSync(DUST_HOME, { recursive: true });
-  writeFileSync(LOCK, String(process.pid));
-}
-function releaseLock() { try { if (existsSync(LOCK)) unlinkSync(LOCK); } catch {} }
-process.on('exit', releaseLock);
-process.on('SIGINT', () => { releaseLock(); process.exit(130); });
-process.on('SIGTERM', () => { releaseLock(); process.exit(143); });
+// 阶段骨架（加锁、日志落盘、运行记录、通知、退出码）抽在 scripts/stage.mjs，
+// 与第二段共用一份实现——两段是平级的独立入口，需要同样这套东西。
+const stage = createStage({
+  name: 'collect', dustHome: DUST_HOME, notify: NOTIFY, keepRuns: KEEP_RUNS,
+  runId: RESUME || null,
+  pruneLegacy: true,        // 分阶段之前的运行记录没有阶段后缀，一并清理
+});
+const { log, die, notify, runId, runDir, RUNS_DIR, releaseLock } = stage;
 
 // ── 跑子脚本，stdout 收集、stderr 转发进日志 ────────────────────────
 function run(script, args, { stdoutTo = null } = {}) {
@@ -163,26 +126,6 @@ function run(script, args, { stdoutTo = null } = {}) {
   });
 }
 
-function freeGB(path) {
-  try {
-    const o = execSync(`df -k ${JSON.stringify(path)}`, { encoding: 'utf8' }).trim().split('\n').pop();
-    return Number(o.split(/\s+/)[3]) / 1024 / 1024;
-  } catch { return null; }
-}
-
-function pruneRuns() {
-  if (!existsSync(RUNS_DIR) || !(KEEP_RUNS > 0)) return 0;
-  const cutoff = Date.now() - KEEP_RUNS * 86400_000;
-  let n = 0;
-  for (const d of readdirSync(RUNS_DIR)) {
-    const p = join(RUNS_DIR, d);
-    try {
-      if (!statSync(p).isDirectory()) continue;
-      if (statSync(p).mtimeMs < cutoff) { rmSync(p, { recursive: true, force: true }); n++; }
-    } catch {}
-  }
-  return n;
-}
 
 // ── --list ────────────────────────────────────────────────────────
 if (LIST) {
@@ -204,12 +147,7 @@ if (LIST) {
 
 // ── 主流程 ────────────────────────────────────────────────────────
 (async () => {
-  acquireLock();
-
-  const runId = RESUME || new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '');
-  const runDir = join(RUNS_DIR, runId);
-  mkdirSync(runDir, { recursive: true });
-  logFile = join(runDir, 'run.log');
+  stage.acquireLock();
 
   const collFile = join(runDir, 'coll.json');
   const resultFile = join(runDir, 'result.json');
@@ -305,7 +243,7 @@ if (LIST) {
     log(`⚠️ 目标盘仅剩 ${after.toFixed(1)} GB，低于阈值 ${MIN_FREE_GB} GB`);
     notify('dustoff 磁盘告警', `${MEDIA} 仅剩 ${after.toFixed(1)} GB`);
   }
-  const pruned = pruneRuns();
+  const pruned = stage.pruneRuns();
   if (pruned) log(`清理了 ${pruned} 份超过 ${KEEP_RUNS} 天的运行记录`);
 
   const parts = Object.entries(sum).map(([k, v]) => `${k} ${v}`).join(' · ');
