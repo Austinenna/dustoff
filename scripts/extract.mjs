@@ -17,6 +17,9 @@
 //   node scripts/extract.mjs --id 7676...     指定一条
 //   node scripts/extract.mjs --dry-run        只列计划和音频总时长，不调 API
 //   node scripts/extract.mjs --force          已转过的也重转
+//   node scripts/extract.mjs --clean-only     只清理过期 mp4，不转写
+//   node scripts/extract.mjs --keep-days 0    临时改保留期（默认 7 天）
+//   node scripts/extract.mjs --clean-only --clean-limit 1   小步试删
 //
 // 退出码见 stage.mjs 的约定（0 正常 / 1 出错 / 3 已在跑 / 5 磁盘 / 6 缺配置）。
 
@@ -25,7 +28,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync } 
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeCfg, DUST_HOME, CONF_FILE } from './config.mjs';
-import { claim, markTranscribed, markFailed, db } from './ledger.mjs';
+import { claim, markTranscribed, markFailed, markMediaDeleted, cleanable, db } from './ledger.mjs';
 import { createStage, freeGB, EXIT } from './stage.mjs';
 
 const argv = process.argv.slice(2);
@@ -33,6 +36,7 @@ const has = f => argv.includes(f);
 const valOf = f => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
 
 const DRY_RUN = has('--dry-run');
+const CLEAN_ONLY = has('--clean-only');
 const FORCE   = has('--force');
 const ONLY_ID = valOf('--id');
 const LIMIT   = Number(valOf('--limit') || 0);
@@ -44,6 +48,9 @@ const LANG        = cfg('DUST_ASR_LANG', 'zh');
 const CONCURRENCY = Number(cfg('DUST_ASR_CONCURRENCY', 2));
 const MAX_ATTEMPTS = Number(cfg('DUST_MAX_ATTEMPTS', 3));
 const TEXT_DIR    = cfg('DUST_TEXT', join(DUST_HOME, 'text'));
+const KEEP_DAYS   = Number(valOf('--keep-days') ?? cfg('DUST_MEDIA_KEEP_DAYS', 7));
+// 一轮最多删多少条。首次放开保留期时用它小步试，别一把删几千个目录。
+const CLEAN_LIMIT = Number(valOf('--clean-limit') || 1000);
 
 // 领域热词。qwen3-asr 支持拿一段上下文去偏置识别，这是它相对
 // fun-asr / paraformer 的主要优势——收藏夹的词汇面是稳定的
@@ -79,6 +86,8 @@ const stage = createStage({
 const { log, die, notify } = stage;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmtMB = b => b >= 1024 * 1024 * 1024
+  ? `${(b / 1024 / 1024 / 1024).toFixed(2)} GB` : `${(b / 1024 / 1024).toFixed(1)} MB`;
 const fmtDur = s => s >= 60 ? `${Math.floor(s / 60)}分${String(Math.round(s % 60)).padStart(2, '0')}秒` : `${Math.round(s)}秒`;
 
 // ── 音频处理 ──────────────────────────────────────────────────────
@@ -287,16 +296,65 @@ async function transcribeOne(item, tmpRoot) {
   }
 }
 
+// ── 清理已转写的 mp4 ──────────────────────────────────────────────
+
+/**
+ * 删掉过了保留期的 mp4。
+ *
+ * 两条安全规则，都是「宁可少删」：
+ *
+ *   ① 转写稿必须真的在磁盘上。账本说转过了不算数——万一 text 目录被误删，
+ *      不该跟着把视频也删了，那就真的什么都不剩了。
+ *   ② 0 字的不删。那些是 ASR 什么也没听到的纯画面视频，
+ *      对它们来说视频本身仍是唯一的内容载体，而且正是 OCR 增强要挑的目标
+ *      （见 docs/待办-OCR增强.md）。删了等于把原料丢了。
+ */
+function cleanMedia({ keepDays, dryRun, limit = 1000 }) {
+  const rows = cleanable('douyin', { keepDays, limit });
+  if (!rows.length) return { n: 0, bytes: 0, held: 0 };
+
+  const done = [];
+  let bytes = 0, held = 0;
+  for (const r of rows) {
+    const row = db().prepare('SELECT text_path, text_chars FROM items WHERE id = ?').get(r.id);
+
+    if (!row?.text_path || !existsSync(row.text_path)) { held++; continue; }   // 规则 ①
+    if (!row.text_chars) { held++; continue; }                                 // 规则 ②
+
+    if (!existsSync(r.media_path)) { done.push(r.id); continue; }  // 文件已不在，补记一笔
+    if (dryRun) { bytes += r.media_bytes || 0; done.push(r.id); continue; }
+    try {
+      rmSync(dirname(r.media_path), { recursive: true, force: true });
+      bytes += r.media_bytes || 0;
+      done.push(r.id);
+    } catch (e) {
+      log(`  ✗ 删除失败 ${r.id}: ${e.message}`);
+    }
+  }
+  if (!dryRun && done.length) markMediaDeleted(done);
+  return { n: done.length, bytes, held };
+}
+
 // ── 主流程 ────────────────────────────────────────────────────────
 
 async function main() {
-  if (!API_KEY && !DRY_RUN) {
+  if (!API_KEY && !DRY_RUN && !CLEAN_ONLY) {
     die(EXIT.CONFIG, `未配置 DUST_DASHSCOPE_KEY。写进 ${CONF_FILE}：DUST_DASHSCOPE_KEY=sk-xxxx`);
   }
   if (!CASUAL) {
     stage.acquireLock();
     log(`dustoff 提取　run=${stage.runId}`);
   }
+
+  // 先清理再转写：腾出来的空间本轮就能用上。
+  // 放在转写前还有个好处——即使本轮转写失败，清理也已经做了。
+  const cl = cleanMedia({ keepDays: KEEP_DAYS, dryRun: DRY_RUN, limit: CLEAN_LIMIT });
+  if (cl.n || cl.held) {
+    log(`清理 mp4：删 ${cl.n} 条释放 ${fmtMB(cl.bytes)}` +
+      (cl.held ? `，保留 ${cl.held} 条（转写稿缺失或 0 字）` : '') +
+      (DRY_RUN ? '（DRY RUN，未真删）' : ''));
+  }
+  if (CLEAN_ONLY) return;
 
   let items;
   if (ONLY_ID) {
