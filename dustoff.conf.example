@@ -207,8 +207,10 @@ DUST_VOLC_RESOURCE_ID=volc.bigasr.auc_turbo
 DUST_LLM_KEY=
 DUST_LLM_BASE=https://open.bigmodel.cn/api/paas/v4/chat/completions
 
-# 默认模型。glm-5.3-flash 是「强制思考」模型：
-#   · 不能关思考——传 thinking:{type:'disabled'} 会被拒
+# 默认模型。glm-5.3-flash 官方叫「强制思考」模型，但这个说法要说清楚：
+#   · 「不能关思考」指的是**不能传 thinking:{type:'disabled'} 这个参数**，
+#     不是指模型一定会思考。实测 reasoning_effort='low' 时它是真的不思考——
+#     reasoning_tokens 和 reasoning_content 两个信号一致，11 次全是 0。
 #   · effort 只接受 low / high / max，传 medium 直接 400（错误码 1210）
 #   · 支持 tool call，也支持看图——将来做 OCR 增强时，
 #     同一个模型就能读关键帧，不必再引一个 OCR 引擎
@@ -222,11 +224,14 @@ DUST_LLM_EFFORT=high
 #    实测同一个输入这样传烧了 659 个思考 token，而 reasoning_effort:'low' 是 0 个。
 #    这是最坑的一个：它静默失败。
 #
-# ② 不传 effort 比传 high 贵得多。同一个 157 token 的输入实测：
-#       不传 effort            出 412 token（思考 361）  11.1s
-#       reasoning_effort=low   出  45 token（思考   0）   2.2s
-#       reasoning_effort=high  出  71 token（思考  11）   3.6s
-#    所以必须显式传。
+# ② 不传 effort 比传 high 贵一个数量级。真稿 1010 字，每档跑 4 次，
+#    数字是 reasoning_tokens：
+#       不传 effort              [ 301 1578  403  703]   均 746
+#       reasoning_effort=high    [   0    5  144  104]   均  63
+#       reasoning_effort=low     [   0    0    0    0]   均   0
+#    注意 high 和不传的**波动都极大**（不传最高 1578，最低 301），
+#    只跑一次得出的结论不可信；low 是唯一稳定的一档。
+#    思考 token 按输出计费，所以这一项直接决定第三段的账单。
 #
 # ③ 思考 token 计入 completion_tokens，也就计入 max_tokens。
 #    第一次测试给 max_tokens=800，模型拿 798 个去思考，正文一个字没剩下，
