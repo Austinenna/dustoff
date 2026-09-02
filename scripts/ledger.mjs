@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS items (
   first_seen    INTEGER NOT NULL,   -- 首次扫到的时间 ≈ 收藏时间
   last_seen     INTEGER NOT NULL,   -- 最后一次在收藏夹里见到 → 据此发现取消收藏
   status        TEXT NOT NULL,      -- 见 STATUS
-  skip_reason   TEXT,               -- gallery / too_long / no_url
+  skip_reason   TEXT,               -- gallery / too_long / no_url / need_ocr
 
   -- ── 素材 ────────────────────────────────────────
   media_path    TEXT,               -- 视频落盘位置
@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS items (
   -- ── AI 判断结果 ──────────────────────────────────
   category      TEXT,               -- AI技术 / 游戏攻略 / 生活方式 / 其他
   decay         TEXT,               -- none / slow / fast / event  时效档位
+  needs_ocr     INTEGER DEFAULT 0,  -- 1 = 关键信息在画面上，ASR 拿不到（阵容码/仓库地址/
+                                    -- 型号链接）。攒着将来一次性补 OCR，不是「不配写笔记」
 
   -- ── 失败处理 ─────────────────────────────────────
   attempts      INTEGER DEFAULT 0,  -- 已尝试次数。超限则转 failed，避免无限重试烧钱
@@ -338,11 +340,12 @@ export function markTranscribed(id, fields, platform = 'douyin') {
 export function markExtracted(id, fields, platform = 'douyin') {
   return db().prepare(`
     UPDATE items SET status = 'extracted', text_source = ?, text_chars = ?, keyframes = ?,
-                     note_path = ?, category = ?, decay = ?, extracted_at = ?, updated_at = ?
+                     note_path = ?, category = ?, decay = ?, needs_ocr = ?,
+                     extracted_at = ?, updated_at = ?
     WHERE platform = ? AND id = ?
   `).run(fields.text_source || null, fields.text_chars || null, fields.keyframes || null,
     fields.note_path || null, fields.category || null, fields.decay || null,
-    now(), now(), platform, id);
+    fields.needs_ocr ? 1 : 0, now(), now(), platform, id);
 }
 
 /** 记录一次失败。超过上限则转 failed，避免无限重试烧 API 额度。 */
