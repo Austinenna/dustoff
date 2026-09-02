@@ -41,17 +41,20 @@ const DB_PATH = process.env.DUST_DB || join(DUST_HOME, 'index.sqlite');
 // ── 状态机 ────────────────────────────────────────────────────────
 //
 //   (新扫到) ──→ pending ──┬──→ downloaded ──┬──→ transcribed ──┬──→ extracted  笔记已生成
-//                          │                 │                  └──→ failed     提炼重试超限
+//                          │                 │    ↑第二段终点    └──→ failed     提炼重试超限
 //                          │                 └──→ failed         转写重试超限
 //                          ├──→ skipped      主动跳过，带 skip_reason
 //                          └──→ failed       下载重试超限
+//
+// 分段边界：第二段（提取）到 transcribed 为止，出口就是那份 .txt。
+// extracted（笔记已生成）属于第三段，等 AI 提炼那部分开工时才会有条目走到。
 //
 // 为什么 transcribed 和 extracted 要分开：
 //   转写（ASR，机器干的）和提炼（LLM 写笔记，prompt 说了算）失败原因不同、
 //   重跑代价也不同。合成一个状态的话，笔记模板一改就得连 ASR 一起重跑，
 //   等于为改 prompt 重复付一次转写的钱。
-//   另外 mp4 只有到 extracted 才可删——OCR 增强（见 docs/待办-OCR增强.md）
-//   还要靠它抽帧，笔记没写完就删掉等于把原料丢了。
+//   mp4 在 transcribed 之后就可以删了（保留期见 cleanable），
+//   因为第二段的产物 .txt 已经落盘，不再需要原视频。
 //
 //   任何状态 ──→ removed   对账时发现已不在收藏夹里
 //
@@ -60,8 +63,8 @@ const DB_PATH = process.env.DUST_DB || join(DUST_HOME, 'index.sqlite');
 export const STATUS = {
   PENDING: 'pending',        // 已知，素材还没下
   DOWNLOADED: 'downloaded',  // 素材已落盘，等转写
-  TRANSCRIBED: 'transcribed',// 文字已转出，等提炼成笔记。mp4 仍不可删
-  EXTRACTED: 'extracted',    // 笔记已生成，mp4 可删
+  TRANSCRIBED: 'transcribed',// 文字已转出——第二段的终点。过保留期后 mp4 可删
+  EXTRACTED: 'extracted',    // 笔记已生成（第三段的终点）
   SKIPPED: 'skipped',        // 主动跳过（图集 / 超长 / 无地址）
   FAILED: 'failed',          // 重试超限，放弃
   REMOVED: 'removed',        // 已从收藏夹移除
@@ -114,6 +117,9 @@ CREATE TABLE IF NOT EXISTS items (
 
   -- ── 时间戳 ──────────────────────────────────────
   downloaded_at INTEGER,
+  transcribed_at INTEGER,           -- 转写完成时刻。mp4 保留期从这里算，
+                                    -- 不能用 updated_at——每天的扫描都会刷新它，
+                                    -- 只要条目还在收藏夹里就永远「刚动过」
   extracted_at  INTEGER,
   updated_at    INTEGER NOT NULL,
 
@@ -126,8 +132,8 @@ CREATE INDEX IF NOT EXISTS idx_status     ON items(status, platform);
 CREATE INDEX IF NOT EXISTS idx_last_seen  ON items(last_seen);
 -- 组织阶段会按分类和时效筛
 CREATE INDEX IF NOT EXISTS idx_category   ON items(category, decay);
--- 清理 mp4 时找「已提取但没删」的
-CREATE INDEX IF NOT EXISTS idx_cleanable  ON items(status, media_deleted);
+-- 清理 mp4 时找「已转写、过了保留期、还没删」的
+CREATE INDEX IF NOT EXISTS idx_cleanable  ON items(status, media_deleted, transcribed_at);
 `;
 
 let _db = null;
@@ -321,11 +327,11 @@ export function markTranscribed(id, fields, platform = 'douyin') {
   return db().prepare(`
     UPDATE items SET status = 'transcribed', text_source = ?, text_chars = ?,
                      text_path = ?, audio_seconds = ?, attempts = 0, last_error = NULL,
-                     updated_at = ?
+                     transcribed_at = COALESCE(transcribed_at, ?), updated_at = ?
     WHERE platform = ? AND id = ?
   `).run(fields.text_source || null, fields.text_chars ?? null,
     fields.text_path || null, fields.audio_seconds ?? null,
-    now(), platform, id);
+    now(), now(), platform, id);
 }
 
 /** 记录一次提炼成功。 */
@@ -373,12 +379,29 @@ export function requeueSilent(platform = 'douyin') {
 }
 
 /** 找出可以删 mp4 的条目：已提取、还没删、文件还在。 */
-export function cleanable(platform = 'douyin', limit = 1000) {
+/**
+ * 找出可以删 mp4 的条目：转写完、过了保留期、文件还在。
+ *
+ * 为什么是 transcribed 而不是 extracted：
+ *   第二段的出口就是那份 .txt，到此为止。笔记提炼归第三段，
+ *   而第三段读的是 .txt，不需要原视频——所以不必等到 extracted 才删。
+ *
+ * 为什么要留保留期而不是转完就删：
+ *   转写质量还在验证期，热词表也在长。删早了发现问题就得重下，
+ *   而 CDN 地址会过期，等于要重新扫描一遍。
+ *
+ * @param {number} keepDays 转写完成后保留多少天。0 表示转完即可删。
+ */
+export function cleanable(platform = 'douyin', { keepDays = 7, limit = 1000 } = {}) {
+  const cutoff = now() - keepDays * 86400;
   return db().prepare(`
-    SELECT id, media_path, media_bytes FROM items
-    WHERE platform = ? AND status = 'extracted' AND media_deleted = 0 AND media_path IS NOT NULL
+    SELECT id, title, media_path, media_bytes, transcribed_at FROM items
+    WHERE platform = ? AND status IN ('transcribed','extracted')
+      AND media_deleted = 0 AND media_path IS NOT NULL
+      AND COALESCE(transcribed_at, 0) <= ?
+    ORDER BY transcribed_at
     LIMIT ?
-  `).all(platform, limit);
+  `).all(platform, cutoff, limit);
 }
 
 /** 某个 id 是否已知——扫描层增量判断「撞到已知就停」用。 */
@@ -397,7 +420,7 @@ export function stats(platform = null) {
     byPlatform: d.prepare('SELECT platform, COUNT(*) n FROM items GROUP BY platform').all(),
     media: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND media_deleted = 0 AND media_bytes IS NOT NULL`).get(...args),
     audio: d.prepare(`SELECT COALESCE(SUM(has_audio=1),0) y, COALESCE(SUM(has_audio=0),0) n, COALESCE(SUM(has_audio IS NULL),0) u FROM items ${where || 'WHERE 1=1'} AND status IN ('downloaded','transcribed','extracted')`).get(...args),
-    reclaimable: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND status='extracted' AND media_deleted=0`).get(...args),
+    reclaimable: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(media_bytes),0) bytes FROM items ${where || 'WHERE 1=1'} AND status IN ('transcribed','extracted') AND media_deleted=0 AND media_path IS NOT NULL`).get(...args),
     // 累计送进 ASR 的音频秒数——这是计费单位，乘以单价就是花了多少
     text: d.prepare(`SELECT COUNT(*) n, COALESCE(SUM(text_chars),0) chars, COALESCE(SUM(audio_seconds),0) secs,
                             COALESCE(SUM(text_chars=0),0) empty
@@ -429,7 +452,7 @@ if (isMain) {
     console.log(`\n  音轨   有 ${s.audio.y} · 无 ${s.audio.n} · 未检测 ${s.audio.u}` +
       (s.audio.n ? `   ⚠️ 无音轨的做不了 ASR，跑 requeue-silent 重下` : ''));
     console.log(`  素材占用 ${fmtMB(s.media.bytes)}（${s.media.n} 条未清理）`);
-    console.log(`  可回收   ${fmtMB(s.reclaimable.bytes)}（${s.reclaimable.n} 条已提取但 mp4 还在）`);
+    console.log(`  可回收   ${fmtMB(s.reclaimable.bytes)}（${s.reclaimable.n} 条已转写但 mp4 还在）`);
     if (s.text.n) {
       const secs = s.text.secs;
       const hh = Math.floor(secs / 3600), mm = Math.round((secs % 3600) / 60);
