@@ -68,8 +68,10 @@ const MAX_CONSECUTIVE_FAILS = Number(cfg('DUST_ASR_MAX_FAILS', 5));
 const NOTIFY   = cfg('DUST_NOTIFY', '1') !== '0';
 const KEEP_RUNS = Number(cfg('DUST_KEEP_RUNS', 30));
 
-// --dry-run 和 --id 是探查/点名跑法，不建运行记录也不抢锁
-const CASUAL = DRY_RUN || !!ONLY_ID;
+// 只有 --dry-run 是纯探查（不调 API、不写账本），可以不抢锁不留记录。
+// --id 会真花钱，必须跟正常跑法一样受锁保护——否则它能绕过锁，
+// 跟一个正在跑的整轮撞上同一条，白付两次。
+const CASUAL = DRY_RUN;
 const stage = createStage({
   name: 'extract', dustHome: DUST_HOME,
   notify: NOTIFY, keepRuns: KEEP_RUNS, record: !CASUAL,
@@ -300,6 +302,11 @@ async function main() {
   if (ONLY_ID) {
     items = db().prepare('SELECT * FROM items WHERE id = ?').all(ONLY_ID);
     if (!items.length) die(EXIT.ERROR, `账本里没有 ${ONLY_ID}`);
+    // 点名重转是要花钱的。已经转过的默认拦下来，避免手滑重复付费。
+    if (items[0].status === 'transcribed' && !FORCE) {
+      die(EXIT.ERROR, `${ONLY_ID} 已经转写过了（${items[0].text_chars} 字）。` +
+        `确实要重转加 --force，会重新计费。`);
+    }
   } else {
     const status = FORCE ? 'transcribed' : 'downloaded';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);

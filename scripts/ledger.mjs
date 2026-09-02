@@ -292,7 +292,21 @@ export function reconcile(scannedIds, opts = {}) {
   return { removed: gone.length, checked: active.length };
 }
 
-/** 捞一批待办。提取阶段用 status='downloaded'。 */
+/**
+ * 捞一批待办。提取阶段用 status='downloaded'。
+ *
+ * 为什么这里没有「领取」语义（不写 in_progress 之类的标记）：
+ *
+ *   · 同阶段的并发已经被 stage.mjs 的 PID 锁挡住了，两个 extract 跑不到一起。
+ *   · 单次运行内部是一个 worker 池共享同一个队列，Node 单线程下 shift() 不会撞。
+ *   · 真正怕的是「花了钱但没记下来」，而那靠的是逐条即时写账本
+ *     （每条 API 调用返回后立刻 markTranscribed），崩溃最多丢一条。
+ *     加领取标记对这个场景毫无帮助——结果本来就丢了。
+ *   · 反过来，领取标记会引入新问题：进程被 kill -9 之后标记留在库里，
+ *     得再写一套超时回收逻辑，凭空多一个会出错的地方。
+ *
+ * 所以刻意保持它是个纯查询。
+ */
 export function claim(status, limit = 50, platform = 'douyin', maxAttempts = 3) {
   return db().prepare(`
     SELECT * FROM items
