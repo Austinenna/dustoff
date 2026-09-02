@@ -254,7 +254,7 @@ node scripts/get_collection.mjs 200 | node scripts/download.mjs - 3
 
 ```
 dustoff/
-├── sync.mjs                 唯一入口：配置、加锁、运行记录、告警、退出码
+├── sync.mjs                 第一段（采集）入口：配置、加锁、运行记录、告警、退出码
 ├── scripts/                 10 个脚本，见上方「脚本一览」
 ├── docs/                    架构、选型依据、待办（见下方「文档」）
 ├── dustoff.conf.example     配置模板，复制到 ~/.dustoff/ 后修改

@@ -24,7 +24,7 @@
 //   node ledger.mjs show <id>                看单条全部字段
 //   node ledger.mjs import <coll.json>       把扫描结果并入账本
 //   node ledger.mjs sweep <result.json>      把下载结果并入账本
-//   node ledger.mjs reconcile <coll.json>    对账：标记已从收藏夹移除的
+//   node ledger.mjs reconcile <coll.json>    对账：标记已从收藏夹移除的（仅限全量扫描）
 //   node ledger.mjs requeue <id|status>      重新排队（清零重试计数）
 //   node ledger.mjs requeue-silent           把无音轨的打回重下（ASR 需要音轨）
 
@@ -238,18 +238,58 @@ export function importDownload(results, platform = 'douyin') {
  * 对账：本次扫描没见到、但账本里还是活跃状态的条目，标为 removed。
  * 只在全量扫描后调用——增量扫描本来就见不到旧条目，会误杀。
  */
-export function reconcile(scannedIds, platform = 'douyin', scanTime = null) {
+/**
+ * 对账：把「账本里有、但这次没扫到」的条目标为 removed。
+ *
+ * ⚠️ 这是全项目最危险的一个函数——它按「不在名单里」来判死，
+ *    而名单是外部给的。名单不全，就会误杀。
+ *
+ * 两道闸，都是硬约束而不是注释：
+ *
+ *   ① 必须显式声明「这次是全量扫描」。日常只扫最新 200 条，
+ *      拿那 200 条来对账会把其余五千多条全标成已取消收藏。
+ *
+ *   ② 即使声明了全量，一次要删掉超过 maxRemoveRatio 也拒绝执行。
+ *      这道闸防的是「自称全量、其实扫挂了」——早期滚动容器找错，
+ *      扫描只返回 69 条却一切正常地退出，正是这种情况。
+ *      真要大批清理时手动带 force 跑。
+ *
+ * @param {string[]} scannedIds 本次扫到的全部 id
+ * @param {{platform?, scanTime?, scanComplete?, maxRemoveRatio?, force?}} opts
+ */
+export function reconcile(scannedIds, opts = {}) {
+  const {
+    platform = 'douyin', scanTime = null,
+    scanComplete = false, maxRemoveRatio = 0.1, force = false,
+  } = opts;
+
+  if (!scanComplete && !force) {
+    throw new Error(
+      '拒绝对账：调用方没有声明这是全量扫描。\n' +
+      '  日常增量扫描只覆盖最新若干条，用它对账会把其余条目全部误标为已取消收藏。\n' +
+      '  确认扫到底了（coll.truncated === false）再传 { scanComplete: true }。');
+  }
+
   const d = db(), t = scanTime || now();
   const seen = new Set(scannedIds);
   const active = d.prepare(
     `SELECT id FROM items WHERE platform = ? AND status NOT IN ('removed')`
   ).all(platform);
   const gone = active.filter(r => !seen.has(r.id)).map(r => r.id);
+
+  const ratio = active.length ? gone.length / active.length : 0;
+  if (!force && ratio > maxRemoveRatio) {
+    throw new Error(
+      `拒绝对账：本次会标记 ${gone.length}/${active.length} 条为已移除（${(ratio * 100).toFixed(1)}%），` +
+      `超过阈值 ${(maxRemoveRatio * 100).toFixed(0)}%。\n` +
+      '  扫描很可能不完整。先核对扫描结果，确认无误再带 force 重跑。');
+  }
+
   const upd = d.prepare(`UPDATE items SET status = 'removed', updated_at = ? WHERE platform = ? AND id = ?`);
   d.exec('BEGIN');
   try { for (const id of gone) upd.run(t, platform, id); d.exec('COMMIT'); }
   catch (e) { d.exec('ROLLBACK'); throw e; }
-  return { removed: gone.length };
+  return { removed: gone.length, checked: active.length };
 }
 
 /** 捞一批待办。提取阶段用 status='downloaded'。 */
@@ -403,7 +443,14 @@ if (isMain) {
     console.log('  ', JSON.stringify(importDownload(j.results)));
   } else if (cmd === 'reconcile') {
     const j = readJson(a1);
-    console.log('  ', JSON.stringify(reconcile(j.items.map(i => i.aweme_id))));
+    const complete = j.truncated === false;
+    const force = process.argv.includes('--force');
+    if (!complete && !force) {
+      console.error(`这份扫描结果 truncated=${j.truncated}，不是全量，拒绝对账。`);
+      console.error('确认要用它对账，加 --force（会把没扫到的全部标记为已移除）。');
+      process.exit(1);
+    }
+    console.log('  ', JSON.stringify(reconcile(j.items.map(i => i.aweme_id), { scanComplete: complete, force })));
   } else if (cmd === 'requeue-silent') {
     console.log('  ', JSON.stringify(requeueSilent()));
   } else if (cmd === 'requeue') {

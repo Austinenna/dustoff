@@ -38,6 +38,22 @@ const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} };
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
+/**
+ * 把 JSON 写到 stdout，**等真正冲刷完**再退出。
+ *
+ * 不能写成 console.log(...) + process.exit()：stdout 是管道时写入是异步的，
+ * 超过管道缓冲区（macOS 64 KB）的部分会排队，而 process.exit() 立刻终止进程，
+ * 排队的部分直接丢弃——结果就是一个正好 65536 字节、被腰斩的 JSON。
+ *
+ * 这个坑只在被父进程用管道接收时才出现：直接跑到终端（TTY）或
+ * shell 重定向到文件都是同步写，看不出问题。所以它潜伏到
+ * sync.mjs 第一次接管扫描输出时才暴露。
+ */
+function emit(obj, code = 0, done = null) {
+  process.stdout.write(JSON.stringify(obj) + '\n', () => { if (done) done(); process.exit(code); });
+}
+
+
 async function getWsUrl() {
   for (let i = 0; i < 40; i++) {
     try {
@@ -94,11 +110,10 @@ function cdp(ws) {
   }
 
   if (!loggedIn) {
-    console.log(JSON.stringify({
+    return emit({
       ok: false, logged_in: false,
       hint: '请先跑 login.mjs 扫码登录（已写 ~/.dustoff/NEEDS_LOGIN 标记文件）',
-    }));
-    cleanup(); process.exit(4);
+    }, 4, cleanup);
   }
 
   // 收集 listcollection 响应。注意必须在 loadingFinished 时立刻读 body，
@@ -187,12 +202,11 @@ function cdp(ws) {
   const vids = out.filter(i => !i.is_gallery);
   const withUrls = vids.filter(i => i.play_urls.length);
   console.error(`   视频 ${vids.length} 条（其中 ${withUrls.length} 条已带下载地址）/ 图集 ${out.length - vids.length} 条`);
-  console.log(JSON.stringify({
+  emit({
     ok: true, logged_in: true, count: out.length,
     truncated: items.length > LIMIT || !sawNoMore,   // 还有更多没取
     fetched_at: Math.floor(Date.now() / 1000),       // 下载端据此判断地址是否还新鲜
     session: { level: guard.level, days_left: guard.days_left },
     items: out,
-  }));
-  ws.close(); cleanup(); process.exit(0);
+  }, 0, () => { ws.close(); cleanup(); });
 })().catch(e => { console.error('ERROR:', e.message); cleanup(); process.exit(1); });

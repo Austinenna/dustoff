@@ -83,6 +83,22 @@ const cleanup = () => {
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
+/**
+ * 把 JSON 写到 stdout，**等真正冲刷完**再退出。
+ *
+ * 不能写成 console.log(...) + process.exit()：stdout 是管道时写入是异步的，
+ * 超过管道缓冲区（macOS 64 KB）的部分会排队，而 process.exit() 立刻终止进程，
+ * 排队的部分直接丢弃——结果就是一个正好 65536 字节、被腰斩的 JSON。
+ *
+ * 这个坑只在被父进程用管道接收时才出现：直接跑到终端（TTY）或
+ * shell 重定向到文件都是同步写，看不出问题。所以它潜伏到
+ * sync.mjs 第一次接管扫描输出时才暴露。
+ */
+function emit(obj, code = 0, done = null) {
+  process.stdout.write(JSON.stringify(obj) + '\n', () => { if (done) done(); process.exit(code); });
+}
+
+
 (async () => {
   const videoUrl = await resolveVideoUrl(input);
 
@@ -155,6 +171,5 @@ process.on('SIGINT', () => { cleanup(); process.exit(130); });
     cover: (v.cover && v.cover.url_list && v.cover.url_list[0]) || null,
     source_url: videoUrl,
   };
-  console.log(JSON.stringify(out));
-  ws.close(); cleanup(); process.exit(0);
+  emit(out, 0, () => { ws.close(); cleanup(); });
 })().catch(e => { console.error('ERROR:', e.message); cleanup(); process.exit(1); });

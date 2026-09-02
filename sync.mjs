@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 // dustoff / sync.mjs
-// 唯一入口。串起「扫收藏夹 → 下载」，并处理无人值守需要的那些事：
-// 配置、加锁、运行记录、日志、磁盘告警、退出码。
+// 第一段（采集）的入口。串起「扫收藏夹 → 下载 → 写账本」，
+// 并处理无人值守需要的那些事：配置、加锁、运行记录、日志、磁盘告警、退出码。
+//
+// 它刻意不调用第二段（提取）。两段只通过账本对话：
+//   采集写 pending / downloaded，提取读 downloaded。
+// 合并成一个进程会废掉故障隔离——登录态失效时采集会直接退出，
+// 而账本里可能还躺着一批已下载待转写的，它们本来完全不受登录影响。
+// 手动跑全链路就是依次跑两条命令；以后两个定时器跑的也是同样这两条。
 //
 // 用法:
 //   node sync.mjs                日常增量（定时任务跑这个）
@@ -31,6 +37,7 @@ import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
+import { importScan, importDownload, reconcile, stats } from './scripts/ledger.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = join(__dirname, 'scripts');
@@ -247,6 +254,28 @@ if (LIST) {
   const coll = JSON.parse(readFileSync(collFile, 'utf8'));
   log(`扫到 ${coll.count} 条${coll.truncated ? '（还有更多未取）' : ''}`);
 
+  // 扫描结果并入账本。已存在的只刷新 last_seen 和元数据，
+  // 绝不覆盖处理状态——否则每天的扫描会把已经转写好的条目打回 pending。
+  if (!DRY_RUN) {
+    const imp = importScan(coll.items || []);
+    log(`账本：新增 ${imp.added} 条（本次见到 ${imp.seen} 条）`);
+
+    // 对账只在真的翻到底时做。日常增量只覆盖最新若干条，
+    // 拿它对账会把其余条目全部误判为已取消收藏。
+    if (coll.truncated === false) {
+      try {
+        const rec = reconcile((coll.items || []).map(i => i.aweme_id), { scanComplete: true });
+        if (rec.removed) log(`账本：${rec.removed} 条已从收藏夹移除（共核对 ${rec.checked} 条）`);
+      } catch (e) {
+        // 闸门拦下来了。不中断整轮——采集和下载都已完成，
+        // 对账失败只意味着「已取消收藏」这个信息今天没更新，不影响其他。
+        log(`⚠️ 对账被拒绝，本轮跳过：${String(e.message).split('\n')[0]}`);
+      }
+    } else {
+      log(`扫描未到底，跳过对账`);
+    }
+  }
+
   // ② 下载
   const dlArgs = [collFile, String(CONCURRENCY)];
   const env = { ...process.env, DUST_MEDIA: MEDIA, DUST_MAX_DURATION_MIN: String(MAX_DUR_MIN) };
@@ -265,6 +294,11 @@ if (LIST) {
   try { result = JSON.parse(dl.out); } catch {}
   const sum = result.summary || {};
 
+  if (!DRY_RUN && result.results) {
+    const imp = importDownload(result.results);
+    log(`账本：更新 ${imp.touched} 条${imp.bumped ? `，${imp.bumped} 条计入失败重试` : ''}`);
+  }
+
   // ③ 收尾：磁盘告警 + 清理超期运行记录
   const after = freeGB(MEDIA);
   if (after !== null && after < MIN_FREE_GB) {
@@ -277,6 +311,18 @@ if (LIST) {
   const parts = Object.entries(sum).map(([k, v]) => `${k} ${v}`).join(' · ');
   log(`完成：${parts || '无变化'}　落盘 ${((result.bytes || 0) / 1024 / 1024).toFixed(1)} MB　用时 ${result.elapsed_s || 0}s`);
   log(`记录 ${runDir}`);
+
+  // 明确交接给第二段。两段是独立入口，衔接点是账本——
+  // 这里把待办数量说出来，免得「跑完了但没转写」这件事悄无声息。
+  if (!DRY_RUN) {
+    try {
+      const st = stats('douyin');
+      const pending = (st.byStatus || []).find(r => r.status === 'downloaded');
+      if (pending && pending.n) {
+        log(`\n第二段待转写 ${pending.n} 条 → node ${join(SCRIPTS, 'extract.mjs')}`);
+      }
+    } catch {}
+  }
 
   if (sum.failed) log(`⚠️ ${sum.failed} 条全部 CDN 地址失败，可稍后重试：node sync.mjs --resume ${runId}`);
   if (sum.skipped_expired) log(`⚠️ ${sum.skipped_expired} 条地址已过期，需要重新扫描`);
