@@ -123,7 +123,7 @@ node scripts/get_collection.mjs 200 | node scripts/download.mjs - 3
 | 入口 | 作用 |
 |---|---|
 | `sync.mjs` | ① 采集：扫收藏夹 → 下载 → 写账本 |
-| `extract.mjs` | ② 提取：清理过期 mp4 → 转写成文字 → 写账本 |
+| `extract.mjs` | ② 提取：归档 mp4 到外接盘 → 清理过期的 → 转写成文字 → 写账本 |
 | `notes.mjs` | ③ 提炼：读转写稿 → LLM 写笔记 → 写账本 |
 
 以下都在 `scripts/` 下，是被入口调用的零件（或独立的小工具），不是入口。
