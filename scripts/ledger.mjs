@@ -356,6 +356,21 @@ export function markExtracted(id, fields, platform = 'douyin') {
     fields.needs_ocr ? 1 : 0, now(), now(), platform, id);
 }
 
+/**
+ * 主动跳过一条，带原因。
+ *
+ * 第三段判「这份转写稿撑不起一篇笔记」时走这里，而不是 markFailed——
+ * 那不是失败，是材料不够。配合 needs_ocr=1，等 OCR 补完画面文字后
+ * 把它退回 transcribed 重走一遍提炼即可。
+ */
+export function markSkipped(id, reason, { needsOcr = false, platform = 'douyin' } = {}) {
+  return db().prepare(`
+    UPDATE items SET status = 'skipped', skip_reason = ?, needs_ocr = ?,
+                     attempts = 0, last_error = NULL, updated_at = ?
+    WHERE platform = ? AND id = ?
+  `).run(reason || null, needsOcr ? 1 : 0, now(), platform, id);
+}
+
 /** 记录一次失败。超过上限则转 failed，避免无限重试烧 API 额度。 */
 export function markFailed(id, error, platform = 'douyin', maxAttempts = 3) {
   const d = db();
