@@ -20,15 +20,18 @@
 //   node extract.mjs --clean-only     只清理过期 mp4，不转写
 //   node extract.mjs --keep-days 0    临时改保留期（默认 7 天）
 //   node extract.mjs --clean-only --clean-limit 1   小步试删
+//   node extract.mjs --archive-only   只把已转写的 mp4 搬到外接盘，不转写
+//   node extract.mjs --archive-to /Volumes/X/dir    临时指定归档目录
 //
 // 退出码见 stage.mjs 的约定（0 正常 / 1 出错 / 3 已在跑 / 5 磁盘 / 6 缺配置）。
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, cpSync, readdirSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
-import { makeCfg, DUST_HOME, CONF_FILE } from './scripts/config.mjs';
-import { claim, markTranscribed, markFailed, markMediaDeleted, cleanable, db } from './scripts/ledger.mjs';
+import { makeCfg, DUST_HOME, CONF_FILE, expand } from './scripts/config.mjs';
+import { claim, markTranscribed, markFailed, markMediaDeleted, cleanable,
+         archivable, setMediaPath, db } from './scripts/ledger.mjs';
 import { createStage, freeGB, EXIT } from './scripts/stage.mjs';
 
 const argv = process.argv.slice(2);
@@ -51,6 +54,12 @@ const TEXT_DIR    = cfg('DUST_TEXT', join(DUST_HOME, 'text'));
 const KEEP_DAYS   = Number(valOf('--keep-days') ?? cfg('DUST_MEDIA_KEEP_DAYS', 7));
 // 一轮最多删多少条。首次放开保留期时用它小步试，别一把删几千个目录。
 const CLEAN_LIMIT = Number(valOf('--clean-limit') || 1000);
+
+// 归档：转写完的 mp4 搬到外接盘，从此不再被保留期清理。
+// 留空 = 不启用，行为跟以前完全一样。
+const MEDIA_DIR   = expand(cfg('DUST_MEDIA', join(DUST_HOME, 'media')));
+const ARCHIVE_DIR = expand(valOf('--archive-to') || cfg('DUST_MEDIA_ARCHIVE', ''));
+const ARCHIVE_ONLY = has('--archive-only');
 
 // 领域热词。qwen3-asr 支持拿一段上下文去偏置识别，这是它相对
 // fun-asr / paraformer 的主要优势——收藏夹的词汇面是稳定的
@@ -296,6 +305,106 @@ async function transcribeOne(item, tmpRoot) {
   }
 }
 
+// ── 归档到外接盘 ──────────────────────────────────────────────────
+
+/**
+ * 确认归档目录真的落在另一块盘上。
+ *
+ * **不能用 existsSync 判断「盘插没插」。** macOS 上外接盘没挂载时，
+ * `mkdir -p /Volumes/T7/xxx` 会在**启动盘**上真的建出这个目录；程序会兴高采烈
+ * 地把 mp4「移到外接盘」，实际全写进了内置盘，而等 T7 真插上时系统会把它挂到
+ * `/Volumes/T7 1`，文件就永远留在那个假目录里。内置盘只剩 11 GB，这么塞会塞爆。
+ *
+ * 正确的判断是比设备号：往上找到第一个真实存在的祖先目录，
+ * 它的 dev 必须跟 `/` 的不同——不同才说明那是另一块挂载的盘。
+ *
+ * @returns {string|null} 可用就返回归档根目录，否则 null
+ */
+function archiveRoot() {
+  if (!ARCHIVE_DIR) return null;
+  const rootDev = statSync('/').dev;
+  let probe = ARCHIVE_DIR;
+  while (!existsSync(probe)) {
+    const up = dirname(probe);
+    if (up === probe) return null;
+    probe = up;
+  }
+  if (statSync(probe).dev === rootDev) return null;   // 就在启动盘上，说明盘没挂载
+  mkdirSync(ARCHIVE_DIR, { recursive: true });        // 到这一步才敢建目录
+  return ARCHIVE_DIR;
+}
+
+/**
+ * 把已转写、还留在本地的 mp4 搬到外接盘。
+ *
+ * **每轮全量扫，不只搬本轮刚转的。** 外接盘拔了几天，插回来的那一轮会把
+ * 这几天欠的一起补上——不会有视频因为「归档那天盘没插」而在 7 天后被删掉。
+ *
+ * 跨盘搬不是原子操作（exFAT 更没有原子重命名），所以是「复制 → 核对大小 → 删原件」。
+ * 中途出任何岔子都只留在本地，宁可没搬走，不能搬丢。
+ */
+/**
+ * 目录里的文件数和总字节，用来核对跨盘复制有没有丢东西。
+ *
+ * 跳过 macOS 的元数据伴生文件。exFAT 不支持扩展属性，所以 macOS 往上面写东西时
+ * 会给每个文件额外配一个 `._xxx`（实测每个 4 KB）——它们是复制的副产品不是内容，
+ * 算进来的话源和目标永远对不上。
+ */
+function dirStat(dir) {
+  let files = 0, bytes = 0;
+  for (const f of readdirSync(dir, { withFileTypes: true })) {
+    if (f.name.startsWith('._') || f.name === '.DS_Store') continue;
+    if (f.isDirectory()) { const d = dirStat(join(dir, f.name)); files += d.files; bytes += d.bytes; }
+    else { files++; bytes += statSync(join(dir, f.name)).size; }
+  }
+  return { files, bytes };
+}
+
+function archiveMedia({ dryRun }) {
+  const root = archiveRoot();
+  if (!root) return { n: 0, bytes: 0, skipped: !!ARCHIVE_DIR };
+
+  const rows = archivable(MEDIA_DIR);
+  let n = 0, bytes = 0, failed = 0;
+  for (const r of rows) {
+    const src = dirname(r.media_path);
+    const dst = join(root, basename(src));
+    const dstFile = join(dst, basename(r.media_path));
+    if (dryRun) { n++; bytes += r.media_bytes || 0; continue; }
+    try {
+      if (!existsSync(src)) continue;                 // 本地已经没了，跳过
+      cpSync(src, dst, { recursive: true, force: true });
+
+      // 核对**整个目录**（文件数 + 总字节），不是只看账本记的那个文件名。
+      // 账本里的 media_path 可能本身就是错的——实测有一条记着 video.mp4、
+      // 磁盘上却叫 ' .mp4'（早期版本留下的）。按记录去核对的话，这种条目
+      // 永远搬不走；按目录核对才问的是「东西是不是完整到了对面」。
+      const a = dirStat(src), b = dirStat(dst);
+      if (a.files !== b.files || a.bytes !== b.bytes) {
+        throw new Error(`复制后对不上（源 ${a.files} 个/${a.bytes} 字节，目标 ${b.files} 个/${b.bytes} 字节）`);
+      }
+
+      // 目标里究竟叫什么，以磁盘为准：账本记的名字在就用它，不在就认目录里
+      // 唯一的那个视频文件，并把账本修正过来。磁盘是事实，账本跟着事实走。
+      let finalPath = dstFile;
+      if (!existsSync(finalPath)) {
+        const vids = readdirSync(dst).filter(f => !f.startsWith('._') && /\.(mp4|mov|webm|m4v)$/i.test(f));
+        if (vids.length !== 1) throw new Error(`目标目录里找不到唯一的视频文件（${vids.length} 个）`);
+        finalPath = join(dst, vids[0]);
+        log(`  · 顺带修正账本路径 ${r.id}：${basename(dstFile)} → ${vids[0]}`);
+      }
+
+      rmSync(src, { recursive: true, force: true });
+      setMediaPath(r.id, finalPath);
+      n++; bytes += r.media_bytes || 0;
+    } catch (e) {
+      failed++;
+      log(`  ✗ 归档失败 ${r.id}: ${e.message}（原件保留在本地）`);
+    }
+  }
+  return { n, bytes, failed, root };
+}
+
 // ── 清理已转写的 mp4 ──────────────────────────────────────────────
 
 /**
@@ -310,7 +419,8 @@ async function transcribeOne(item, tmpRoot) {
  *      （见 docs/待办-OCR增强.md）。删了等于把原料丢了。
  */
 function cleanMedia({ keepDays, dryRun, limit = 1000 }) {
-  const rows = cleanable('douyin', { keepDays, limit });
+  // 只清理还在工作媒体目录里的；搬到外接盘的已经不归保留期管
+  const rows = cleanable('douyin', { keepDays, limit, underPath: MEDIA_DIR });
   if (!rows.length) return { n: 0, bytes: 0, held: 0 };
 
   const done = [];
@@ -345,6 +455,17 @@ async function main() {
     stage.acquireLock();
     log(`dustoff 提取　run=${stage.runId}`);
   }
+
+  // 归档必须跑在清理之前：先把能搬走的搬走，剩下的才轮到保留期判死刑。
+  // 顺序反了的话，插盘那天正好有条目到了第 7 天，会被删在搬走之前。
+  if (ARCHIVE_DIR) {
+    const ar = archiveMedia({ dryRun: DRY_RUN });
+    if (ar.skipped) log(`归档跳过：${ARCHIVE_DIR} 不在已挂载的外接盘上（盘没插？）——mp4 留在本地，仍走 ${KEEP_DAYS} 天保留期`);
+    else if (ar.n) log(`归档 mp4：${ar.n} 条搬到 ${ar.root}，${fmtMB(ar.bytes)}` +
+      (ar.failed ? `，${ar.failed} 条失败（原件保留）` : '') + (DRY_RUN ? '（DRY RUN，未真搬）' : ''));
+    else log(`归档：没有待搬的（本地已转写的 mp4 都搬完了）`);
+  }
+  if (ARCHIVE_ONLY) return;
 
   // 先清理再转写：腾出来的空间本轮就能用上。
   // 放在转写前还有个好处——即使本轮转写失败，清理也已经做了。

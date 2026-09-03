@@ -361,6 +361,28 @@ export function markExtracted(id, fields, platform = 'douyin') {
 }
 
 /**
+ * 捞出「转写完了、mp4 还躺在本地」的条目，用于归档到外接盘。
+ *
+ * 不限于本轮刚转的——每次跑都全量扫一遍还留在 `prefix` 下面的。
+ * 这样漏掉的能补上：外接盘拔了几天，插回来的那一轮会把这几天欠的一起搬走，
+ * 不会有视频因为「归档那天盘没插」而在 7 天后被删掉。
+ */
+export function archivable(prefix, { platform = 'douyin', limit = 10000 } = {}) {
+  return db().prepare(`
+    SELECT id, title, media_path, media_bytes FROM items
+    WHERE platform = ? AND status IN ('transcribed','extracted')
+      AND media_deleted = 0 AND media_path IS NOT NULL AND media_path LIKE ?
+    ORDER BY transcribed_at LIMIT ?
+  `).all(platform, prefix + '%', limit);
+}
+
+/** 媒体文件搬了家，更新账本里的位置。 */
+export function setMediaPath(id, path, platform = 'douyin') {
+  return db().prepare('UPDATE items SET media_path = ?, updated_at = ? WHERE platform = ? AND id = ?')
+    .run(path, now(), platform, id);
+}
+
+/**
  * 捞出「笔记是旧版 prompt 写的」那些条目。
  * 改完提炼指令跑 `notes.mjs --stale`，只重跑真正过期的，不用整批重来。
  */
@@ -435,16 +457,22 @@ export function requeueSilent(platform = 'douyin') {
  *
  * @param {number} keepDays 转写完成后保留多少天。0 表示转完即可删。
  */
-export function cleanable(platform = 'douyin', { keepDays = 7, limit = 1000 } = {}) {
+export function cleanable(platform = 'douyin', { keepDays = 7, limit = 1000, underPath = null } = {}) {
   const cutoff = now() - keepDays * 86400;
+  // underPath 把清理范围限定在「工作媒体目录」内。归档到外接盘的条目路径在这个
+  // 前缀之外，天然就出了保留期的管辖——**保留期管的是本地磁盘压力，
+  // 不是「这条素材还要不要」**。不加这道过滤的话，归档等于白做：搬到外接盘
+  // 的文件会在第 7 天照样被删掉。用路径前缀而不是新加一个 archived 字段，
+  // 是因为「文件在哪」本身就已经回答了「归没归档」，不必存两份真相。
+  const where = underPath ? 'AND media_path LIKE ?' : '';
+  const args = [platform, cutoff];
+  if (underPath) args.splice(1, 0, underPath + '%');
   return db().prepare(`
     SELECT id, title, media_path, media_bytes, transcribed_at FROM items
     WHERE platform = ? AND status IN ('transcribed','extracted')
-      AND media_deleted = 0 AND media_path IS NOT NULL
+      AND media_deleted = 0 AND media_path IS NOT NULL ${where}
       AND COALESCE(transcribed_at, 0) <= ?
-    ORDER BY transcribed_at
-    LIMIT ?
-  `).all(platform, cutoff, limit);
+    ORDER BY transcribed_at LIMIT ?`).all(...args, limit);
 }
 
 /** 某个 id 是否已知——扫描层增量判断「撞到已知就停」用。 */
