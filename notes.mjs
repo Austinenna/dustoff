@@ -17,6 +17,7 @@
 //   node notes.mjs --force            已写过的重写
 //   node notes.mjs --out DIR          写到别处且不碰账本（打磨 prompt 用，见下）
 //   node notes.mjs --effort low       临时换档，跟默认档做 A/B 对照
+//   node notes.mjs --force --rename   重写时也让文件名跟着新标题变（默认沿用旧名）
 //
 // --out 是给「验证质量」那一步准备的：prompt 定稿前生成的笔记不该进知识库，
 // 也不该把条目标成 extracted——否则改一版 prompt 就要手工清一次现场。
@@ -38,6 +39,7 @@ const FORCE   = has('--force');
 const ONLY_ID = valOf('--id');
 const LIMIT   = Number(valOf('--limit') || 0);
 const OUT_DIR = valOf('--out');
+const RENAME  = has('--rename');   // 允许文件名跟着新标题变（默认沿用旧名）
 const TRIAL   = !!OUT_DIR;          // 试跑：写文件但不碰账本
 
 const cfg = makeCfg();
@@ -230,10 +232,22 @@ function writeNote(item, note, { dir }) {
   // collected_at 是从 listcollection 的 cursor 还原的估计值，取不到就退回
   // first_seen（扫到的那天），再取不到才用发布日。
   const collected = item.collected_at || item.first_seen || item.created_at;
-  const base = `${ymd(collected)}-${slug(note.标题)}`;
+
+  // 重新生成时**沿用已有的文件名**，不跟着新标题变。
+  //
+  // 为什么：标题是模型每次现写的，实测同一条视频两次生成，10 篇里 8 篇标题不一样
+  // （「抗焦虑心法」↔「无所畏惧」）。文件名要是跟着标题走，改一版 prompt 重跑一遍
+  // 就多出一整套文件、旧的全成孤儿——而打磨 prompt 正是要反复重跑的事。
+  //
+  // 所以文件名认第一次，跟账本里 collected_at「只认第一次算出的值」是同一个道理：
+  // 名字是身份，内容才是产物。第一次起坏了想改，加 --rename。
+  let base = `${ymd(collected)}-${slug(note.标题)}`;
+  const old = item.note_path && !RENAME ? item.note_path.split('/').pop().replace(/\.md$/, '') : null;
+  if (old) base = old;
+
   // 同一天撞名的加 id 后 6 位区分。宁可文件名难看，也不要静默覆盖掉一篇。
   let file = join(dir, `${base}.md`);
-  if (existsSync(file)) file = join(dir, `${base}-${String(item.id).slice(-6)}.md`);
+  if (!old && existsSync(file)) file = join(dir, `${base}-${String(item.id).slice(-6)}.md`);
 
   const decay = DECAY.includes(note.时效) ? note.时效 : 'none';
   const tags = Array.isArray(note.标签) ? note.标签 : [];
