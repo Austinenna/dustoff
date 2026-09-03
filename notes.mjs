@@ -76,6 +76,20 @@ const { log, die, notify } = stage;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const DECAY = ['none', 'slow', 'fast', 'event'];
+
+/**
+ * 给 frontmatter 的值加引号。
+ *
+ * 不是洁癖，是必须：抖音的 aweme_id 是 19 位数，不加引号的话 YAML 解析器
+ * 按整数读，而它超过 JS 的安全整数上限（2^53 ≈ 9.007e15），转成 float64
+ * 末几位就丢了——7676650803859361059 会变成 7676650803859361000。
+ * 文件里字是对的，但任何 YAML 感知的工具（Obsidian Dataview、自己写的脚本）
+ * 读到的都是错 ID，而且不报错，静默错。
+ *
+ * 标题和作者同理：里面出现半角冒号、井号、引号都会把 YAML 拆坏。
+ * 日期故意不走这里——留成裸值好让 Obsidian 认成日期类型，能排序能筛。
+ */
+const y = v => `"${String(v ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ')}"`;
 const ymd = t => t ? new Date(t * 1000).toLocaleDateString('sv-SE') : '';   // sv-SE 就是 YYYY-MM-DD
 const fmtDur = s => s >= 60 ? `${Math.floor(s / 60)}分${String(Math.round(s % 60)).padStart(2, '0')}秒` : `${Math.round(s)}秒`;
 
@@ -254,22 +268,22 @@ function writeNote(item, note, { dir }) {
 
   const fm = [
     '---',
-    `标题: ${note.标题 || item.title || ''}`,
+    `标题: ${y(note.标题 || item.title)}`,
     '来源: 抖音',
-    `作者: ${item.author || ''}`,
-    `视频ID: ${item.id}`,
-    `链接: https://www.douyin.com/video/${item.id}`,
+    `作者: ${y(item.author)}`,
+    `视频ID: ${y(item.id)}`,
+    `链接: ${y(`https://www.douyin.com/video/${item.id}`)}`,
     `发布日期: ${ymd(item.created_at)}`,
     `收藏日期: ${ymd(collected)}`,
     `下载日期: ${ymd(item.downloaded_at)}`,
     `收录日期: ${ymd(Math.floor(Date.now() / 1000))}`,
-    `时长: ${fmtDur(item.duration_s || 0)}`,
+    `时长: ${y(fmtDur(item.duration_s || 0))}`,
     // 指回原料。笔记是派生物，改 prompt 重生成随时可以，但转写稿是花钱买的、
     // 不可再生——读笔记时想核对原话，不该还要去猜文件在哪。
-    `转写稿: ${item.text_path || ''}`,
-    `分类: ${note.分类 || '未分类'}`,
-    `时效: ${decay}`,
-    `标签: [${tags.join(', ')}]`,
+    `转写稿: ${y(item.text_path)}`,
+    `分类: ${y(note.分类 || '未分类')}`,
+    `时效: ${y(decay)}`,
+    `标签: [${tags.map(y).join(', ')}]`,
     '---',
     '',
   ].join('\n');
