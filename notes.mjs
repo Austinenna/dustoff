@@ -250,6 +250,9 @@ function writeNote(item, note, { dir }) {
     `下载日期: ${ymd(item.downloaded_at)}`,
     `收录日期: ${ymd(Math.floor(Date.now() / 1000))}`,
     `时长: ${fmtDur(item.duration_s || 0)}`,
+    // 指回原料。笔记是派生物，改 prompt 重生成随时可以，但转写稿是花钱买的、
+    // 不可再生——读笔记时想核对原话，不该还要去猜文件在哪。
+    `转写稿: ${item.text_path || ''}`,
     `分类: ${note.分类 || '未分类'}`,
     `时效: ${decay}`,
     `标签: [${tags.join(', ')}]`,
@@ -262,9 +265,18 @@ function writeNote(item, note, { dir }) {
   if (note.引流说明) foot.push(`> ${note.引流说明}`);
   if (note.缺料说明) foot.push(`> ⚠️ ${note.缺料说明}`);
 
+  // 页脚给一条能点的回源路径。frontmatter 里那行是纯路径（好复制、好被程序读），
+  // 这里是 file:// 链接（Obsidian 里能直接点开）。
+  const src = [];
+  if (item.text_path) src.push(`[转写稿](file://${encodeURI(item.text_path)})`);
+  src.push(`[原视频](https://www.douyin.com/video/${item.id})`);
+
   const body = String(note.正文 || '').trim();
   mkdirSync(dir, { recursive: true });
-  writeFileSync(file, fm + body + (foot.length ? '\n\n' + foot.join('\n>\n') + '\n' : '\n'), 'utf8');
+  writeFileSync(file,
+    fm + body +
+    (foot.length ? '\n\n' + foot.join('\n>\n') : '') +
+    `\n\n---\n${src.join(' · ')}\n`, 'utf8');
   return { file, decay, tags };
 }
 
