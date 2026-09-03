@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS items (
   audio_seconds INTEGER,            -- 送进 ASR 的音频秒数，即计费单位
   keyframes     INTEGER,            -- 关键帧张数
   note_path     TEXT,               -- 笔记落在哪
+  prompt_hash   TEXT,               -- 用哪一版提炼指令写的（PROMPT 的 sha256 前 8 位）。
+                                    -- prompt 会反复改，没这个就分不清哪些笔记还停在旧版，
+                                    -- 只能整批重跑。只哈希 PROMPT 本身，不含模型和 effort——
+                                    -- 否则做一次 effort 的 A/B 就会把全部笔记标成过期
 
   -- ── AI 判断结果 ──────────────────────────────────
   category      TEXT,               -- AI技术 / 游戏攻略 / 生活方式 / 其他
@@ -349,11 +353,24 @@ export function markExtracted(id, fields, platform = 'douyin') {
   return db().prepare(`
     UPDATE items SET status = 'extracted', text_source = ?, text_chars = ?, keyframes = ?,
                      note_path = ?, category = ?, decay = ?, needs_ocr = ?,
-                     extracted_at = ?, updated_at = ?
+                     prompt_hash = ?, extracted_at = ?, updated_at = ?
     WHERE platform = ? AND id = ?
   `).run(fields.text_source || null, fields.text_chars || null, fields.keyframes || null,
     fields.note_path || null, fields.category || null, fields.decay || null,
-    fields.needs_ocr ? 1 : 0, now(), now(), platform, id);
+    fields.needs_ocr ? 1 : 0, fields.prompt_hash || null, now(), now(), platform, id);
+}
+
+/**
+ * 捞出「笔记是旧版 prompt 写的」那些条目。
+ * 改完提炼指令跑 `notes.mjs --stale`，只重跑真正过期的，不用整批重来。
+ */
+export function staleNotes(hash, { platform = 'douyin', limit = 10000 } = {}) {
+  return db().prepare(`
+    SELECT * FROM items
+    WHERE platform = ? AND status = 'extracted'
+      AND (prompt_hash IS NULL OR prompt_hash <> ?)
+    ORDER BY extracted_at LIMIT ?
+  `).all(platform, hash, limit);
 }
 
 /**

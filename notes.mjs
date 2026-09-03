@@ -18,16 +18,18 @@
 //   node notes.mjs --out DIR          写到别处且不碰账本（打磨 prompt 用，见下）
 //   node notes.mjs --effort low       临时换档，跟默认档做 A/B 对照
 //   node notes.mjs --force --rename   重写时也让文件名跟着新标题变（默认沿用旧名）
+//   node notes.mjs --stale            改完提炼指令后，只重跑笔记还停在旧版的那些
 //
 // --out 是给「验证质量」那一步准备的：prompt 定稿前生成的笔记不该进知识库，
 // 也不该把条目标成 extracted——否则改一版 prompt 就要手工清一次现场。
 //
 // 退出码见 stage.mjs 的约定（0 正常 / 1 出错 / 3 已在跑 / 6 缺配置）。
 
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeCfg, DUST_HOME, CONF_FILE, expand } from './scripts/config.mjs';
-import { claim, markExtracted, markSkipped, markFailed, db } from './scripts/ledger.mjs';
+import { claim, markExtracted, markSkipped, markFailed, staleNotes, db } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 
 const argv = process.argv.slice(2);
@@ -40,6 +42,7 @@ const ONLY_ID = valOf('--id');
 const LIMIT   = Number(valOf('--limit') || 0);
 const OUT_DIR = valOf('--out');
 const RENAME  = has('--rename');   // 允许文件名跟着新标题变（默认沿用旧名）
+const STALE   = has('--stale');    // 只重跑「笔记是旧版 prompt 写的」那些
 const TRIAL   = !!OUT_DIR;          // 试跑：写文件但不碰账本
 
 const cfg = makeCfg();
@@ -95,6 +98,11 @@ const fmtDur = s => s >= 60 ? `${Math.floor(s / 60)}分${String(Math.round(s % 6
 
 class PermanentError extends Error {}
 
+// 提炼指令的指纹。写进账本，改完 PROMPT 就能用 --stale 精确捞出还没重跑的，
+// 不必整批重来。只哈希 PROMPT 本身——把模型和 effort 也算进去的话，
+// 做一次 effort 的 A/B 对照就会把全部笔记标成过期，那不是过期，是换了个档跑。
+const promptHash = () => createHash('sha256').update(PROMPT).digest('hex').slice(0, 8);
+
 // ── 提炼指令 ──────────────────────────────────────────────────────
 // 来源是 docs/第三段-笔记规格.md。那份文档是给人看的，这里是给模型看的，
 // 改一处就要同步另一处——否则文档说的和实际跑的会悄悄分家。
@@ -123,9 +131,11 @@ const PROMPT = `你把抖音口播转写稿整理成个人知识库笔记，只�
 整条视频就在讲那个东西本身（比如一条介绍某款键盘的视频），
 那么推销物就是主题，属于正文，不要剔。
 
-**缺料说明**：只在画面上、语音里拿不到的东西（阵容码、仓库地址、型号、链接、
-屏幕上的代码），在这里说明缺了什么。将来会对这些条目集中补 OCR。
-没有缺的就留空字符串。
+**缺料说明**：**你只能看到转写稿，看不到视频画面。** 所以只对转写稿下断言，
+不要写「画面中也没有」「画面里未给出」这类你无法知道的话。
+当转写稿提到某样东西却没给出内容（阵容码、仓库地址、型号、链接、屏幕上的代码），
+就在这里写明缺的是什么，措辞落在转写稿上——比如「转写稿里没有出现仓库地址」。
+将来会对这些条目集中补 OCR。没有缺的就留空字符串。
 
 **分类**：一个词的名词短语，自己判断，不要硬套到某个预设列表里。
 **时效**：none=不过期（原理、方法论、审美）· slow=年为单位（工具用法、职业建议）·
@@ -146,6 +156,8 @@ fast=月为单位（软件版本、游戏版本、排名）· event=绑死某个
   "引流说明": "",
   "正文": "# 核心观点\\n...\\n\\n## 小标题\\n...\\n\\n## 结论\\n..."
 }`;
+
+const HASH = promptHash();
 
 // ── 调模型 ────────────────────────────────────────────────────────
 
@@ -361,6 +373,9 @@ async function main() {
     if (items[0].status === 'extracted' && !FORCE && !TRIAL) {
       die(EXIT.ERROR, `${ONLY_ID} 已经写过笔记了（${items[0].note_path}）。要重写加 --force。`);
     }
+  } else if (STALE) {
+    items = staleNotes(HASH, { limit: LIMIT || 10000 });
+    if (!items.length) { log(`所有笔记都是当前这版指令（${HASH}）写的，没有要重跑的。`); return; }
   } else {
     const status = FORCE ? 'extracted' : 'transcribed';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
@@ -368,7 +383,7 @@ async function main() {
   if (LIMIT) items = items.slice(0, LIMIT);
   if (!items.length) { log('没有待提炼的条目。'); return; }
 
-  log(`模型 ${MODEL} · effort ${EFFORT}`);
+  log(`模型 ${MODEL} · effort ${EFFORT} · 指令版本 ${HASH}`);
   log(`待提炼 ${items.length} 条，转写稿共 ${items.reduce((n, i) => n + (i.text_chars || 0), 0).toLocaleString()} 字`);
   if (TRIAL) log(`试跑模式：笔记写到 ${NOTES_DIR}，不改账本`);
   else log(`笔记 → ${NOTES_DIR}`);
@@ -420,6 +435,7 @@ async function main() {
             text_source: item.text_source || 'asr', text_chars: item.text_chars,
             keyframes: item.keyframes, note_path: w.file,
             category: r.note.分类 || null, decay: w.decay, needs_ocr: r.needsOcr,
+            prompt_hash: HASH,
           });
         }
         if (r.needsOcr) stat.ocr++;
@@ -462,7 +478,7 @@ async function main() {
     try {
       stage.ensureDir();
       writeFileSync(join(stage.runDir, 'result.json'), JSON.stringify({
-        ok: !aborted, model: MODEL, effort: EFFORT,
+        ok: !aborted, model: MODEL, effort: EFFORT, prompt_hash: HASH,
         elapsed_s: Math.round((Date.now() - t0) / 1000),
         counts: stat, categories: Object.fromEntries(cats), failures,
       }, null, 2));
