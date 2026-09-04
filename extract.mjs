@@ -22,6 +22,7 @@
 //   node extract.mjs --clean-only --clean-limit 1   小步试删
 //   node extract.mjs --archive-only   只把已转写的 mp4 搬到外接盘，不转写
 //   node extract.mjs --archive-to /Volumes/X/dir    临时指定归档目录
+//   node extract.mjs --backup-only    只把转写稿备份到外接盘，不转写
 //
 // 退出码见 stage.mjs 的约定（0 正常 / 1 出错 / 3 已在跑 / 5 磁盘 / 6 缺配置）。
 
@@ -60,6 +61,11 @@ const CLEAN_LIMIT = Number(valOf('--clean-limit') || 1000);
 const MEDIA_DIR   = expand(cfg('DUST_MEDIA', join(DUST_HOME, 'media')));
 const ARCHIVE_DIR = expand(valOf('--archive-to') || cfg('DUST_MEDIA_ARCHIVE', ''));
 const ARCHIVE_ONLY = has('--archive-only');
+
+// 转写稿备份到外接盘。跟归档共用挂载点判断，但**是复制不是移动**——
+// 本地那份第三段每次提炼都要读，不能搬走。
+const TEXT_BACKUP  = expand(valOf('--backup-to') || cfg('DUST_TEXT_BACKUP', ''));
+const BACKUP_ONLY  = has('--backup-only');
 
 // 领域热词。qwen3-asr 支持拿一段上下文去偏置识别，这是它相对
 // fun-asr / paraformer 的主要优势——收藏夹的词汇面是稳定的
@@ -308,7 +314,7 @@ async function transcribeOne(item, tmpRoot) {
 // ── 归档到外接盘 ──────────────────────────────────────────────────
 
 /**
- * 确认归档目录真的落在另一块盘上。
+ * 确认某个目录真的落在另一块挂载的盘上。
  *
  * **不能用 existsSync 判断「盘插没插」。** macOS 上外接盘没挂载时，
  * `mkdir -p /Volumes/T7/xxx` 会在**启动盘**上真的建出这个目录；程序会兴高采烈
@@ -320,18 +326,18 @@ async function transcribeOne(item, tmpRoot) {
  *
  * @returns {string|null} 可用就返回归档根目录，否则 null
  */
-function archiveRoot() {
-  if (!ARCHIVE_DIR) return null;
+function mountedDir(dir) {
+  if (!dir) return null;
   const rootDev = statSync('/').dev;
-  let probe = ARCHIVE_DIR;
+  let probe = dir;
   while (!existsSync(probe)) {
     const up = dirname(probe);
     if (up === probe) return null;
     probe = up;
   }
   if (statSync(probe).dev === rootDev) return null;   // 就在启动盘上，说明盘没挂载
-  mkdirSync(ARCHIVE_DIR, { recursive: true });        // 到这一步才敢建目录
-  return ARCHIVE_DIR;
+  mkdirSync(dir, { recursive: true });                // 到这一步才敢建目录
+  return dir;
 }
 
 /**
@@ -361,7 +367,7 @@ function dirStat(dir) {
 }
 
 function archiveMedia({ dryRun }) {
-  const root = archiveRoot();
+  const root = mountedDir(ARCHIVE_DIR);
   if (!root) return { n: 0, bytes: 0, skipped: !!ARCHIVE_DIR };
 
   const rows = archivable(MEDIA_DIR);
@@ -403,6 +409,45 @@ function archiveMedia({ dryRun }) {
     }
   }
   return { n, bytes, failed, root };
+}
+
+// ── 转写稿备份 ────────────────────────────────────────────────────
+
+/**
+ * 把转写稿复制一份到外接盘。**是复制不是移动**——本地那份必须留着，
+ * 第三段每次提炼都要读它。
+ *
+ * 为什么单独做这一遍：转写稿一年只有 35 MB，却是整条链路里唯一
+ * **花钱买来、丢了要重新掏钱**的东西（全量重转约 ¥109）；
+ * 而 mp4 一年 16.5 GB 却是可再生的（视频还在抖音上）。
+ * 保护力度跟体积正好该反过来。
+ *
+ * **只增不删。** 本地删掉的，外接盘上那份不跟着删——跟着删就不叫备份了。
+ * 一年 35 MB，留几个孤儿无所谓。
+ *
+ * 跟归档一样每轮全量扫：盘拔了几天，插回来的那一轮把欠的一起补上。
+ */
+function backupText({ dryRun }) {
+  const root = mountedDir(TEXT_BACKUP);
+  if (!root) return { n: 0, bytes: 0, skipped: !!TEXT_BACKUP };
+  if (!existsSync(TEXT_DIR)) return { n: 0, bytes: 0 };
+
+  let n = 0, bytes = 0, failed = 0, same = 0;
+  for (const f of readdirSync(TEXT_DIR)) {
+    if (f.startsWith('.')) continue;
+    const src = join(TEXT_DIR, f), dst = join(root, f);
+    let size;
+    try { const st = statSync(src); if (!st.isFile()) continue; size = st.size; } catch { continue; }
+    // 已有一份且大小一致就跳过。转写稿写一次就不再改，比大小够用
+    if (existsSync(dst)) { try { if (statSync(dst).size === size) { same++; continue; } } catch {} }
+    if (dryRun) { n++; bytes += size; continue; }
+    try {
+      cpSync(src, dst, { force: true });
+      if (!existsSync(dst) || statSync(dst).size !== size) throw new Error('复制后大小对不上');
+      n++; bytes += size;
+    } catch (e) { failed++; log(`  ✗ 备份失败 ${f}: ${e.message}`); }
+  }
+  return { n, bytes, failed, same, root };
 }
 
 // ── 清理已转写的 mp4 ──────────────────────────────────────────────
@@ -447,6 +492,23 @@ function cleanMedia({ keepDays, dryRun, limit = 1000 }) {
 
 // ── 主流程 ────────────────────────────────────────────────────────
 
+/** 跑一次转写稿备份并把结果说清楚。转写前后各调一次。 */
+function runBackup() {
+  if (!TEXT_BACKUP) return;
+  const bk = backupText({ dryRun: DRY_RUN });
+  if (bk.skipped) {
+    log(`转写稿备份跳过：${TEXT_BACKUP} 不在已挂载的外接盘上（盘没插？）——下次插上会把欠的一起补`);
+  } else if (bk.n) {
+    log(`转写稿备份：${bk.n} 个文件 → ${bk.root}，${fmtMB(bk.bytes)}` +
+      (bk.same ? `（另有 ${bk.same} 个已是最新）` : '') +
+      (bk.failed ? `，${bk.failed} 个失败` : '') + (DRY_RUN ? '（DRY RUN，未真备份）' : ''));
+  } else if (bk.same) {
+    // 「没事可做」也要说一声。不说的话你分不清「备份跑了且是最新的」
+    // 和「备份根本没跑」——而这两件事的后果差很远。
+    log(`转写稿备份：${bk.same} 个文件都已是最新 → ${bk.root}`);
+  }
+}
+
 async function main() {
   if (!API_KEY && !DRY_RUN && !CLEAN_ONLY) {
     die(EXIT.CONFIG, `未配置 DUST_DASHSCOPE_KEY。写进 ${CONF_FILE}：DUST_DASHSCOPE_KEY=sk-xxxx`);
@@ -466,6 +528,11 @@ async function main() {
     else log(`归档：没有待搬的（本地已转写的 mp4 都搬完了）`);
   }
   if (ARCHIVE_ONLY) return;
+
+  // 备份要跑两次：这里一次（把之前欠的补上），转写完再一次（把本轮新产的带上）。
+  // 只在结尾跑的话，本轮转写失败就连之前欠的也一起没备份成。
+  runBackup();
+  if (BACKUP_ONLY) return;
 
   // 先清理再转写：腾出来的空间本轮就能用上。
   // 放在转写前还有个好处——即使本轮转写失败，清理也已经做了。
@@ -573,6 +640,10 @@ async function main() {
     log(`转写稿 → ${TEXT_DIR}`);
   }
   if (stat.empty) log(`其中 ${stat.empty} 条没转出字——多半是纯画面无人声，见 docs/待办-OCR增强.md`);
+
+  // 本轮新产的转写稿也备份掉。转写稿是唯一花钱买来、不可再生的东西，
+  // 不该让它裸奔到下一次运行。
+  if (stat.ok) runBackup();
 
   if (!CASUAL) {
     // 留下现场：凌晨无人值守时这是唯一能回溯的东西
