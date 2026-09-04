@@ -93,7 +93,11 @@ function cfg(key, fallback) {
   return v !== undefined && v !== '' ? expand(v) : fallback;
 }
 
-const MEDIA        = resolve(cfg('DUST_MEDIA', join(DUST_HOME, 'media')));
+// 外接盘根路径，跟 extract.mjs 用同一个键。--init 首次全量下载直接落到外接盘，
+// 因为内置盘装不下（实测只剩 11 GB，存量 22 GB）。
+const EXTERNAL     = cfg('DUST_EXTERNAL', '');
+const MEDIA        = resolve(cfg('DUST_MEDIA',
+  MODE_INIT && EXTERNAL ? join(EXTERNAL, 'dustoff-media') : join(DUST_HOME, 'media')));
 const SCAN_COUNT   = Number(cfg('DUST_SCAN_COUNT', MODE_INIT ? 99999 : 200));
 const CONCURRENCY  = Number(cfg('DUST_CONCURRENCY', 3));
 const KEEP_RUNS    = Number(cfg('DUST_KEEP_RUNS', 30));

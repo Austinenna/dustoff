@@ -59,12 +59,18 @@ const CLEAN_LIMIT = Number(valOf('--clean-limit') || 1000);
 // 归档：转写完的 mp4 搬到外接盘，从此不再被保留期清理。
 // 留空 = 不启用，行为跟以前完全一样。
 const MEDIA_DIR   = expand(cfg('DUST_MEDIA', join(DUST_HOME, 'media')));
-const ARCHIVE_DIR = expand(valOf('--archive-to') || cfg('DUST_MEDIA_ARCHIVE', ''));
+// 外接盘只配一个根路径。子目录由程序自己定，换盘（T7 → T8）只改这一行——
+// 三处各写一遍完整路径的话，漏改一处就会一半文件去新盘一半去老盘，
+// 而老盘没插时那一半会安静地跳过，未必发现得了。
+const EXTERNAL    = expand(cfg('DUST_EXTERNAL', ''));
+const sub = name => EXTERNAL ? join(EXTERNAL, name) : '';
+// 个别键仍可单独覆盖（比如想把两种产物放在不同的盘上），但不配就跟着根路径走
+const ARCHIVE_DIR = expand(valOf('--archive-to') || cfg('DUST_MEDIA_ARCHIVE', '') || sub('dustoff-media'));
 const ARCHIVE_ONLY = has('--archive-only');
 
 // 转写稿备份到外接盘。跟归档共用挂载点判断，但**是复制不是移动**——
 // 本地那份第三段每次提炼都要读，不能搬走。
-const TEXT_BACKUP  = expand(valOf('--backup-to') || cfg('DUST_TEXT_BACKUP', ''));
+const TEXT_BACKUP  = expand(valOf('--backup-to') || cfg('DUST_TEXT_BACKUP', '') || sub('dustoff-text'));
 const BACKUP_ONLY  = has('--backup-only');
 
 // 领域热词。qwen3-asr 支持拿一段上下文去偏置识别，这是它相对

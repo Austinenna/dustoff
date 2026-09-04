@@ -183,7 +183,8 @@ DUST_MEDIA_KEEP_DAYS=7
 # 盘没挂载时判断用的是**设备号**不是路径存在性。macOS 上外接盘没挂载时
 # mkdir -p /Volumes/T7/xxx 会在启动盘上真的建出这个目录，然后把文件
 # 全写进内置盘——那才是最坏的情况。
-DUST_MEDIA_ARCHIVE=/Volumes/T7/dustoff-media
+# 不填则用 $DUST_EXTERNAL/dustoff-media（想放别的盘上才需要单独填）
+# DUST_MEDIA_ARCHIVE=
 
 # ── 转写稿备份到外接盘（默认行为，强烈建议保持开启）───────────
 #
@@ -195,7 +196,8 @@ DUST_MEDIA_ARCHIVE=/Volumes/T7/dustoff-media
 # 16.5 GB 却是可再生的（视频还在抖音上）。保护力度该跟体积反过来。
 #
 # 只增不删：本地删掉的，外接盘那份不跟着删——跟着删就不叫备份了。
-DUST_TEXT_BACKUP=/Volumes/T7/dustoff-text
+# 不填则用 $DUST_EXTERNAL/dustoff-text
+# DUST_TEXT_BACKUP=
 
 # ─────────────────────────────────────────────────────────────
 # 火山引擎 / 豆包语音（备选 ASR 提供方，已搁置）
@@ -287,3 +289,18 @@ DUST_LLM_EFFORT=high
 # 并发和连续失败上限，语义同 DUST_ASR_*
 DUST_LLM_CONCURRENCY=2
 DUST_LLM_MAX_FAILS=5
+
+# ─────────────────────────────────────────────────────────────
+# 外接盘：只配这一个
+# ─────────────────────────────────────────────────────────────
+#
+# 三种用途全从这个根路径派生，换盘（T7 → T8）只改这一行：
+#
+#   $DUST_EXTERNAL/dustoff-media   mp4 归档，以及 --init 首次全量下载的落点
+#   $DUST_EXTERNAL/dustoff-text    转写稿备份
+#
+# 分三处各写一遍完整路径的坏处：漏改一处就会一半文件去新盘、一半去老盘，
+# 而老盘没插时那一半只会安静地跳过——未必发现得了。
+#
+# 留空则三样功能全关：mp4 走保留期删除、转写稿不备份、--init 下到本地。
+DUST_EXTERNAL=/Volumes/T7
