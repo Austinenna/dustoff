@@ -34,6 +34,11 @@ import { makeCfg, DUST_HOME, CONF_FILE, expand } from './scripts/config.mjs';
 import { claim, markTranscribed, markFailed, markMediaDeleted, cleanable,
          archivable, setMediaPath, db } from './scripts/ledger.mjs';
 import { createStage, freeGB, EXIT } from './scripts/stage.mjs';
+import { pathToFileURL } from 'node:url';
+
+// 直接跑还是被 run.mjs import 进来。被 import 时不建运行记录目录、不自动跑 main()——
+// 那一轮的现场归 run.mjs 记，这里再记一份只会把同一件事拆成两处。
+const IS_MAIN = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 
 const argv = process.argv.slice(2);
 const has = f => argv.includes(f);
@@ -91,7 +96,10 @@ const CHUNK_MIN = 150;
 
 // 连续失败这么多条就整轮中止。无人值守时的止损闸——
 // 余额耗尽或 key 失效会让每一条都失败，没有这道闸就会把剩下几千条挨个撞一遍。
-const MAX_CONSECUTIVE_FAILS = Number(cfg('DUST_ASR_MAX_FAILS', 5));
+// 连续几条失败就中止整轮。默认 3 而不是 5：串行跑（run.mjs）时「连续」是真的连续，
+// 信号干净，可以更敏感；并发跑时数到 N 的时候前面若干条其实已经发出去了，
+// 这个数本来就只是个粗闸。
+const MAX_CONSECUTIVE_FAILS = Number(cfg('DUST_ASR_MAX_FAILS', 3));
 
 const NOTIFY   = cfg('DUST_NOTIFY', '1') !== '0';
 const KEEP_RUNS = Number(cfg('DUST_KEEP_RUNS', 30));
@@ -102,7 +110,7 @@ const KEEP_RUNS = Number(cfg('DUST_KEEP_RUNS', 30));
 const CASUAL = DRY_RUN;
 const stage = createStage({
   name: 'extract', dustHome: DUST_HOME,
-  notify: NOTIFY, keepRuns: KEEP_RUNS, record: !CASUAL,
+  notify: NOTIFY, keepRuns: KEEP_RUNS, record: !CASUAL && IS_MAIN,
 });
 const { log, die, notify } = stage;
 
@@ -678,4 +686,9 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e); process.exit(EXIT.ERROR); });
+// run.mjs 逐条串行跑的时候要用这几个。三个入口的行为一个字没变——
+// 直接 `node extract.mjs` 时 IS_MAIN 为真，照旧跑 main()。
+export { transcribeOne, archiveMedia, backupText, cleanMedia, PermanentError, mountedDir };
+export const CONF = { MEDIA_DIR, TEXT_DIR, ARCHIVE_DIR, TEXT_BACKUP, KEEP_DAYS, MAX_ATTEMPTS };
+
+if (IS_MAIN) main().catch(e => { console.error(e); process.exit(EXIT.ERROR); });

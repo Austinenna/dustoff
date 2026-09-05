@@ -31,6 +31,10 @@ import { join } from 'node:path';
 import { makeCfg, DUST_HOME, CONF_FILE, expand } from './scripts/config.mjs';
 import { claim, markExtracted, markSkipped, markFailed, staleNotes, db } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
+import { pathToFileURL } from 'node:url';
+
+// 同 extract.mjs：被 run.mjs import 时不建自己的运行记录目录。
+const IS_MAIN = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 
 const argv = process.argv.slice(2);
 const has = f => argv.includes(f);
@@ -52,7 +56,8 @@ const MODEL       = cfg('DUST_LLM_MODEL', 'glm-5.3-flash');
 const EFFORT      = valOf('--effort') || cfg('DUST_LLM_EFFORT', 'high');
 const CONCURRENCY = Number(cfg('DUST_LLM_CONCURRENCY', 2));
 const MAX_ATTEMPTS = Number(cfg('DUST_MAX_ATTEMPTS', 3));
-const MAX_CONSECUTIVE_FAILS = Number(cfg('DUST_LLM_MAX_FAILS', 5));
+// 默认 3，理由同 extract.mjs：串行下「连续」是真的连续，信号可以更敏感。
+const MAX_CONSECUTIVE_FAILS = Number(cfg('DUST_LLM_MAX_FAILS', 3));
 const NOTES_DIR   = expand(OUT_DIR || cfg('DUST_NOTES', join(process.env.HOME, 'Documents', '抖音收藏')));
 const NOTIFY      = cfg('DUST_NOTIFY', '1') !== '0';
 const KEEP_RUNS   = Number(cfg('DUST_KEEP_RUNS', 30));
@@ -73,7 +78,7 @@ const PRICE_OUT = Number(cfg('DUST_LLM_PRICE_OUT', 2.8));
 const CASUAL = DRY_RUN || TRIAL;
 const stage = createStage({
   name: 'notes', dustHome: DUST_HOME,
-  notify: NOTIFY, keepRuns: KEEP_RUNS, record: !CASUAL,
+  notify: NOTIFY, keepRuns: KEEP_RUNS, record: !CASUAL && IS_MAIN,
 });
 const { log, die, notify } = stage;
 
@@ -491,4 +496,7 @@ async function main() {
   if (aborted) process.exit(EXIT.ERROR);
 }
 
-main().catch(e => die(EXIT.ERROR, e.stack || e.message));
+export { noteOne, writeNote, PermanentError, HASH };
+export const CONF = { NOTES_DIR, MODEL, EFFORT, MAX_ATTEMPTS, API_KEY };
+
+if (IS_MAIN) main().catch(e => die(EXIT.ERROR, e.stack || e.message));
