@@ -1,5 +1,5 @@
 // 当前运行策略：本地、小批量。旧配置只能收紧上限，不能绕过已确认的限制。
-import { existsSync, lstatSync, readlinkSync, statfsSync, readdirSync, mkdirSync, openSync, writeSync, closeSync, fsyncSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, readlinkSync, readFileSync, statfsSync, readdirSync, mkdirSync, openSync, writeSync, closeSync, fsyncSync, renameSync, rmSync } from 'node:fs';
 import { resolve, dirname, join, sep } from 'node:path';
 import { makeCfg, DUST_HOME } from './config.mjs';
 const cfg = makeCfg();
@@ -60,7 +60,7 @@ export function deadlineMs(cap = POLICY.requestMs) {
   return Math.max(1, Math.min(cap, remaining));
 }
 export function requestSignal() { return AbortSignal.timeout(deadlineMs()); }
-export function atomicWrite(path, text) {
+export function atomicWrite(path, text, { verify } = {}) {
   path = localPath(path);
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.${process.pid}.tmp`;
@@ -70,7 +70,14 @@ export function atomicWrite(path, text) {
     while (at < bytes.length) at += writeSync(fd, bytes, at, bytes.length - at);
     fsyncSync(fd);
   } finally { closeSync(fd); }
-  renameSync(temp, path);
+  try {
+    // 可选的成果校验在替换目标前执行；失败时保留已有文件。
+    if (verify) verify(readFileSync(temp));
+    renameSync(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 }
 // 每块在写入前核实真实总占用，远端未提供 Content-Length 也不能超预算落盘。
 export async function writeMedia(stream, path) {

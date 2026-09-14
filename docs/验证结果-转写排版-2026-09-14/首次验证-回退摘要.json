@@ -1,0 +1,38 @@
+{
+  "source": "真实已存 ASR 原稿，来源元数据沿用之前的真实样本笔记；真实调用现有模型。未重新下载、未调用 ASR、未写正式账本。",
+  "model": "glm-5.3-flash",
+  "prompt_hash": "92c32588",
+  "requests": [
+    {
+      "model": "glm-5.3-flash",
+      "response_format": {
+        "type": "json_object"
+      },
+      "max_tokens": 8000,
+      "reasoning_effort": "high",
+      "message_roles": [
+        "system",
+        "user"
+      ]
+    }
+  ],
+  "elapsed_ms": 7807,
+  "usage": {
+    "in": 1739,
+    "out": 679,
+    "think": 211,
+    "yuan": 0.0032924
+  },
+  "original_chars": 801,
+  "segment_count": 25,
+  "transcript": {
+    "sha256": "82e22a8e961b53333b989bf98ada93eaa77a920acc156f1ecf6b689bd4f33495",
+    "bytes": 2265,
+    "mode": "original",
+    "reason": "转写排版必须仅包含 paragraph_starts 数组",
+    "paragraphs": 1
+  },
+  "original_unchanged": true,
+  "output": "/Users/enna/Projects/apps/dustoff/docs/验证结果-转写排版-2026-09-14/真实样本笔记.md",
+  "original_sha256": "82e22a8e961b53333b989bf98ada93eaa77a920acc156f1ecf6b689bd4f33495"
+}

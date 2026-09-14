@@ -46,7 +46,7 @@ export async function main(args = process.argv.slice(2)) {
   const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', record: !dry });
   const { log } = stage;
   stage.acquireLock();
-  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, skipped: 0, failures: [], paused: null, cleanup: null };
+  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, skipped: 0, failures: [], paused: null, cleanup: null, transcriptLayouts: [] };
   let initializedThisRun = false;
   const tmp = localPath(join(TEMP, `run-${process.pid}`));
   try {
@@ -120,6 +120,8 @@ export async function main(args = process.argv.slice(2)) {
           if (result.skipped) { markSkipped(id, result.reason, { needsOcr:true }); summary.skipped++; }
           else {
             const note = writeNote(row, result.note, { dir: NOTES_CONF.NOTES_DIR });
+            summary.transcriptLayouts.push({ id, ...note.transcript });
+            if (note.transcript.mode === 'original') log(`转写排版回退完整原稿 ${id}：${note.transcript.reason}`);
             markExtracted(id, { text_source:'asr', text_chars:row.text_chars, note_path:note.file, category:result.note.分类, decay:note.decay, needs_ocr:result.needsOcr, prompt_hash:HASH });
             summary.notes++;
           }
