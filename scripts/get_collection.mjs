@@ -14,14 +14,19 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync } from 'node:fs';
+import { boundaryIndex, collectionChain } from './incremental.mjs';
+import { makeCfg, DUST_HOME } from './config.mjs';
+import { localPath, POLICY, requestSignal } from './policy.mjs';
+import { existsSync, readFileSync } from 'node:fs';
 import { pickGear, playAddrUrls, isGallery, expiryOf } from './lib.mjs';
 import { guardSession } from './session_guard.mjs';
 
 const CHROME = process.env.DUST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const PROFILE = process.env.DUST_PROFILE || join(homedir(), '.dustoff', 'chrome-profile');
+const PROFILE = localPath(makeCfg()('DUST_PROFILE', join(DUST_HOME, 'chrome-profile')));
 const PORT = Number(process.env.DUST_CDP_PORT || 9335);
-const LIMIT = Number(process.argv[2] || 200);
+const LIMIT = Math.min(100, Math.max(1, Number(process.argv[2] || POLICY.scan)));
+const anchorFile = process.env.DUST_ANCHORS_FILE;
+const anchors = anchorFile ? JSON.parse(readFileSync(anchorFile, 'utf8')) : null;
 const MAX_ROUNDS = Number(process.env.DUST_MAX_ROUNDS || 400);
 const STALL_LIMIT = Number(process.env.DUST_STALL || 4);  // 连续几轮没新条目就收工
 const REQUIRE_AUDIO = process.env.DUST_REQUIRE_AUDIO !== '0';  // ASR 需要音轨，默认优先带音轨的档
@@ -37,6 +42,7 @@ const chrome = spawn(CHROME, [
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} };
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
+process.on('SIGTERM', () => { cleanup(); process.exit(143); });
 
 /**
  * 把 JSON 写到 stdout，**等真正冲刷完**再退出。
@@ -57,7 +63,7 @@ function emit(obj, code = 0, done = null) {
 async function getWsUrl() {
   for (let i = 0; i < 40; i++) {
     try {
-      const r = await fetch(`http://127.0.0.1:${PORT}/json/version`);
+      const r = await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: requestSignal() });
       const j = await r.json();
       if (j.webSocketDebuggerUrl) return j.webSocketDebuggerUrl;
     } catch {}
@@ -75,7 +81,8 @@ function cdp(ws) {
   });
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
     const mid = ++id;
-    pending.set(mid, m => m.error ? rej(new Error(m.error.message)) : res(m.result));
+    const timer = setTimeout(() => { pending.delete(mid); rej(new Error('CDP 请求超时')); }, 15000);
+    pending.set(mid, m => { clearTimeout(timer); m.error ? rej(new Error(m.error.message)) : res(m.result); });
     ws.send(JSON.stringify({ id: mid, method, params, sessionId }));
   });
   return { send, on: fn => listeners.push(fn) };
@@ -185,42 +192,54 @@ function assignCollectedAt(items, pages, fetchedAt) {
 
   // 收集 listcollection 响应。注意必须在 loadingFinished 时立刻读 body，
   // 否则请求一多，Chrome 会把早期响应体从缓冲区淘汰掉，最后统一读会大面积失败。
-  const items = [];
+  let items = [];
   const pages = [];        // 每页的 { cursor, ids }，用来还原收藏时间，见 assignCollectedAt
-  const seen = new Set();
-  const tracked = new Set();
+  const tracked = new Map();
+  const requestCursors = new Map();
+  let scanError = null;
+  const refresh = () => { const chain = collectionChain(pages); items = chain.items; sawNoMore = chain.complete; return chain; };
   let sawNoMore = false;
   let pending = 0;
   on(m => {
-    if (m.method === 'Network.responseReceived' &&
+    if (m.method === 'Network.requestWillBeSent' && /aweme\/v1\/web\/aweme\/listcollection/.test(m.params.request.url)) {
+      const req = m.params.request;
+      let body = {};
+      try { body = JSON.parse(req.postData || '{}'); } catch { body = Object.fromEntries(new URLSearchParams(req.postData || '')); }
+      const cursor = new URL(req.url).searchParams.get('cursor') ?? body.cursor;
+      requestCursors.set(m.params.requestId, cursor === undefined ? null : String(cursor));
+    } else if (m.method === 'Network.responseReceived' &&
         /aweme\/v1\/web\/aweme\/listcollection/.test(m.params.response.url)) {
-      tracked.add(m.params.requestId);
+      const url = new URL(m.params.response.url);
+      const cursor = url.searchParams.get('cursor') ?? requestCursors.get(m.params.requestId) ?? null;
+      if (cursor === null) scanError = '收藏响应缺少请求游标';
+      tracked.set(m.params.requestId, cursor);
     } else if (m.method === 'Network.loadingFinished' && tracked.has(m.params.requestId)) {
+      const requestCursor = tracked.get(m.params.requestId);
       tracked.delete(m.params.requestId);
       pending++;
       send('Network.getResponseBody', { requestId: m.params.requestId }, sessionId)
         .then(r => {
-          const j = JSON.parse(r.body);
+          const j = JSON.parse(r.base64Encoded ? Buffer.from(r.body, 'base64').toString() : r.body);
+          if ((j.status_code !== undefined && j.status_code !== 0) || !Array.isArray(j.aweme_list)) throw new Error('收藏接口响应不完整');
+          const pageItems = [];
           // cursor 是这一页最后一条的收藏时刻（微秒）。逐条对象里没有收藏时间，
           // 只有这里有——丢掉就再也拿不回来了。
-          pages.push({ cursor: j.cursor, ids: (j.aweme_list || []).map(a => a.aweme_id) });
-          if (j.has_more === 0) sawNoMore = true;
+
           for (const a of (j.aweme_list || [])) {
-            if (!a.aweme_id || seen.has(a.aweme_id)) continue;
-            seen.add(a.aweme_id);
+            if (!a.aweme_id) continue;
             // listcollection 的响应里已经带了 play_addr / bit_rate / images，
             // 所以批量流程不需要再对每条视频单独跑 get_meta.mjs（省约 6s/条）。
             const gallery = isGallery(a);
             // requireAudio：ASR 需要音轨，而最低档常常是纯视频（实测 58%）
             const gear = gallery ? null : pickGear(a, { requireAudio: REQUIRE_AUDIO });
-            items.push({
+            pageItems.push({
               aweme_id: a.aweme_id,
               aweme_type: a.aweme_type ?? null,      // 0=视频 68=图集
               is_gallery: gallery,
               desc: a.desc || '',
               author: (a.author && a.author.nickname) || '',
               create_time: a.create_time || null,
-              duration_s: a.video && a.video.duration ? Math.round(a.video.duration / 1000) : null,
+              duration_s: a.video && a.video.duration ? (a.video.duration / 1000) : null,
               // 下载用：码率尽量低、但优先带音轨的档位
               gear: gear ? gear.gear : null,
               gear_source: gear ? gear.source : null,
@@ -235,8 +254,10 @@ function assignCollectedAt(items, pages, fetchedAt) {
               url_expires_at: gear ? expiryOf(gear.urls) : null,
             });
           }
+          pages.push({ request_cursor: requestCursor, cursor: j.cursor, has_more: j.has_more, ids: pageItems.map(i => i.aweme_id), items: pageItems });
+          refresh();
         })
-        .catch(() => {})
+        .catch(e => { scanError = e.message; })
         .finally(() => { pending--; });
     }
   });
@@ -256,12 +277,15 @@ function assignCollectedAt(items, pages, fetchedAt) {
   })()`;
   let stall = 0, lastCount = -1;
   for (let r = 0; r < MAX_ROUNDS; r++) {
+    if (anchors !== null && (anchors.length ? boundaryIndex(items, anchors) >= 0 : sawNoMore)) break;
+    if (anchors === null && items.length >= LIMIT) break;
     await send('Runtime.evaluate', { expression: SCROLL_JS }, sessionId);
     await sleep(1800);
     if (items.length === lastCount) stall++; else stall = 0;
     lastCount = items.length;
     if (r % 5 === 0) console.error(`   ... 第 ${r + 1} 轮，已收 ${items.length} 条`);
-    if (items.length >= LIMIT) { console.error(`   已达上限 ${LIMIT} 条，停止滚动`); break; }
+    if (anchors === null && items.length >= LIMIT) break;
+    if (anchors !== null && (anchors.length ? boundaryIndex(items, anchors) >= 0 : sawNoMore)) break;
     if (sawNoMore && stall >= 2) break;
     if (stall >= STALL_LIMIT) break;
   }
@@ -274,13 +298,17 @@ function assignCollectedAt(items, pages, fetchedAt) {
   console.error(`   收藏时刻：${ca.dated}/${items.length} 条已还原（${pages.length} 页游标，` +
     `${ca.clamped} 条被发布时间抬正）`);
 
-  const out = items.slice(0, LIMIT);
+  const chain = refresh();
+  if (pending || tracked.size || chain.gap) scanError ||= '收藏分页缺失或尚未读完';
+  if (!pages.length) scanError ||= '未收到收藏列表响应';
+  const out = anchors === null ? items.slice(0, LIMIT) : items;
   const vids = out.filter(i => !i.is_gallery);
   const withUrls = vids.filter(i => i.play_urls.length);
   console.error(`   视频 ${vids.length} 条（其中 ${withUrls.length} 条已带下载地址）/ 图集 ${out.length - vids.length} 条`);
   emit({
-    ok: true, logged_in: true, count: out.length,
-    truncated: items.length > LIMIT || !sawNoMore,   // 还有更多没取
+    ok: !scanError, logged_in: true, scan_error: scanError, count: out.length,
+    truncated: out.length < items.length || !sawNoMore,   // 还有更多没取
+    page_cursors: pages.map(p => ({ request_cursor:p.request_cursor, cursor:p.cursor, count:p.items.length, has_more:p.has_more })),
     fetched_at: fetchedAt,                           // 下载端据此判断地址是否还新鲜
     session: { level: guard.level, days_left: guard.days_left },
     items: out,

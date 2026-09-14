@@ -1,0 +1,41 @@
+{
+  "source": "实际运行结果，不含密钥和播放地址",
+  "first_start": [
+    {
+      "mode": "baseline",
+      "scanned": 100,
+      "added": 0,
+      "processed": 0,
+      "notes": 0,
+      "text": 0,
+      "skipped": 0,
+      "failures": [],
+      "paused": null,
+      "cleanup": null,
+      "initialized": true,
+      "pending": 0,
+      "usedToday": 0
+    }
+  ],
+  "one_real_video": [
+    {
+      "mode": "daily",
+      "scanned": 0,
+      "added": 0,
+      "processed": 1,
+      "notes": 1,
+      "text": 1,
+      "skipped": 0,
+      "failures": [],
+      "paused": null,
+      "cleanup": {
+        "n": 1,
+        "bytes": 4877574,
+        "held": 0,
+        "failed": 0
+      },
+      "pending": 86,
+      "usedToday": 1
+    }
+  ]
+}

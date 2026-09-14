@@ -28,6 +28,7 @@
 //   node ledger.mjs requeue <id|status>      重新排队（清零重试计数）
 //   node ledger.mjs requeue-silent           把无音轨的打回重下（ASR 需要音轨）
 
+import { localPath } from './policy.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -36,7 +37,7 @@ import { readFileSync } from 'node:fs';
 
 const DUST_HOME = (process.env.DUST_HOME || join(homedir(), '.dustoff'))
   .replace(/^~(?=$|\/)/, homedir());
-const DB_PATH = process.env.DUST_DB || join(DUST_HOME, 'index.sqlite');
+const DB_PATH = localPath(process.env.DUST_DB || join(DUST_HOME, 'index.sqlite'));
 
 // ── 状态机 ────────────────────────────────────────────────────────
 //
@@ -200,7 +201,7 @@ export function importScan(items, platform = 'douyin') {
       updated_at = excluded.updated_at
   `);
   const countBefore = d.prepare('SELECT COUNT(*) n FROM items WHERE platform = ?').get(platform).n;
-  d.exec('BEGIN');
+  d.exec('SAVEPOINT import_scan');
   try {
     for (const it of items) {
       ins.run(it.aweme_id, platform, it.desc || null, it.author || null,
@@ -208,14 +209,14 @@ export function importScan(items, platform = 'douyin') {
         it.is_gallery ? 'gallery' : 'video',
         it.collected_at || null, t, t, STATUS.PENDING, t);
     }
-    d.exec('COMMIT');
-  } catch (e) { d.exec('ROLLBACK'); throw e; }
+    d.exec('RELEASE import_scan');
+  } catch (e) { d.exec('ROLLBACK TO import_scan'); d.exec('RELEASE import_scan'); throw e; }
   const countAfter = d.prepare('SELECT COUNT(*) n FROM items WHERE platform = ?').get(platform).n;
   return { added: countAfter - countBefore, seen: items.length };
 }
 
 /** 把一次下载的结果并入账本。 */
-export function importDownload(results, platform = 'douyin') {
+export function importDownload(results, platform = 'douyin', { countFailures = true } = {}) {
   const d = db(), t = now();
   const map = {
     done:            r => ({ status: STATUS.DOWNLOADED, reason: null }),
@@ -228,7 +229,7 @@ export function importDownload(results, platform = 'douyin') {
   };
   const upd = d.prepare(`
     UPDATE items SET status = ?, skip_reason = ?, media_path = ?, media_bytes = ?,
-                     gear = ?, has_audio = ?, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
+                     gear = ?, has_audio = ?, media_deleted = 0, attempts = 0, last_error = NULL, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
     WHERE platform = ? AND id = ? AND status IN ('pending','skipped')
   `);
   const bump = d.prepare(`
@@ -241,7 +242,7 @@ export function importDownload(results, platform = 'douyin') {
     for (const r of results) {
       const m = map[r.status]?.(r);
       if (!m) {
-        if (r.status === 'failed') { bump.run((r.errors || []).join('; ').slice(0, 300), t, platform, r.aweme_id); bumped++; }
+        if (r.status === 'failed' && countFailures) { bump.run((r.errors || []).join('; ').slice(0, 300), t, platform, r.aweme_id); bumped++; }
         continue;
       }
       const res = upd.run(m.status, m.reason, r.path || null, r.bytes || null,
@@ -457,22 +458,10 @@ export function requeueSilent(platform = 'douyin') {
  *
  * @param {number} keepDays 转写完成后保留多少天。0 表示转完即可删。
  */
-export function cleanable(platform = 'douyin', { keepDays = 7, limit = 1000, underPath = null } = {}) {
-  const cutoff = now() - keepDays * 86400;
-  // underPath 把清理范围限定在「工作媒体目录」内。归档到外接盘的条目路径在这个
-  // 前缀之外，天然就出了保留期的管辖——**保留期管的是本地磁盘压力，
-  // 不是「这条素材还要不要」**。不加这道过滤的话，归档等于白做：搬到外接盘
-  // 的文件会在第 7 天照样被删掉。用路径前缀而不是新加一个 archived 字段，
-  // 是因为「文件在哪」本身就已经回答了「归没归档」，不必存两份真相。
-  const where = underPath ? 'AND media_path LIKE ?' : '';
-  const args = [platform, cutoff];
-  if (underPath) args.splice(1, 0, underPath + '%');
-  return db().prepare(`
-    SELECT id, title, media_path, media_bytes, transcribed_at FROM items
-    WHERE platform = ? AND status IN ('transcribed','extracted')
-      AND media_deleted = 0 AND media_path IS NOT NULL ${where}
-      AND COALESCE(transcribed_at, 0) <= ?
-    ORDER BY transcribed_at LIMIT ?`).all(...args, limit);
+export function cleanable(platform = 'douyin', { limit = 10000 } = {}) {
+  return db().prepare(`SELECT * FROM items WHERE platform=? AND transcribed_at IS NOT NULL
+    AND text_source='asr' AND text_chars>0 AND media_deleted=0 AND media_path IS NOT NULL
+    ORDER BY transcribed_at LIMIT ?`).all(platform, limit);
 }
 
 /** 某个 id 是否已知——扫描层增量判断「撞到已知就停」用。 */
@@ -593,12 +582,14 @@ if (isMain) {
   } else if (cmd === 'requeue-silent') {
     console.log('  ', JSON.stringify(requeueSilent()));
   } else if (cmd === 'requeue') {
-    const d = db();
-    const byStatus = Object.values(STATUS).includes(a1);
-    const r = byStatus
-      ? d.prepare(`UPDATE items SET status='pending', attempts=0, last_error=NULL, updated_at=? WHERE status=?`).run(now(), a1)
-      : d.prepare(`UPDATE items SET status='pending', attempts=0, last_error=NULL, updated_at=? WHERE id=?`).run(now(), a1);
-    console.log(`  重新排队 ${r.changes} 条`);
+    if (!a1 || !/^\d+$/.test(a1)) { console.error('请指定一个启用范围内的作品 ID，不再支持批量重置状态'); process.exitCode=2; }
+    else {
+      const { retryItem } = await import('./daily.mjs');
+      const { createStage } = await import('./stage.mjs');
+      const lock = createStage({name:'ledger',dustHome:DUST_HOME,notify:false,record:false});
+      lock.acquireLock();
+      try { console.log(`恢复到 ${retryItem(a1)} 阶段`); } finally { lock.releaseLock(); }
+    }
   } else {
     console.error('未知命令。可用: stats | list | show | import | sweep | reconcile | requeue | requeue-silent');
     process.exit(2);

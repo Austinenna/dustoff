@@ -1,32 +1,13 @@
 #!/usr/bin/env node
 // dustoff / extract.mjs
-// 第二段的前半截：把视频里的话转成文字（ASR）。
-//
-// 只做转写，不写笔记。转写是机器活、结果稳定；写笔记要靠 prompt，
-// 还没定稿。分开之后改 prompt 重跑不用为转写重复付一次钱。
-//
-// 为什么必须先下 mp4 再转：抖音不提供纯音频流，也没有字幕轨，
-// 拿到声音的唯一途径就是从视频里剥。
-//
-// 它是跟 sync.mjs 平级的独立阶段，不由 sync.mjs 调用——两段只通过账本对话。
-// 手动跑全链路就是依次跑这两条命令；以后两个定时器跑的也是同样这两条。
-//
-// 用法:
-//   node extract.mjs                 转所有 downloaded 的
-//   node extract.mjs --limit 5        只转 5 条（先试水用这个）
-//   node extract.mjs --id 7676...     指定一条
-//   node extract.mjs --dry-run        只列计划和音频总时长，不调 API
-//   node extract.mjs --force          已转过的也重转
-//   node extract.mjs --clean-only     只清理过期 mp4，不转写
-//   node extract.mjs --keep-days 0    临时改保留期（默认 7 天）
-//   node extract.mjs --clean-only --clean-limit 1   小步试删
-//   node extract.mjs --archive-only   只把已转写的 mp4 搬到外接盘，不转写
-//   node extract.mjs --archive-to /Volumes/X/dir    临时指定归档目录
-//   node extract.mjs --backup-only    只把转写稿备份到外接盘，不转写
-//
-// 退出码见 stage.mjs 的约定（0 正常 / 1 出错 / 3 已在跑 / 5 磁盘 / 6 缺配置）。
+// 本地 ASR 入口：只续跑已纳入日常范围的条目，与 run / notes 共用互斥锁和每日额度。
+// 正常及失败收尾清理可靠落盘的非空转写对应视频；启动时补清理上次遗留。
+// node extract.mjs [--limit 1] [--id ID] [--dry-run] [--clean-only]
+// 外接盘归档和文字备份代码保留但禁用，强制重转及旧外接参数当前拒绝执行。
 
-import { spawnSync } from 'node:child_process';
+import { POLICY, MEDIA, TEMP, localPath, under, storage, writeMedia, requestSignal, deadlineMs, atomicWrite, PauseError, mediaDecision } from './scripts/policy.mjs';
+import { inScope, reserveDaily } from './scripts/daily.mjs';
+import { spawnSync, spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, cpSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -54,28 +35,29 @@ const cfg = makeCfg();
 const API_KEY     = cfg('DUST_DASHSCOPE_KEY', '');
 const MODEL       = cfg('DUST_ASR_MODEL', 'qwen-audio-3.0-asr-flash');
 const LANG        = cfg('DUST_ASR_LANG', 'zh');
-const CONCURRENCY = Number(cfg('DUST_ASR_CONCURRENCY', 2));
+const CONCURRENCY = 1; // 共享媒体预算，单机串行
 const MAX_ATTEMPTS = Number(cfg('DUST_MAX_ATTEMPTS', 3));
-const TEXT_DIR    = cfg('DUST_TEXT', join(DUST_HOME, 'text'));
-const KEEP_DAYS   = Number(valOf('--keep-days') ?? cfg('DUST_MEDIA_KEEP_DAYS', 7));
+const TEXT_DIR = localPath(cfg('DUST_TEXT', join(DUST_HOME, 'text')));
+if (TEXT_DIR === MEDIA || under(TEXT_DIR, MEDIA) || under(TEXT_DIR, TEMP)) throw new Error('文字目录必须位于媒体与临时目录之外');
+const KEEP_DAYS = 0; // 已确认改为批次收尾清理
 // 一轮最多删多少条。首次放开保留期时用它小步试，别一把删几千个目录。
 const CLEAN_LIMIT = Number(valOf('--clean-limit') || 1000);
 
 // 归档：转写完的 mp4 搬到外接盘，从此不再被保留期清理。
 // 留空 = 不启用，行为跟以前完全一样。
-const MEDIA_DIR   = expand(cfg('DUST_MEDIA', join(DUST_HOME, 'media')));
+const MEDIA_DIR = MEDIA;
 // 外接盘只配一个根路径。子目录由程序自己定，换盘（T7 → T8）只改这一行——
 // 三处各写一遍完整路径的话，漏改一处就会一半文件去新盘一半去老盘，
 // 而老盘没插时那一半会安静地跳过，未必发现得了。
-const EXTERNAL    = expand(cfg('DUST_EXTERNAL', ''));
+const EXTERNAL = ''; // 外接盘全部交互暂时停用，旧配置不能自动恢复
 const sub = name => EXTERNAL ? join(EXTERNAL, name) : '';
 // 个别键仍可单独覆盖（比如想把两种产物放在不同的盘上），但不配就跟着根路径走
-const ARCHIVE_DIR = expand(valOf('--archive-to') || cfg('DUST_MEDIA_ARCHIVE', '') || sub('dustoff-media'));
+const ARCHIVE_DIR = '';
 const ARCHIVE_ONLY = has('--archive-only');
 
 // 转写稿备份到外接盘。跟归档共用挂载点判断，但**是复制不是移动**——
 // 本地那份第三段每次提炼都要读，不能搬走。
-const TEXT_BACKUP  = expand(valOf('--backup-to') || cfg('DUST_TEXT_BACKUP', '') || sub('dustoff-text'));
+const TEXT_BACKUP = '';
 const BACKUP_ONLY  = has('--backup-only');
 
 // 领域热词。qwen3-asr 支持拿一段上下文去偏置识别，这是它相对
@@ -113,6 +95,7 @@ const stage = createStage({
   notify: NOTIFY, keepRuns: KEEP_RUNS, record: !CASUAL && IS_MAIN,
 });
 const { log, die, notify } = stage;
+let mainLocked = false;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fmtMB = b => b >= 1024 * 1024 * 1024
@@ -123,7 +106,7 @@ const fmtDur = s => s >= 60 ? `${Math.floor(s / 60)}分${String(Math.round(s % 6
 
 function probeDuration(file) {
   const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
-    '-of', 'csv=p=0', file], { encoding: 'utf8' });
+    '-of', 'csv=p=0', file], { encoding: 'utf8', timeout: deadlineMs(60000) });
   return Number((r.stdout || '').trim()) || 0;
 }
 
@@ -131,18 +114,30 @@ function probeDuration(file) {
  * 剥出音频。16kHz 单声道 32kbps mp3——ASR 模型内部就按 16k 单声道处理，
  * 给更高规格只是把上传变大。实测 9.6 分钟压出来 2.5 MB。
  */
-function extractAudio(mp4, out) {
-  const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', mp4,
-    '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '32k', out],
-    { encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`ffmpeg 剥音频失败: ${(r.stderr || '').trim().slice(0, 200)}`);
+async function audioCommand(args, out) {
+  storage();
+  const p = spawn('ffmpeg', args, { stdio:['ignore','pipe','pipe'] });
+  let err = '';
+  p.stderr.on('data', d => { err = (err + d).slice(-2000); });
+  const done = new Promise((resolve,reject) => { p.on('error',reject); p.on('close',code => code === 0 ? resolve() : reject(new Error(`ffmpeg 失败：${err.slice(-200)}`))); });
+  // 提前挂接，避免写流期间子进程失败成为未处理拒绝。
+  done.catch(() => {});
+  const stop = () => p.kill('SIGKILL');
+  process.once('exit', stop);
+  const timer = setTimeout(stop, deadlineMs(120000));
+  try { await writeMedia(p.stdout, out); await done; }
+  catch (e) { stop(); await done.catch(() => {}); rmSync(out,{force:true}); throw e; }
+  finally { clearTimeout(timer); process.removeListener('exit', stop); }
+}
+async function extractAudio(mp4, out) {
+  await audioCommand(['-v','error','-i',mp4,'-vn','-ac','1','-ar','16000','-c:a','libmp3lame','-b:a','32k','-f','mp3','pipe:1'], out);
   if (!existsSync(out) || statSync(out).size < 1024) throw new Error('剥出的音频为空');
 }
 
 /** 找出静音段的中点，作为候选下刀位置。 */
 function silenceMidpoints(file) {
   const r = spawnSync('ffmpeg', ['-v', 'info', '-i', file,
-    '-af', 'silencedetect=noise=-32dB:d=0.25', '-f', 'null', '-'], { encoding: 'utf8' });
+    '-af', 'silencedetect=noise=-32dB:d=0.25', '-f', 'null', '-'], { encoding: 'utf8', timeout: deadlineMs(60000) });
   const out = (r.stderr || '') + (r.stdout || '');
   const mids = [];
   let start = null;
@@ -173,10 +168,8 @@ function planChunks(dur, mids) {
   return chunks;
 }
 
-function sliceAudio(src, out, start, end) {
-  const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-ss', String(start),
-    '-t', String(end - start), '-i', src, '-c', 'copy', out], { encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`切片失败: ${(r.stderr || '').trim().slice(0, 200)}`);
+async function sliceAudio(src, out, start, end) {
+  await audioCommand(['-v','error','-ss',String(start),'-t',String(end-start),'-i',src,'-c','copy','-f','mp3','pipe:1'], out);
 }
 
 // ── ASR ──────────────────────────────────────────────────────────
@@ -194,7 +187,7 @@ const DIALECTS = [
     // 且额外返回逐词时间戳——笔记里能标「这句在第几秒」。
     match: m => m.startsWith('qwen-audio-'),
     extraParams: { format: 'mp3' },          // 不传这个直接 UNSUPPORTED_FORMAT
-    text: j => j.output?.text ?? '',
+    text: j => j.output?.text,
     seconds: j => j.usage?.duration ?? 0,
     words: j => {
       const s = j.output?.sentence;
@@ -205,7 +198,7 @@ const DIALECTS = [
     // qwen3-asr 系。没有时长戳，usage 字段名也不同。
     match: m => m.startsWith('qwen3-asr'),
     extraParams: {},
-    text: j => j.output?.choices?.[0]?.message?.content?.[0]?.text ?? '',
+    text: j => j.output?.choices?.[0]?.message?.content?.[0]?.text,
     seconds: j => j.usage?.seconds ?? 0,
     words: () => [],
   },
@@ -219,6 +212,7 @@ class PermanentError extends Error {}
 async function asrOnce(file) {
   const b64 = readFileSync(file).toString('base64');
   const res = await fetch(ENDPOINT, {
+    signal: requestSignal(),
     method: 'POST',
     headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -252,6 +246,7 @@ async function asrOnce(file) {
     throw new Error(msg);
   }
 
+  if (!body.output || typeof dialect.text(body) !== 'string') throw new Error('ASR 响应缺少转写结果');
   return {
     text: String(dialect.text(body) ?? '').trim(),
     seconds: dialect.seconds(body) || 0,
@@ -266,7 +261,7 @@ async function asr(file, tries = 3) {
     try {
       return await asrOnce(file);
     } catch (e) {
-      if (e instanceof PermanentError) throw e;
+      if (e instanceof PermanentError || e instanceof PauseError) throw e;
       last = e;
       if (i < tries - 1) await sleep(2000 * 2 ** i);
     }
@@ -277,16 +272,21 @@ async function asr(file, tries = 3) {
 // ── 单条流程 ──────────────────────────────────────────────────────
 
 async function transcribeOne(item, tmpRoot) {
-  const mp4 = item.media_path;
+  const mp4 = item.media_path ? localPath(item.media_path) : null;
+  if (mediaDecision(item)) throw new PermanentError('视频时长未知或超过上限，不能转写');
+  if (!mp4 || !under(mp4, MEDIA)) throw new PermanentError('视频不在本地媒体目录');
   if (!mp4 || !existsSync(mp4)) throw new PermanentError('媒体文件不存在（外接盘没挂载？）');
   if (item.has_audio === 0) throw new PermanentError('文件无音轨，需要重下');
 
-  const work = join(tmpRoot, item.id);
+  if (!/^\d+$/.test(String(item.id))) throw new Error('作品 ID 不合法');
+  const work = localPath(join(tmpRoot, item.id));
+  if (!under(work, TEMP)) throw new Error('ASR 临时目录必须在预算目录内');
   mkdirSync(work, { recursive: true });
   try {
     const audio = join(work, 'a.mp3');
-    extractAudio(mp4, audio);
+    await extractAudio(mp4, audio);
     const dur = probeDuration(audio);
+    if (!(dur > 0) || dur > POLICY.seconds + 0.2) throw new PermanentError('实际音频时长不满足限制');
     const chunks = planChunks(dur, dur > CHUNK_MAX ? silenceMidpoints(audio) : []);
 
     const parts = [];
@@ -296,7 +296,7 @@ async function transcribeOne(item, tmpRoot) {
       let piece = audio;
       if (chunks.length > 1) {
         piece = join(work, `c${i}.mp3`);
-        sliceAudio(audio, piece, s, e);
+        await sliceAudio(audio, piece, s, e);
       }
       const r = await asr(piece);
       if (r.text) parts.push(r.text);
@@ -312,12 +312,13 @@ async function transcribeOne(item, tmpRoot) {
     mkdirSync(TEXT_DIR, { recursive: true });
     const textPath = join(TEXT_DIR, `${item.id}.txt`);
     // 转写稿保持纯文本：text_chars 才是诚实的字数，下游读它也不用剥格式
-    writeFileSync(textPath, text, 'utf8');
+
     // 时间戳单独放边车文件。有了它，笔记里的每句话都能回指原片的秒数
     if (words.length) {
-      writeFileSync(join(TEXT_DIR, `${item.id}.words.json`), JSON.stringify(words), 'utf8');
+      atomicWrite(join(TEXT_DIR, `${item.id}.words.json`), JSON.stringify(words));
     }
 
+    atomicWrite(textPath, text);
     return { text, textPath, chars: text.length, chunks: chunks.length,
              seconds: Math.round(seconds), words: words.length };
   } finally {
@@ -341,6 +342,7 @@ async function transcribeOne(item, tmpRoot) {
  * @returns {string|null} 可用就返回归档根目录，否则 null
  */
 function mountedDir(dir) {
+  if (!POLICY.external) return null;
   if (!dir) return null;
   const rootDev = statSync('/').dev;
   let probe = dir;
@@ -381,6 +383,7 @@ function dirStat(dir) {
 }
 
 function archiveMedia({ dryRun }) {
+  if (!POLICY.external) return { n:0, bytes:0, disabled:true };
   const root = mountedDir(ARCHIVE_DIR);
   if (!root) return { n: 0, bytes: 0, skipped: !!ARCHIVE_DIR };
 
@@ -442,6 +445,7 @@ function archiveMedia({ dryRun }) {
  * 跟归档一样每轮全量扫：盘拔了几天，插回来的那一轮把欠的一起补上。
  */
 function backupText({ dryRun }) {
+  if (!POLICY.external) return { n:0, bytes:0, disabled:true };
   const root = mountedDir(TEXT_BACKUP);
   if (!root) return { n: 0, bytes: 0, skipped: !!TEXT_BACKUP };
   if (!existsSync(TEXT_DIR)) return { n: 0, bytes: 0 };
@@ -477,31 +481,24 @@ function backupText({ dryRun }) {
  *      对它们来说视频本身仍是唯一的内容载体，而且正是 OCR 增强要挑的目标
  *      （见 docs/待办-OCR增强.md）。删了等于把原料丢了。
  */
-function cleanMedia({ keepDays, dryRun, limit = 1000 }) {
-  // 只清理还在工作媒体目录里的；搬到外接盘的已经不归保留期管
-  const rows = cleanable('douyin', { keepDays, limit, underPath: MEDIA_DIR });
-  if (!rows.length) return { n: 0, bytes: 0, held: 0 };
-
-  const done = [];
-  let bytes = 0, held = 0;
-  for (const r of rows) {
-    const row = db().prepare('SELECT text_path, text_chars FROM items WHERE id = ?').get(r.id);
-
-    if (!row?.text_path || !existsSync(row.text_path)) { held++; continue; }   // 规则 ①
-    if (!row.text_chars) { held++; continue; }                                 // 规则 ②
-
-    if (!existsSync(r.media_path)) { done.push(r.id); continue; }  // 文件已不在，补记一笔
-    if (dryRun) { bytes += r.media_bytes || 0; done.push(r.id); continue; }
+function cleanMedia({ dryRun = false, limit = 10000 } = {}) {
+  const rows = cleanable('douyin', { limit });
+  const done = []; let bytes = 0, held = 0, failed = 0;
+  for (const row of rows) {
+    if (!inScope(row.id)) continue; // 当前启用范围以外的旧数据留给一次性清理操作
     try {
-      rmSync(dirname(r.media_path), { recursive: true, force: true });
-      bytes += r.media_bytes || 0;
-      done.push(r.id);
-    } catch (e) {
-      log(`  ✗ 删除失败 ${r.id}: ${e.message}`);
-    }
+      const media = localPath(row.media_path), text = localPath(row.text_path || '');
+      if (!under(media, MEDIA) || !/\.(mp4|mov|webm|m4v)$/i.test(media)) { held++; continue; }
+      if (!row.text_path || !existsSync(text)) { held++; continue; }
+      const contents = readFileSync(text,'utf8');
+      if (!contents.trim() || contents.length !== row.text_chars) { held++; continue; }
+      if (dryRun) { bytes += row.media_bytes || 0; done.push(row.id); continue; }
+      if (existsSync(media)) { const size = statSync(media).size; rmSync(media); bytes += size; }
+      done.push(row.id);
+    } catch(e) { failed++; log(`清理未完成 ${row.id}：${e.message}`); }
   }
   if (!dryRun && done.length) markMediaDeleted(done);
-  return { n: done.length, bytes, held };
+  return { n:done.length, bytes, held, failed };
 }
 
 // ── 主流程 ────────────────────────────────────────────────────────
@@ -524,11 +521,16 @@ function runBackup() {
 }
 
 async function main() {
+  process.env.DUST_DEADLINE_MS = String(Date.now() + POLICY.runMs);
+  if (ARCHIVE_ONLY || BACKUP_ONLY || has('--archive-to') || has('--backup-to')) throw new Error('外接盘功能已停用');
+  if (has('--keep-days') && valOf('--keep-days') !== '0') throw new Error('当前策略固定为批次收尾清理，不再保留多天');
+  if (FORCE) throw new Error('当前阶段不支持强制重复 ASR，请按已有进度续跑');
   if (!API_KEY && !DRY_RUN && !CLEAN_ONLY) {
     die(EXIT.CONFIG, `未配置 DUST_DASHSCOPE_KEY。写进 ${CONF_FILE}：DUST_DASHSCOPE_KEY=sk-xxxx`);
   }
   if (!CASUAL) {
     stage.acquireLock();
+    mainLocked = true;
     log(`dustoff 提取　run=${stage.runId}`);
   }
 
@@ -571,6 +573,7 @@ async function main() {
     const status = FORCE ? 'transcribed' : 'downloaded';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
   }
+  items = items.filter(i => inScope(i.id) && !i.transcribed_at);
   if (LIMIT) items = items.slice(0, LIMIT);
 
   if (!items.length) { log('没有待转写的条目。'); return; }
@@ -597,10 +600,9 @@ async function main() {
 
   // 剥音频要临时空间。10 分钟的视频压出来约 2.5 MB，并发几条也就十几 MB，
   // 但盘满时 ffmpeg 会写出个残缺文件然后一路错到 API，不如先拦住。
-  const free = freeGB(tmpdir());
-  if (free !== null && free < 1) die(EXIT.DISK, `临时目录所在盘仅剩 ${free.toFixed(1)} GB`);
+  storage();
 
-  const tmpRoot = join(tmpdir(), `dustoff-asr-${process.pid}`);
+  const tmpRoot = localPath(join(TEMP, `asr-${process.pid}`));
   mkdirSync(tmpRoot, { recursive: true });
 
   const stat = { ok: 0, empty: 0, fail: 0, chars: 0, seconds: 0, reqs: 0 };
@@ -611,7 +613,9 @@ async function main() {
 
   async function worker() {
     while (queue.length && !aborted) {
+      deadlineMs();
       const item = queue.shift();
+      if (!reserveDaily(item.id)) { log('今日额度已用完'); break; }
       const label = `${item.id} ${String(item.title || '').slice(0, 24)}`;
       const t0 = Date.now();
       try {
@@ -627,6 +631,7 @@ async function main() {
         const wtag = r.words ? `，${r.words} 词时间戳` : '';
         log(`  ✓ ${label} — ${tag}${wtag}，${r.chunks} 次请求，${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
+        if (e instanceof PauseError) { log(e.message); aborted = true; break; }
         stat.fail++;
         failures.push({ id: item.id, title: item.title, error: e.message });
         // 永久性错误（文件不在、音频超长、参数错）重试没有意义，一次就放弃。
@@ -644,8 +649,8 @@ async function main() {
 
   log('');
   const t0 = Date.now();
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
-  rmSync(tmpRoot, { recursive: true, force: true });
+  try { await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker)); }
+  finally { rmSync(tmpRoot, { recursive:true, force:true }); }
 
   log(`\n完成 ${stat.ok} 条 · 失败 ${stat.fail} 条 · 用时 ${fmtDur((Date.now() - t0) / 1000)}`);
   if (stat.ok) {
@@ -678,7 +683,8 @@ async function main() {
   // 失败要能被人看见。中止是硬故障，零散失败到一定比例也值得提醒。
   if (aborted) {
     notify('dustoff 转写中止', `连续 ${MAX_CONSECUTIVE_FAILS} 条失败，多半是 key 失效或余额不足`);
-    process.exit(EXIT.ERROR);
+    process.exitCode = EXIT.ERROR;
+    return;
   }
   if (stat.fail && stat.fail >= Math.max(3, (stat.ok + stat.fail) * 0.3)) {
     log(`⚠️ 失败率 ${(stat.fail / (stat.ok + stat.fail) * 100).toFixed(0)}%，超出正常范围`);
@@ -686,9 +692,11 @@ async function main() {
   }
 }
 
-// run.mjs 逐条串行跑的时候要用这几个。三个入口的行为一个字没变——
-// 直接 `node extract.mjs` 时 IS_MAIN 为真，照旧跑 main()。
+// 供日常编排复用的单条操作；导入时不自动运行。
 export { transcribeOne, archiveMedia, backupText, cleanMedia, PermanentError, mountedDir };
-export const CONF = { MEDIA_DIR, TEXT_DIR, ARCHIVE_DIR, TEXT_BACKUP, KEEP_DAYS, MAX_ATTEMPTS };
+export const CONF = { API_KEY, MEDIA_DIR, TEXT_DIR, ARCHIVE_DIR, TEXT_BACKUP, KEEP_DAYS, MAX_ATTEMPTS };
 
-if (IS_MAIN) main().catch(e => { console.error(e); process.exit(EXIT.ERROR); });
+if (IS_MAIN) main().catch(e => { console.error(e.message); process.exitCode = e instanceof PauseError ? 5 : 1; }).finally(() => {
+  if (mainLocked && !DRY_RUN && !ARCHIVE_ONLY && !BACKUP_ONLY && !FORCE) { const c = cleanMedia({dryRun:false}); if (c.n) log(`收尾清理 ${c.n} 个视频`); }
+  stage.releaseLock();
+});

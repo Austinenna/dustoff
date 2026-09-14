@@ -26,6 +26,8 @@
 // 退出码见 stage.mjs 的约定（0 正常 / 1 出错 / 3 已在跑 / 6 缺配置）。
 
 import { createHash } from 'node:crypto';
+import { POLICY, localPath, MEDIA, TEMP, under, requestSignal, deadlineMs, atomicWrite, PauseError } from './scripts/policy.mjs';
+import { inScope, reserveDaily } from './scripts/daily.mjs';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeCfg, DUST_HOME, CONF_FILE, expand } from './scripts/config.mjs';
@@ -54,11 +56,11 @@ const API_KEY     = cfg('DUST_LLM_KEY', '');
 const BASE        = cfg('DUST_LLM_BASE', 'https://open.bigmodel.cn/api/paas/v4/chat/completions');
 const MODEL       = cfg('DUST_LLM_MODEL', 'glm-5.3-flash');
 const EFFORT      = valOf('--effort') || cfg('DUST_LLM_EFFORT', 'high');
-const CONCURRENCY = Number(cfg('DUST_LLM_CONCURRENCY', 2));
+const CONCURRENCY = 1;
 const MAX_ATTEMPTS = Number(cfg('DUST_MAX_ATTEMPTS', 3));
 // 默认 3，理由同 extract.mjs：串行下「连续」是真的连续，信号可以更敏感。
 const MAX_CONSECUTIVE_FAILS = Number(cfg('DUST_LLM_MAX_FAILS', 3));
-const NOTES_DIR   = expand(OUT_DIR || cfg('DUST_NOTES', join(process.env.HOME, 'Documents', '抖音收藏')));
+const NOTES_DIR = localPath(OUT_DIR || cfg('DUST_NOTES', join(process.env.HOME, 'Documents', '抖音收藏')));
 const NOTIFY      = cfg('DUST_NOTIFY', '1') !== '0';
 const KEEP_RUNS   = Number(cfg('DUST_KEEP_RUNS', 30));
 
@@ -168,6 +170,7 @@ const HASH = promptHash();
 
 async function askOnce(item, text) {
   const res = await fetch(BASE, {
+    signal: requestSignal(),
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
     body: JSON.stringify({
@@ -228,7 +231,7 @@ async function ask(item, text, tries = 3) {
   for (let i = 0; i < tries; i++) {
     try { return await askOnce(item, text); }
     catch (e) {
-      if (e instanceof PermanentError) throw e;
+      if (e instanceof PermanentError || e instanceof PauseError) throw e;
       last = e;
       if (i < tries - 1) await sleep(2000 * 2 ** i);
     }
@@ -259,6 +262,7 @@ function slug(s, max = 30) {
 }
 
 function writeNote(item, note, { dir }) {
+  dir = localPath(dir);
   // 日期用收藏日：人记得住「我什么时候存的」，记不住作者哪天发的。
   // collected_at 是从 listcollection 的 cursor 还原的估计值，取不到就退回
   // first_seen（扫到的那天），再取不到才用发布日。
@@ -322,8 +326,11 @@ function writeNote(item, note, { dir }) {
   src.push(`[原视频](https://www.douyin.com/video/${item.id})`);
 
   const body = String(note.正文 || '').trim();
+  dir = localPath(dir);
+  file = localPath(file);
+  if (dir === MEDIA || under(dir,MEDIA) || under(dir,TEMP)) throw new Error('笔记目录不能位于媒体目录');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(file,
+  atomicWrite(file,
     fm + body +
     (foot.length ? '\n\n' + foot.join('\n>\n') : '') +
     `\n\n---\n${src.join(' · ')}\n`, 'utf8');
@@ -333,10 +340,10 @@ function writeNote(item, note, { dir }) {
 // ── 单条流程 ──────────────────────────────────────────────────────
 
 async function noteOne(item) {
-  if (!item.text_path || !existsSync(item.text_path)) {
+  if (!item.text_path || !existsSync(localPath(item.text_path))) {
     throw new PermanentError('转写稿不在磁盘上');
   }
-  const text = readFileSync(item.text_path, 'utf8').trim();
+  const text = readFileSync(localPath(item.text_path), 'utf8').trim();
 
   // 硬门槛：太短的不送 LLM。免费挡掉一批，也省得让模型对着三句话硬凑。
   if (text.length < MIN_CHARS) {
@@ -359,6 +366,7 @@ async function noteOne(item) {
 // ── 主流程 ────────────────────────────────────────────────────────
 
 async function main() {
+  process.env.DUST_DEADLINE_MS = String(Date.now() + POLICY.runMs);
   if (!API_KEY && !DRY_RUN) {
     die(EXIT.CONFIG, `未配置 DUST_LLM_KEY。写进 ${CONF_FILE}：DUST_LLM_KEY=xxxx`);
   }
@@ -366,8 +374,8 @@ async function main() {
     // medium 是硬 400（错误码 1210「该模型始终思考」），在这儿拦住比撞一次快
     die(EXIT.CONFIG, `DUST_LLM_EFFORT 只能是 low / high / max，当前是「${EFFORT}」`);
   }
+  if (!DRY_RUN) stage.acquireLock();
   if (!CASUAL) {
-    stage.acquireLock();
     log(`dustoff 提炼　run=${stage.runId}`);
   }
 
@@ -385,6 +393,7 @@ async function main() {
     const status = FORCE ? 'extracted' : 'transcribed';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
   }
+  if (!DRY_RUN) items = items.filter(i => inScope(i.id));
   if (LIMIT) items = items.slice(0, LIMIT);
   if (!items.length) { log('没有待提炼的条目。'); return; }
 
@@ -418,7 +427,9 @@ async function main() {
 
   async function worker() {
     while (queue.length && !aborted) {
+      deadlineMs();
       const item = queue.shift();
+      if (!reserveDaily(item.id)) { log('今日额度已用完'); break; }
       const label = `${item.id} ${String(item.title || '').replace(/\n/g, ' ').slice(0, 22)}`;
       const t0 = Date.now();
       try {
@@ -493,10 +504,10 @@ async function main() {
     log(`记录 ${stage.runDir}`);
   }
   if (stat.fail && !CASUAL) notify('dustoff 提炼', `${stat.fail} 条失败，${stat.ok} 篇成功`);
-  if (aborted) process.exit(EXIT.ERROR);
+  if (aborted || stat.fail) process.exitCode = EXIT.ERROR;
 }
 
 export { noteOne, writeNote, PermanentError, HASH };
 export const CONF = { NOTES_DIR, MODEL, EFFORT, MAX_ATTEMPTS, API_KEY };
 
-if (IS_MAIN) main().catch(e => die(EXIT.ERROR, e.stack || e.message));
+if (IS_MAIN) main().catch(e => { console.error(e.message); process.exitCode=1; }).finally(() => stage.releaseLock());

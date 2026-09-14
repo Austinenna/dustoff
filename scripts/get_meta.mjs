@@ -17,7 +17,8 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pickLowestGear, isGallery, expiryOf } from './lib.mjs';
+import { requestSignal, localPath } from './policy.mjs';
+import { pickGear, isGallery, expiryOf } from './lib.mjs';
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const CHROME = process.env.DUST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -36,7 +37,7 @@ async function resolveVideoUrl(raw) {
   if (m) return `https://www.douyin.com/video/${m[1]}`;
   // 短链 / 其他：跟随重定向找 id
   try {
-    const r = await fetch(url, { method: 'GET', redirect: 'follow', headers: { 'User-Agent': UA } });
+    const r = await fetch(url, { signal: requestSignal(), method: 'GET', redirect: 'follow', headers: { 'User-Agent': UA } });
     const finalUrl = r.url || url;
     m = finalUrl.match(/(?:video|note)\/(\d{15,})/) || finalUrl.match(/\/(\d{15,})/);
     if (m) return `https://www.douyin.com/video/${m[1]}`;
@@ -51,7 +52,7 @@ async function resolveVideoUrl(raw) {
 async function getWsUrl() {
   for (let i = 0; i < 40; i++) {
     try {
-      const r = await fetch(`http://127.0.0.1:${PORT}/json/version`);
+      const r = await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: requestSignal() });
       const j = await r.json();
       if (j.webSocketDebuggerUrl) return j.webSocketDebuggerUrl;
     } catch {}
@@ -69,7 +70,8 @@ function cdp(ws) {
   });
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
     const mid = ++id;
-    pending.set(mid, m => m.error ? rej(new Error(m.error.message)) : res(m.result));
+    const timer = setTimeout(() => { pending.delete(mid); rej(new Error('CDP 请求超时')); }, 15000);
+    pending.set(mid, m => { clearTimeout(timer); m.error ? rej(new Error(m.error.message)) : res(m.result); });
     ws.send(JSON.stringify({ id: mid, method, params, sessionId }));
   });
   return { send, on: fn => listeners.push(fn) };
@@ -82,6 +84,7 @@ const cleanup = () => {
 };
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
+process.on('SIGTERM', () => { cleanup(); process.exit(143); });
 
 /**
  * 把 JSON 写到 stdout，**等真正冲刷完**再退出。
@@ -147,7 +150,7 @@ function emit(obj, code = 0, done = null) {
   // 只要内容不要原件，所以默认给最低码率档（实测 0.73MB vs play_addr 2.39MB）。
   // play_urls_hq 保留原来的 play_addr，需要高清时可以用。
   const gallery = isGallery(a);
-  const gear = gallery ? null : pickLowestGear(a);
+  const gear = gallery ? null : pickGear(a, { requireAudio: true });
   const hq = (v.play_addr && v.play_addr.url_list) || [];
   const out = {
     ok: true,
@@ -157,10 +160,10 @@ function emit(obj, code = 0, done = null) {
     desc: a.desc || '',
     author: (a.author && a.author.nickname) || '',
     create_time: a.create_time || null,
-    duration_s: Math.round((v.duration || 0) / 1000),
+    duration_s: v.duration ? v.duration / 1000 : null,
     // 默认下载用的地址 = 最低档；拿不到档位时自动回退到 play_addr
     play_urls: gear && gear.urls.length ? gear.urls : hq,
-    play_urls_hq: hq,
+    play_urls_hq: hq, play_urls_fallback: hq,
     gear: gear ? gear.gear : null,
     gear_source: gear ? gear.source : null,
     gear_count: gear ? gear.gear_count : 0,
