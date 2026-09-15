@@ -4,12 +4,10 @@ import { resolve, dirname, join, sep } from 'node:path';
 import { makeCfg, DUST_HOME } from './config.mjs';
 const cfg = makeCfg();
 export const GiB = 1024 ** 3;
-function positive(key, fallback) {
-  const n = Number(cfg(key, fallback));
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`配置 ${key} 必须为正数`);
-  return n;
-}
-export const POLICY = Object.freeze({
+export function readPolicy(conf) {
+  const cfg = makeCfg({ conf });
+  const positive = (key, fallback) => { const n = Number(cfg(key, fallback)); if (!Number.isFinite(n) || n <= 0) throw new Error(`配置 ${key} 必须为正数`); return n; };
+  return Object.freeze({
   scan: Math.max(1, Math.min(100, Math.floor(positive('DUST_SCAN_COUNT', 100)))),
   daily: Math.max(1, Math.min(50, Math.floor(positive('DUST_DAILY_LIMIT', 50)))),
   seconds: Math.min(600, positive('DUST_MAX_DURATION_MIN', 10) * 60),
@@ -19,6 +17,8 @@ export const POLICY = Object.freeze({
   runMs: positive('DUST_RUN_TIMEOUT_S', 7200) * 1000,
   external: false,
 });
+}
+export const POLICY = readPolicy();
 export class PauseError extends Error { constructor(message) { super(message); this.code = 5; } }
 // 不触碰 /Volumes；同时拦住指向它的符号链接。其他符号链接逐级解析，避免路径绕过。
 export function localPath(input, depth = 0) {
@@ -50,8 +50,8 @@ export function storage(extra = 0) {
   const fs = statfsSync(probe);
   const available = Number(fs.bavail) * Number(fs.bsize);
   const used = treeBytes(MEDIA) + (under(TEMP, MEDIA) ? 0 : treeBytes(TEMP));
-  if (used + extra > POLICY.bytes || (extra === 0 && used >= POLICY.bytes)) throw new PauseError('本地媒体达到 1 GiB 上限');
-  if (available - extra < POLICY.free) throw new PauseError('本机剩余空间低于 10 GiB');
+  if (used + extra > POLICY.bytes || (extra === 0 && used >= POLICY.bytes)) throw new PauseError(`本地媒体达到 ${POLICY.bytes / GiB} GiB 上限`);
+  if (available - extra < POLICY.free) throw new PauseError(`本机剩余空间低于 ${POLICY.free / GiB} GiB`);
   return { used, available, remaining: Math.min(POLICY.bytes - used, available - POLICY.free) };
 }
 export function deadlineMs(cap = POLICY.requestMs) {

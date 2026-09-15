@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// 只加载到当前登录会话；配置不进入 LaunchAgents，重启/注销后不会自动加载。
+// 默认只在当前登录会话运行；可显式设置登录后自动启用。
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { homedir } from 'node:os';
 import { DUST_HOME } from './config.mjs';
 import { atomicWrite, localPath } from './policy.mjs';
 
@@ -21,9 +22,16 @@ function command(program, args, { optional = false } = {}) {
   if (result.status !== 0 && !optional) throw new Error(`${program} ${args[0]} 失败：${result.stderr.trim() || result.stdout.trim()}`);
   return result;
 }
-export function createScheduler({ home = DUST_HOME, directory = join(home, 'scheduler'), label = LABEL, root = ROOT, node = process.execPath, runArgs = [] } = {}) {
+export function createScheduler({ home = DUST_HOME, directory = join(home, 'scheduler'), label = LABEL, root = ROOT, node = process.execPath, runArgs = [], autoDirectory = join(homedir(),'Library','LaunchAgents') } = {}) {
   directory = localPath(directory);
   const plist = join(directory, 'daily.plist');
+  const autoPlist = localPath(join(autoDirectory, `${label}.plist`));
+  function readAuto() {
+    if (!existsSync(autoPlist)) return null;
+    const data=JSON.parse(command('/usr/bin/plutil',['-convert','json','-o','-',autoPlist]).stdout);
+    if (data.Label!==label) throw new Error('登录自动启动文件名称冲突，请先检查现有配置');
+    return readFileSync(autoPlist,'utf8');
+  }
   const domain = `gui/${process.getuid()}`;
   const target = `${domain}/${label}`;
   const latest = join(directory, 'latest-run.log');
@@ -70,7 +78,8 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
 </dict></plist>
 `;
   }
-  function configure(value, shouldStart) {
+  function configure(value, shouldStart, auto = existsSync(autoPlist)) {
+    if (typeof auto !== 'boolean') throw new Error('自动启用选项必须为布尔值');
     parseTime(value); // 非法输入不得影响已加载的任务。
     for (const path of [node, join(root,'run.mjs'), join(root,'scripts/scheduled-run.mjs')]) {
       if (!existsSync(path)) throw new Error(`运行文件不存在：${path}`);
@@ -78,7 +87,8 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
     const state = inspect();
     const next = render(value);
     const old = existsSync(plist) ? readFileSync(plist,'utf8') : null;
-    if (old === next && (!shouldStart || state.loaded)) return status();
+    const oldAuto=readAuto();
+    if (old === next && (!shouldStart || state.loaded) && (auto ? oldAuto===next : oldAuto===null)) return status();
     if (state.running || state.pid) throw new Error('定时批次正在执行，请等本轮结束后再修改时间或重新加载；现有任务保持运行');
     mkdirSync(directory, { recursive:true, mode:0o700 });
     // 先校验候选 plist，再卸载原任务；变更失败时恢复原定义。
@@ -87,12 +97,19 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
       atomicWrite(candidate, next);
       command('/usr/bin/plutil', ['-lint',candidate]);
     } finally { rmSync(candidate, { force:true }); }
+    // 先确认自动启动目录可写，避免权限错误发生在卸载原定时之后。
+    if(auto) {
+      const probe=`${autoPlist}.candidate-${process.pid}`;
+      try { atomicWrite(probe,next); } finally { rmSync(probe,{force:true}); }
+    }
     if (state.loaded) command('/bin/launchctl', ['bootout',target]);
     try {
       atomicWrite(plist,next);
+      if (auto) atomicWrite(autoPlist,next); else if(oldAuto!==null) rmSync(autoPlist);
       if (shouldStart || state.loaded) command('/bin/launchctl', ['bootstrap',domain,plist]);
     } catch (error) {
       if (old !== null) atomicWrite(plist,old); else rmSync(plist,{ force:true });
+      if (oldAuto!==null) atomicWrite(autoPlist,oldAuto); else rmSync(autoPlist,{force:true});
       if (state.loaded) {
         try { command('/bin/launchctl', ['bootstrap',domain,plist]); }
         catch (rollback) { throw new Error(`${error.message}；恢复旧任务也失败：${rollback.message}`); }
@@ -102,31 +119,35 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
     return status();
   }
   function status() {
-    return { ...inspect(), time:time(), timezone:Intl.DateTimeFormat().resolvedOptions().timeZone, autoStartAfterReboot:false,
+    return { ...inspect(), time:time(), timezone:Intl.DateTimeFormat().resolvedOptions().timeZone, autoStartAfterReboot:readAuto()!==null,
       target, plist, latestLog:latest, lastRun:existsSync(resultFile) ? JSON.parse(readFileSync(resultFile,'utf8')) : null };
   }
   function stop() {
     const state = inspect();
+    const oldAuto = readAuto();
     if (state.running || state.pid) throw new Error('定时批次正在执行，请等本轮结束后再关闭定时，避免中断正在处理的作品');
     if (state.loaded) command('/bin/launchctl', ['bootout',target]);
+    try { if(oldAuto!==null) rmSync(autoPlist); }
+    catch(error) { if(state.loaded) command('/bin/launchctl',['bootstrap',domain,plist]); throw error; }
     return status();
   }
-  return { status, start:(value = time()) => configure(value,true), setTime:value => configure(value,false), stop, render, target, plist };
+  return { status, start:(value = time()) => configure(value,true), setTime:value => configure(value,false), update:({time:value = time(),autoStartAfterReboot = existsSync(autoPlist)}) => configure(value,false,autoStartAfterReboot), stop, render, target, plist, autoPlist };
 }
 
 function main(args) {
   if (args.length === 0 || args[0] === '--help') {
-    console.log('每日定时（仅当前登录会话，重启后需手动开启）\n  node scripts/schedule.mjs start [HH:MM]  开启定时，默认/保留 22:00\n  node scripts/schedule.mjs time HH:MM     改时间；已开启则立即更新，已关闭则只保存\n  node scripts/schedule.mjs status         查看真实加载状态\n  node scripts/schedule.mjs stop           关闭定时，保留时间\n\n立即处理一轮：node run.mjs');
+    console.log('每日定时（默认仅当前登录会话，可显式启用登录自动加载）\n  node scripts/schedule.mjs start [HH:MM]  开启定时，默认/保留 22:00\n  node scripts/schedule.mjs time HH:MM     改时间；已开启则立即更新，已关闭则只保存\n  node scripts/schedule.mjs status         查看真实加载状态\n  node scripts/schedule.mjs stop           关闭定时及登录自动加载，保留时间\n  node scripts/schedule.mjs autostart on|off  登录后自动启用\n\n立即处理一轮：node run.mjs');
     return;
   }
   if (process.platform !== 'darwin') throw new Error('这个定时入口使用 macOS launchd');
   const [action, value, extra] = args;
+  if(action==='autostart' && ['on','off'].includes(value) && !extra) { console.log(JSON.stringify(createScheduler().update({autoStartAfterReboot:value==='on'}),null,2)); return; }
   if (!['start','time','status','stop'].includes(action) || extra !== undefined || (['status','stop'].includes(action) && value !== undefined)) throw new Error('参数不正确，使用 --help 查看用法');
   if (action === 'time' || value !== undefined) parseTime(value);
   const scheduler = createScheduler();
   const state = action === 'time' ? scheduler.setTime(value) : action === 'start' ? scheduler.start(value) : scheduler[action]();
   console.log(JSON.stringify(state,null,2));
-  console.log(`每日 ${state.time}（${state.timezone}）：${state.loaded ? state.running ? '正在执行' : '已开启，等待触发' : '已关闭'}；重启/注销后需手动开启。`);
+  console.log(`每日 ${state.time}（${state.timezone}）：${state.loaded ? state.running ? '正在执行' : '已开启，等待触发' : '已关闭'}；${state.autoStartAfterReboot ? '登录后自动启用' : '重启/注销后需手动开启'}。`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try { main(process.argv.slice(2)); } catch (error) { console.error(error.message); process.exitCode = 1; }

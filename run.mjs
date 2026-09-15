@@ -43,7 +43,7 @@ export async function main(args = process.argv.slice(2)) {
   const scanCount = Number(value('--scan') ?? POLICY.scan);
   if (!Number.isInteger(limit) || limit < 1 || limit > 50 || !Number.isInteger(scanCount) || scanCount < 1 || scanCount > 100) throw new Error('--limit 必须为 1–50，--scan 必须为 1–100');
   process.env.DUST_DEADLINE_MS = String(Date.now() + POLICY.runMs);
-  const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', record: !dry });
+  const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', keepRuns: Number(makeCfg()('DUST_KEEP_RUNS',30)), record: !dry });
   const { log } = stage;
   stage.acquireLock();
   const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, skipped: 0, failures: [], paused: null, cleanup: null, transcriptLayouts: [] };
@@ -58,7 +58,7 @@ export async function main(args = process.argv.slice(2)) {
       log(`恢复 ${value('--retry')} 到 ${retryItem(value('--retry'))} 阶段`);
     }
     if (has('--status')) { console.log(JSON.stringify({ baseline: old, pending: pendingQueue().length, usedToday: usage(), policy: POLICY }, null, 2)); return summary; }
-    log(`日常限制：${POLICY.daily} 条/日，${POLICY.seconds} 秒，1 GiB 媒体，至少 10 GiB 空闲；外接盘停用`);
+    log(`日常限制：${POLICY.daily} 条/日，${POLICY.seconds} 秒，${POLICY.bytes / 1024 ** 3} GiB 媒体，至少 ${POLICY.free / 1024 ** 3} GiB 空闲；外接盘停用`);
     if (dry) {
       summary.mode = old ? 'preview-queue' : 'preview-baseline';
       log(old ? `已建基线；待办 ${pendingQueue().length} 条，今日额度已用 ${usage()}` : '尚无基线；真实运行将只登记最近 100 条，不下载');
@@ -93,7 +93,7 @@ export async function main(args = process.argv.slice(2)) {
           if (reason && reason !== 'unknown_duration') { markSkipped(id, reason); summary.skipped++; continue; }
           storage();
         }
-        if (!reserveDaily(id)) { summary.paused = '当天累计已达 50 条'; break; }
+        if (!reserveDaily(id)) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; break; }
         summary.processed++;
         if (row.status === 'pending') {
           // 排队地址跨天会失效；即使扫描停在更靠前的边界，也能按 ID 单独刷新。
@@ -156,7 +156,7 @@ export async function main(args = process.argv.slice(2)) {
       if (summary.failures.length || summary.paused) stage.notify('dustoff 需要留意', summary.paused || `${summary.failures.length} 项失败`);
       log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，待办 ${summary.pending}，${summary.paused || '正常收尾'}`);
       if (summary.failures.length) process.exitCode = 1;
-      else if (summary.paused && summary.paused !== '当天累计已达 50 条') process.exitCode = 5;
+      else if (summary.paused && summary.paused !== `当天累计已达 ${POLICY.daily} 条`) process.exitCode = 5;
     }
     } finally { stage.releaseLock(); }
   }

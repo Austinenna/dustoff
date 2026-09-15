@@ -72,3 +72,26 @@ test('真实 launchd：启停、改时间、幂等加载与日常入口连通', 
     rmSync(directory,{ recursive:true,force:true });
   }
 });
+
+test('隔离 launchd：登录自动启用、时间同步、关闭清理以及写入失败保留旧任务', { skip:process.env.DUST_CONSOLE_LAUNCHD !== '1' }, async()=>{
+  const {existsSync,writeFileSync}=await import('node:fs');
+  const home=mkdtempSync(join(tmpdir(),'dustoff-console-launchd-'));
+  const scheduler=createScheduler({home,directory:join(home,'scheduler'),autoDirectory:join(home,'login-agents'),label:`com.dustoff.console-test.${process.pid}`,runArgs:['--dry-run']});
+  const first='03:17',second='03:18';
+  try{
+    scheduler.update({time:first,autoStartAfterReboot:true});
+    assert.equal(scheduler.status().loaded,false);
+    assert.equal(existsSync(scheduler.autoPlist),true);
+    scheduler.start();assert.equal(scheduler.status().loaded,true);
+    scheduler.setTime(second);
+    const saved=JSON.parse(spawnSync('/usr/bin/plutil',['-convert','json','-o','-',scheduler.autoPlist],{encoding:'utf8'}).stdout);
+    assert.deepEqual(saved.StartCalendarInterval,{Hour:3,Minute:18});
+    assert.equal(scheduler.status().autoStartAfterReboot,true);
+    scheduler.stop();assert.equal(existsSync(scheduler.autoPlist),false);assert.equal(scheduler.status().loaded,false);
+    scheduler.start();
+    const blocked=createScheduler({home,directory:join(home,'scheduler'),autoDirectory:join(home,'not-a-directory'),label:`com.dustoff.console-test.${process.pid}`,runArgs:['--dry-run']});
+    writeFileSync(join(home,'not-a-directory'),'fixture');
+    assert.throws(()=>blocked.update({time:first,autoStartAfterReboot:true}));
+    assert.equal(scheduler.status().loaded,true);assert.equal(scheduler.status().time,second);
+  }finally{spawnSync('/bin/launchctl',['bootout',scheduler.target]);rmSync(home,{recursive:true,force:true});}
+});
