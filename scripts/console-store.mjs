@@ -5,6 +5,7 @@ import { existsSync, readFileSync, readdirSync, statSync, statfsSync, openSync, 
 import { join, dirname, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { DUST_HOME, loadConf, makeCfg, expand } from './config.mjs';
+import { sessionSummary } from './session-status.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
@@ -29,6 +30,7 @@ export const FIELDS = {
   DUST_LLM_KEY:text('笔记模型密钥','models','','password'),
   DUST_NOTES:text('笔记输出目录','paths',join(homedir(),'Documents','抖音收藏'),'path'),
   DUST_TEXT:text('原始文字稿目录','paths','','path'),
+  DUST_WARN_DAYS:number('登录到期提前提醒（天）','login',7,1,30),
   DUST_ASR_CONTEXT:text('转写热词','login','','textarea'),
 };
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -160,7 +162,7 @@ export function createStore(home = DUST_HOME) {
     const session=readJson(join(home,'state','session.json'));
     const login=readJson(join(home,'console','login.json'));
     const flag=existsSync(join(home,'NEEDS_LOGIN'));
-    return {...totals,day,policy:policy(),lock:liveLock(home),storage,session:session?{level:session.level,logged_in:session.logged_in,last_check_at:session.last_check_at,expires_at:session.expires_at}:null,login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,home},recent:listItems({results:'1',status:'notes',size:3}).items,lastRun:runs()[0]||null};
+    return {...totals,day,policy:policy(),lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,home},recent:listItems({results:'1',status:'notes',size:3}).items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
   }
   return {home,settings,saveSettings,overview,listItems,item,document,fileFor,runs,runDetail,tail,redact,cfg,policy};
 }

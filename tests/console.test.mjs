@@ -26,7 +26,7 @@ function fixture(){
   return {home,cleanup:()=>rmSync(home,{recursive:true,force:true})};
 }
 const fakeScheduler=()=>{let current={loaded:false,running:false,time:'22:00',autoStartAfterReboot:false,timezone:'Asia/Taipei'};return {status:()=>({...current}),update:v=>Object.assign(current,v),start:()=>{current.loaded=true;},stop:()=>{current.loaded=false;current.autoStartAfterReboot=false;}};};
-async function serve(options){const app=createConsole({...options,scheduler:fakeScheduler()});const url=await app.listen(0);const html=await (await fetch(url)).text();const token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];return {...app,url,post:(path,data,headers={})=>fetch(url+'/api/'+path,{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token,...headers},body:JSON.stringify(data)}),close:()=>new Promise(resolve=>app.server.close(resolve))};}
+async function serve(options){const app=createConsole({...options,scheduler:fakeScheduler()});const url=await app.listen(0);const html=await (await fetch(url)).text();const token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];return {...app,url,token,post:(path,data,headers={})=>fetch(url+'/api/'+path,{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token,...headers},body:JSON.stringify(data)}),close:()=>new Promise(resolve=>app.server.close(resolve))};}
 
 test('只读账本分页、字面搜索、缺失文件和查询期间业务锁不冲突',()=>{const f=fixture();try{const store=createStore(f.home),before=readFileSync(join(f.home,'index.sqlite'));writeFileSync(join(f.home,'.lock.pipeline'),String(process.pid));const a=store.listItems({results:'1',page:2,size:6});assert.equal(a.items.length,6);assert.equal(a.page,2);assert.equal(a.total,18);assert.equal(store.listItems({q:'%'}).total,1);assert.equal(store.listItems({q:"' OR 1=1 --"}).total,0);assert.equal(store.overview().lock.running,true);assert.equal(store.overview().pending,0);assert.ok(store.document('1','note').content.includes('# 测试'));assert.equal(store.item('1').display_title,'整理后的标题');assert.equal(a.items[0].display_title,'整理后的标题');assert.equal(store.item('18').display_title,'测试作品 18');assert.throws(()=>store.document('../dustoff.conf','text'));assert.throws(()=>store.document('18','note'));assert.deepEqual(readFileSync(join(f.home,'index.sqlite')),before);}finally{f.cleanup();}});
 
@@ -39,3 +39,20 @@ test('控制台操作互斥且能停止自己启动的进程组',async()=>{const
 test('真实 retry 子进程只恢复失败待办，不调用模型也不占额度',async()=>{const f=fixture();const app=await serve({home:f.home});try{assert.equal((await app.post('retry',{id:'1'})).status,400);assert.equal((await app.post('retry',{id:'18'})).status,200);for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));assert.equal(app.execution().lastAction.exitCode,0);assert.equal(app.store.item('18').status,'transcribed');assert.equal(app.store.overview().usedToday,0);assert.equal(app.store.overview().pending,1);}finally{await app.close();f.cleanup();}});
 
 test('笔记阅读渲染支持常用结构且原始 HTML、脚本链接和图片不会执行',()=>{const html=renderMarkdown('---\nsecret: metadata\n---\n# 标题\n\n**要点**\n\n- 项目\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n<script>alert(1)</script>\n\n[x](javascript:alert)\n\n![图](https://track.invalid/i.png)\n\n```js\n<img onerror=alert(1)>\n```');assert.ok(html.includes('<h1'));assert.ok(html.includes('<strong>要点</strong>'));assert.ok(html.includes('<table>'));assert.ok(!html.includes('<script>'));assert.ok(!html.includes('href="javascript:'));assert.ok(!html.includes('<img'));assert.ok(!html.includes('metadata'));assert.ok(renderMarkdown('# 段落标题',{headingOffset:1}).startsWith('<h2'));});
+
+
+test('扫码接口校验来源、二维码仅在当前任务中可取、取消后立即失效',async()=>{
+  const f=fixture();let child;
+  const app=await serve({home:f.home,spawnProcess:(node,args,opts)=>(child=spawn(node,['-e','setInterval(()=>{},1000)'],opts))});
+  try{
+    assert.equal((await app.post('session-check',{}, {'X-Dustoff-Token':'wrong'})).status,403);
+    assert.equal((await app.post('login',{})).status,200);
+    child.emit('message',{type:'session',phase:'qr',message:'官方二维码',image:'ZmFrZS1wbmc=',deadline:Date.now()+60000});
+    const session=await(await fetch(app.url+'/api/session')).json();assert.equal(session.active,true);assert.ok(session.qrAt>0);assert.ok(!JSON.stringify(session).includes('ZmFrZS'));
+    assert.equal((await fetch(app.url+'/api/login-image')).status,403);
+    assert.equal((await fetch(app.url+'/api/login-image',{headers:{'X-Dustoff-Token':app.token}})).status,200);
+    await app.post('stop',{});for(let n=0;n<50&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));
+    assert.equal((await fetch(app.url+'/api/login-image',{headers:{'X-Dustoff-Token':app.token}})).status,404);
+    assert.equal((await app.post('login-control',{action:'refresh'})).status,409);
+  }finally{if(app.execution().running)await app.post('stop',{});await app.close();f.cleanup();}
+});

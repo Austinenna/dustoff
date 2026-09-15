@@ -7,7 +7,7 @@
 //   同一天内只真正评估一次，后续调用直接复用当天结果。
 //
 // 检查放在哪：
-//   只有 get_collection.mjs 会开 Chrome，而且它本来就要查一次登录态，
+//   get_collection.mjs 在采集时检查登录态，控制台也可手动检查，
 //   顺手读 sessionid 的 expires 字段几乎零成本，不需要额外的 CDP 调用。
 //   download.mjs 全程不开浏览器，因此不做也不该做这个检查。
 //
@@ -19,16 +19,17 @@
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { atomicWrite } from './policy.mjs';
+import { DUST_HOME, makeCfg } from './config.mjs';
 
-const ROOT = process.env.DUST_HOME || join(homedir(), '.dustoff');
+const ROOT = DUST_HOME;
 const STATE_DIR = join(ROOT, 'state');
 const STATE_FILE = join(STATE_DIR, 'session.json');
 const FLAG_FILE = join(ROOT, 'NEEDS_LOGIN');
 
-const WARN_DAYS = Number(process.env.DUST_WARN_DAYS || 7);   // 剩余不足几天开始预警
-const NOTIFY = process.env.DUST_NOTIFY !== '0';              // 设 0 可关掉系统通知
+const WARN_DAYS = Number(makeCfg()('DUST_WARN_DAYS',7));   // 剩余不足几天开始预警
+const NOTIFY = makeCfg()('DUST_NOTIFY','1') !== '0';              // 设 0 可关掉系统通知
 const HISTORY_CAP = 120;
 
 const localDate = (ts = Date.now()) => {
@@ -42,7 +43,7 @@ function load() {
 
 function save(state) {
   mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  atomicWrite(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 /** macOS 系统通知（方案 B）。非 macOS 或关掉通知时静默跳过。 */
@@ -72,38 +73,42 @@ function clearFlag() { try { if (existsSync(FLAG_FILE)) rmSync(FLAG_FILE); } cat
  * @returns {{checked:boolean, days_left:number|null, level:string, reason:string}}
  *          level: ok | warn | expired | unknown
  */
-export function guardSession({ loggedIn, expiresAt, force = false } = {}) {
+export function guardSession({ loggedIn, expiresAt, force = false, online } = {}) {
   const state = load();
   const today = localDate();
   const now = Math.floor(Date.now() / 1000);
+  if(online!==undefined){state.online=online;state.online_checked_at=now;}
 
   // 登录已经断了：这是硬故障，不受当日节流限制，标记文件每次都刷新（幂等且便宜），
   // 但系统通知一天只弹一次，避免定时任务反复触发时刷屏。
-  if (!loggedIn) {
+  if (!loggedIn || online === 'login_required') {
     const firstToday = state.last_alert_date !== today;
     writeFlag([
       '# dustoff 需要重新登录',
       `检测时间: ${new Date().toLocaleString()}`,
-      '原因: 未检测到 sessionid，登录态已失效',
+      '原因: 未检测到有效登录凭据，或抖音页面要求重新登录',
       '',
-      '修复方式（在终端执行，用手机扫码）:',
-      '  node ~/Documents/dustoff/scripts/login.mjs',
+      '修复方式（用手机扫码）:',
+      '  在 dustoff 控制台打开「登录管理」，点击「扫码登录」',
       '',
       '扫码成功后本文件可以删除。',
     ]);
     if (firstToday) {
-      notify('dustoff 登录已失效', '收藏夹同步已停止，需要重新扫码登录', '运行 login.mjs');
+      notify('dustoff 登录已失效', '收藏夹同步已停止，需要重新扫码登录', '打开控制台「登录管理」');
       state.last_alert_date = today;
     }
     state.last_check_date = today;
     state.last_check_at = now;
     state.logged_in = false;
+    state.expires_at = null;
+    state.days_left = null;
+    state.level = 'expired';
     save(state);
-    return { checked: true, days_left: null, level: 'expired', reason: '未检测到 sessionid' };
+    return { checked: true, days_left: null, level: 'expired', reason: online === 'login_required' ? '抖音要求重新登录' : '未检测到 sessionid' };
   }
 
   // 已登录：同一自然日内只评估一次
-  if (!force && state.last_check_date === today) {
+  if (!force && state.last_check_date === today && state.logged_in === true && state.expires_at === (expiresAt ?? null)) {
     return {
       checked: false,
       days_left: state.days_left ?? null,
@@ -145,18 +150,18 @@ export function guardSession({ loggedIn, expiresAt, force = false } = {}) {
       `sessionid 到期: ${expiresAt ? new Date(expiresAt * 1000).toLocaleString() : '未知'}`,
       `剩余: ${daysLeft !== null ? daysLeft.toFixed(1) + ' 天' : '未知'}`,
       '',
-      '建议在过期前重新扫码（在终端执行）:',
-      '  node ~/Documents/dustoff/scripts/login.mjs',
+      '建议在过期前重新扫码:',
+      '  在 dustoff 控制台打开「登录管理」，点击「扫码登录」',
       '',
       '扫码成功后本文件可以删除。',
     ]);
     if (firstToday) {
       notify('dustoff 登录即将过期',
         `sessionid 剩余 ${daysLeft !== null ? daysLeft.toFixed(1) : '?'} 天，建议尽快重新扫码`,
-        '运行 login.mjs');
+        '打开控制台「登录管理」');
       state.last_alert_date = today;
     }
-  } else if (level === 'ok') {
+  } else if (level === 'ok' || level === 'unknown') {
     clearFlag();     // 恢复正常就把标记清掉，避免留着过期的告警误导人
   }
 
