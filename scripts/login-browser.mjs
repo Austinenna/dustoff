@@ -12,6 +12,7 @@ export function launchLoginBrowser({profile,visible=false,spawnProcess=spawn}={}
   ],{stdio:['ignore','ignore','ignore','pipe','pipe']});
   let next=0,buffer=Buffer.alloc(0),closed=false,exited=false;
   const pending=new Map();
+  const diagnostics={documentStatuses:[],failedRequests:0};
   function fail(){closed=true;for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('登录浏览器已关闭，或该登录资料正被其他浏览器使用'));}pending.clear();}
   chrome.once('error',()=>{exited=true;fail();});chrome.once('exit',()=>{exited=true;fail();});
   chrome.stdio[3].on('error',fail);chrome.stdio[4].on('error',fail);
@@ -22,6 +23,8 @@ export function launchLoginBrowser({profile,visible=false,spawnProcess=spawn}={}
     while((end=buffer.indexOf(0))>=0){
       const raw=buffer.subarray(0,end);buffer=buffer.subarray(end+1);
       let m;try{m=JSON.parse(raw);}catch{continue;}
+      if(m.method==='Network.responseReceived'&&m.params?.type==='Document')diagnostics.documentStatuses.push(m.params.response.status);
+      if(m.method==='Network.loadingFailed')diagnostics.failedRequests++;
       const p=pending.get(m.id);if(!p)continue;pending.delete(m.id);clearTimeout(p.timer);
       // 不传播可能包含 Cookie 或页面数据的协议错误正文。
       if(m.error)p.reject(new Error(`登录浏览器操作失败：${p.method}`));else p.resolve(m.result);
@@ -44,19 +47,9 @@ export function launchLoginBrowser({profile,visible=false,spawnProcess=spawn}={}
     if(!closed){try{await Promise.race([send('Browser.close'),new Promise(r=>setTimeout(r,1500))]);}catch{} }
     if(!exited)await new Promise(resolve=>{const timer=setTimeout(()=>{chrome.kill('SIGKILL');},2000);chrome.once('exit',()=>{clearTimeout(timer);resolve();});});
   }
-  return {send,page,close,kill:()=>chrome.kill('SIGKILL')};
+  return {send,page,close,diagnostics:()=>({...diagnostics,documentStatuses:diagnostics.documentStatuses.slice(-8)}),kill:()=>chrome.kill('SIGKILL')};
 }
 
-// 官方页面当前使用 img[aria-label="二维码"]，同时兼容 alt 标注。
-// 只截取该元素，绝不把整张网页或 Cookie 发送到控制台。
-export const QR_SNAPSHOT = `(() => {
-  const visible=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(e).visibility!=='hidden';};
-  const img=Array.from(document.querySelectorAll('img[aria-label="二维码"],img[alt="二维码"]')).find(visible);
-  if(!img||!img.complete||!img.naturalWidth)return null;
-  const r=img.getBoundingClientRect(),text=img.parentElement?.parentElement?.innerText||'';
-  return {clip:{x:Math.max(0,r.x-8),y:Math.max(0,r.y-8),width:r.width+16,height:r.height+16,scale:2},
-    expired:/失效|过期|刷新/.test(text),scanned:/扫码成功|确认登录|已扫描/.test(text)};
-})()`;
 export const OPEN_LOGIN = `(() => {
   if(!document.body)return;
   if(document.querySelector('img[aria-label="二维码"],img[alt="二维码"]')||document.body.innerText.includes('扫码登录'))return;
@@ -69,4 +62,15 @@ export const ONLINE_STATUS = `(() => {
   if(Array.from(document.querySelectorAll('button,span,div,a')).some(e=>e.children.length===0&&e.textContent.trim()==='编辑资料'&&visible(e)))return 'verified';
   if(Array.from(document.querySelectorAll('img[aria-label="二维码"],img[alt="二维码"]')).some(visible))return 'login_required';
   return 'unknown';
+})()`;
+
+// 诊断只记录页面结构和加载状态，不记录正文、URL 参数、图片或凭据。
+export const LOGIN_DIAGNOSTICS = `(() => {
+  const visible=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(e).visibility!=='hidden';};
+  const images=Array.from(document.querySelectorAll('img[aria-label="二维码"],img[alt="二维码"]'));
+  const login=Array.from(document.querySelectorAll('button,span,div')).filter(e=>e.children.length===0&&e.textContent.trim()==='登录');
+  const text=document.body?.innerText.trim()||'';
+  return {textCharacters:text.length,ready:document.readyState,officialPage:location.hostname==='www.douyin.com',bodyCharacters:document.body?.innerText.length||0,
+    scanLoginText:document.body?.innerText.includes('扫码登录')||false,loginElements:login.length,visibleLoginElements:login.filter(visible).length,
+    qrElements:images.length,visibleQrElements:images.filter(visible).length,loadedQrElements:images.filter(e=>e.complete&&e.naturalWidth>0).length};
 })()`;

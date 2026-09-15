@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { cookieSession, sessionSummary, cookieParameters } from '../scripts/session-status.mjs';
 import { manageSession } from '../scripts/console-session.mjs';
-import { launchLoginBrowser, QR_SNAPSHOT, ONLINE_STATUS, OPEN_LOGIN } from '../scripts/login-browser.mjs';
+import { launchLoginBrowser, ONLINE_STATUS, OPEN_LOGIN, LOGIN_DIAGNOSTICS } from '../scripts/login-browser.mjs';
 import { statusCard, loginFlow } from '../web/login-ui.mjs';
 const cookie=(value='fixture-session',domain='.douyin.com',expires=2000000000)=>({name:'sessionid',value,domain,path:'/',expires,secure:true,httpOnly:true});
 
@@ -37,7 +37,7 @@ test('同一天失效后重新登录会重新评估并清除旧告警，未知�
   }finally{rmSync(home,{recursive:true,force:true});}
 });
 
-function harness({freshAfter=Infinity,online='verified',failImport=false,noQr=false}={}){
+function harness({freshAfter=Infinity,online='verified',failImport=false}={}){
   const home=mkdtempSync(join(tmpdir(),'dustoff-session-flow-')),events=[],guards=[],launches=[];
   let time=10000;
   const launch=options=>{
@@ -46,13 +46,13 @@ function harness({freshAfter=Infinity,online='verified',failImport=false,noQr=fa
       if(method==='Storage.getCookies'){reads++;if(temporary&&reads>=freshAfter)jar=[cookie('new')];return {cookies:jar};}
       if(method==='Storage.setCookies'){if(failImport&&params.cookies.some(c=>c.value==='new'))throw new Error('fixture import failure');jar=params.cookies;return {};}
       throw new Error('Unsupported method '+method);
-    },async page(){return {evaluate:async expression=>expression===ONLINE_STATUS?online:expression===QR_SNAPSHOT&&!noQr?{clip:{x:1,y:1,width:100,height:100,scale:2}}:undefined,command:async(method,params)=>{if(method==='Network.deleteCookies')jar=jar.filter(c=>c.name!==params.name||c.domain!==params.domain);return method==='Page.captureScreenshot'?{data:'ZmFrZS1wbmc='}:{};}};},async close(){b.closed=true;},jar:()=>jar};launches.push(b);return b;
+    },async page(){return {evaluate:async expression=>expression===ONLINE_STATUS?online:undefined,command:async(method,params)=>{if(method==='Network.deleteCookies')jar=jar.filter(c=>c.name!==params.name||c.domain!==params.domain);assert.notEqual(method,'Page.captureScreenshot');return {};}};},async close(){b.closed=true;},jar:()=>jar};launches.push(b);return b;
   };
   return {home,events,guards,launches,options:{home,profile:join(home,'profile'),launch,emit:e=>events.push(e),guard:s=>guards.push(s),now:()=>time,wait:async ms=>{time+=ms;},timeout:5000},cleanup:()=>rmSync(home,{recursive:true,force:true})};
 }
 
 test('扫码超时只清临时会话，二维码不写入文件，不触碰原登录资料',async()=>{
-  const f=harness();try{await manageSession(f.options);assert.equal(f.events.at(-1).phase,'timeout');assert.ok(f.events.some(e=>e.phase==='qr'));assert.equal(f.launches.length,1);assert.equal(f.launches[0].closed,true);assert.equal(f.guards.length,0);assert.deepEqual(readdirSync(join(f.home,'console')),[]);}finally{f.cleanup();}
+  const f=harness();try{await manageSession(f.options);assert.equal(f.events.at(-1).phase,'timeout');assert.ok(f.events.some(e=>e.phase==='window'));assert.equal(f.launches.length,1);assert.equal(f.launches[0].closed,true);assert.equal(f.guards.length,0);assert.deepEqual(readdirSync(join(f.home,'console')),[]);}finally{f.cleanup();}
 });
 
 test('扫码取消关闭临时浏览器；新凭据保存成功后才更新状态',async()=>{
@@ -78,16 +78,19 @@ test('Chrome 使用匿名管道，正确拼接分片响应并遮蔽协议错误'
   try{const b=launchLoginBrowser({profile:home,spawnProcess});assert.ok(args.includes('--remote-debugging-pipe'));assert.ok(!args.some(a=>a.startsWith('--remote-debugging-port')));assert.deepEqual(await b.send('Browser.getVersion'),{ok:true});await assert.rejects(b.send('bad'),e=>!e.message.includes('fixture secret'));await b.close();}finally{rmSync(home,{recursive:true,force:true});}
 });
 
-// 官方 DOM 的实际回归：alt 为空，二维码名称来自 aria-label。
-test('识别官方 aria-label 二维码，并区分失效遮罩',()=>{
+test('登录直接打开可见 Chrome，取消后的界面不保留二维码或空白区',async()=>{
   assert.doesNotThrow(()=>runInNewContext(OPEN_LOGIN,{document:{body:null}}));
-  let expired=false;
-  const img={complete:true,naturalWidth:512,getBoundingClientRect:()=>({x:20,y:30,width:178,height:178}),parentElement:{parentElement:{get innerText(){return expired?'二维码失效\n点击刷新':'如何扫码';}}}};
-  const context={document:{querySelectorAll:selector=>selector.includes('img[aria-label="二维码"]')?[img]:[]},getComputedStyle:()=>({visibility:'visible'})};
-  const qr=runInNewContext(QR_SNAPSHOT,context);assert.equal(qr.expired,false);assert.equal(qr.clip.width,194);
-  expired=true;assert.equal(runInNewContext(QR_SNAPSHOT,context).expired,true);
+  assert.equal(loginFlow({active:false,auth:{phase:'cancelled'}}),'');
+  assert.equal(loginFlow({active:false,auth:null}),'');
+  const f=harness();try{await manageSession({...f.options,timeout:40000});assert.equal(f.launches.length,1);assert.equal(f.launches[0].options.visible,true);assert.ok(f.events.every(e=>!e.image));assert.equal(f.guards.length,0);}finally{f.cleanup();}
 });
 
-test('后台取码持续失败时自动转到官方窗口，仍保留原登录资料',async()=>{
-  const f=harness({noQr:true});try{await manageSession({...f.options,timeout:40000});assert.equal(f.launches.length,2);assert.equal(f.launches[0].options.visible,false);assert.equal(f.launches[1].options.visible,true);assert.equal(f.launches[0].options.profile,f.launches[1].options.profile);assert.equal(f.guards.length,0);}finally{f.cleanup();}
+test('诊断只记录结构计数，不记录凭据、页面全文或 URL 参数',()=>{
+  const document={readyState:'complete',body:{innerText:'访问受限'},querySelectorAll:()=>[]};
+  const context={document,location:{hostname:'www.douyin.com',search:'?token=fixture-secret'}};
+  assert.equal(runInNewContext(LOGIN_DIAGNOSTICS,context).textCharacters,4);
+  document.body.innerText=' \n \n';assert.equal(runInNewContext(LOGIN_DIAGNOSTICS,context).textCharacters,0);
+  document.body.innerText='sessionid=fixture-secret';
+  const output=JSON.stringify(runInNewContext(LOGIN_DIAGNOSTICS,context));
+  assert.ok(!output.includes('fixture-secret'));assert.ok(!output.includes('访问受限'));
 });

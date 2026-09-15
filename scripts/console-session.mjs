@@ -1,4 +1,4 @@
-// 控制台登录任务。二维码和 Cookie 不落日志；二维码仅通过 IPC 传给本机服务。
+// 控制台登录任务。直接打开官方 Chrome 窗口，Cookie 不回传网页、不落日志。
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -7,12 +7,12 @@ import { atomicWrite, localPath } from './policy.mjs';
 import { createStage } from './stage.mjs';
 import { guardSession } from './session_guard.mjs';
 import { cookieSession, cookieParameters } from './session-status.mjs';
-import { launchLoginBrowser, QR_SNAPSHOT, OPEN_LOGIN, ONLINE_STATUS } from './login-browser.mjs';
+import { launchLoginBrowser, OPEN_LOGIN, ONLINE_STATUS, LOGIN_DIAGNOSTICS } from './login-browser.mjs';
 const SELF='https://www.douyin.com/user/self';
 const HOME='https://www.douyin.com/';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 
-export async function manageSession({mode='login',profile,home=DUST_HOME,launch=launchLoginBrowser,emit=()=>{},guard=guardSession,signal,control={},wait=delay,now=Date.now,timeout=300000}={}) {
+export async function manageSession({mode='login',profile,home=DUST_HOME,launch=launchLoginBrowser,emit=()=>{},diagnose=()=>{},guard=guardSession,signal,wait=delay,now=Date.now,timeout=300000}={}) {
   let browser=null,temp=null;
   const check=()=>{if(signal?.aborted)throw new Error('已取消登录操作');};
   const cookies=async b=>(await b.send('Storage.getCookies')).cookies;
@@ -33,13 +33,10 @@ export async function manageSession({mode='login',profile,home=DUST_HOME,launch=
     }
     mkdirSync(join(home,'console'),{recursive:true,mode:0o700});
     temp=mkdtempSync(join(home,'console','qr-profile-'));
-    const deadline=now()+timeout;let visible=mode==='window',page,reload=true,lastOpen=0,waitingSince=now();
+    const deadline=now()+timeout;let page,lastOpen=0,waitingSince=now(),lastDiagnostic=0;
     while(now()<deadline){
       check();
-      if(control.window&&!visible){visible=true;control.window=false;await close();reload=true;}
-      if(!browser){emit({phase:'starting',message:visible?'请在 Chrome 官方页面完成登录':'正在向抖音获取本次登录二维码…',deadline});browser=launch({profile:temp,visible});page=await browser.page(HOME);reload=false;}
-      if(control.refresh){control.refresh=false;reload=true;emit({phase:'starting',message:'正在刷新官方二维码…',deadline});}
-      if(reload){await page.command('Page.reload');reload=false;}
+      if(!browser){emit({phase:'starting',message:'正在打开 Chrome 官方登录页…',deadline});browser=launch({profile:temp,visible:true});page=await browser.page(HOME);}
       const fresh=await cookies(browser);
       if(cookieSession(fresh).loggedIn){
         emit({phase:'saving',message:'已收到登录凭据，正在保存并核对…',deadline});
@@ -63,12 +60,8 @@ export async function manageSession({mode='login',profile,home=DUST_HOME,launch=
         }
       }
       if(now()-lastOpen>5000){await page.evaluate(OPEN_LOGIN);lastOpen=now();}
-      const qr=await page.evaluate(QR_SNAPSHOT);
-      if(!qr&&!visible&&now()-waitingSince>=30000)control.window=true;
-      if(qr&&!qr.expired){
-        const {data}=await page.command('Page.captureScreenshot',{format:'png',clip:qr.clip,captureBeyondViewport:false});
-        emit({phase:qr.scanned?'scanned':'qr',message:qr.scanned?'已扫描，请在手机抖音上确认':'用手机抖音「扫一扫」扫描下方官方二维码',image:data,deadline});
-      }else emit({phase:qr?.expired?'expired':visible?'window':'waiting',message:qr?.expired?'二维码已过期，请刷新':visible?'请在 Chrome 官方页面完成扫码或额外验证':'等待官方二维码；持续未显示时将自动打开 Chrome 官方窗口',deadline});
+      if(now()-lastDiagnostic>=10000){diagnose(JSON.stringify({mode:'window',elapsedSeconds:Math.round((now()-waitingSince)/1000),page:await page.evaluate(LOGIN_DIAGNOSTICS),network:browser.diagnostics?.()}));lastDiagnostic=now();}
+      emit({phase:'window',message:'请在 Chrome 官方页面扫码，完成后这里会自动更新登录状态',deadline});
       await wait(1500);
     }
     emit({phase:'timeout',message:'本次扫码已超时，请重新开始'});
@@ -78,12 +71,12 @@ export async function manageSession({mode='login',profile,home=DUST_HOME,launch=
 async function main(){
   const mode=process.argv[2]||'login';if(!['login','check','window'].includes(mode))throw new Error('登录操作无效');
   const stage=createStage({name:'console-action',dustHome:DUST_HOME,notify:false});stage.acquireLock();
-  const controller=new AbortController(),control={};
+  const controller=new AbortController();
   for(const sig of ['SIGTERM','SIGINT']){process.removeAllListeners(sig);process.on(sig,()=>controller.abort());}
   process.on('disconnect',()=>controller.abort());
-  process.on('message',m=>{if(m?.action==='refresh')control.refresh=true;if(m?.action==='window')control.window=true;if(m?.action==='cancel')controller.abort();});
+  process.on('message',m=>{if(m?.action==='cancel')controller.abort();});
   const emit=value=>{if(process.connected)process.send({type:'session',...value});};
-  try{await manageSession({mode,home:DUST_HOME,profile:localPath(makeCfg()('DUST_PROFILE',join(DUST_HOME,'chrome-profile'))),signal:controller.signal,control,emit});}
+  try{await manageSession({mode,home:DUST_HOME,profile:localPath(makeCfg()('DUST_PROFILE',join(DUST_HOME,'chrome-profile'))),signal:controller.signal,emit,diagnose:message=>stage.log('[登录诊断]',message)});}
   catch(error){stage.log(error.message);emit({phase:controller.signal.aborted?'cancelled':'error',message:controller.signal.aborted?'本次操作已取消':'登录操作未完成，请重试或在 Chrome 官方窗口完成验证'});process.exitCode=controller.signal.aborted?0:1;}
   finally{stage.releaseLock();stage.pruneRuns();if(process.connected)process.disconnect();}
 }

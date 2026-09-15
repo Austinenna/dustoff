@@ -10,11 +10,8 @@ import { atomicWrite, localPath } from './policy.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 export const LABEL = 'com.dustoff.daily';
-export function parseTime(value) {
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value ?? '')) throw new Error('时间请用 24 小时制 HH:MM，例如 22:00 或 21:30');
-  const [Hour, Minute] = value.split(':').map(Number);
-  return { Hour, Minute };
-}
+export {parseTime} from './schedule-plan.mjs';
+import {parseTime,parseInterval,makePlan,nextOccurrence,calendarSlots} from './schedule-plan.mjs';
 const xml = value => String(value).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&apos;' }[c]));
 function command(program, args, { optional = false } = {}) {
   const result = spawnSync(program, args, { encoding:'utf8', timeout:15_000 });
@@ -46,17 +43,20 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
     return { loaded:true, running:/^\s*state = running$/m.test(output), pid:Number(output.match(/^\s*pid = (\d+)$/m)?.[1]) || null,
       runs:Number(output.match(/^\s*runs = (\d+)$/m)?.[1]) || 0, lastExitCode:output.match(/^\s*last exit code = (.+)$/m)?.[1] ?? null };
   }
-  function time() {
-    if (!existsSync(plist)) return '22:00';
-    const data = JSON.parse(command('/usr/bin/plutil', ['-convert','json','-o','-',plist]).stdout);
-    if (data.Label !== label) throw new Error('定时配置的任务名称不匹配');
-    const { Hour, Minute } = data.StartCalendarInterval ?? {};
-    const value = `${String(Hour).padStart(2,'0')}:${String(Minute).padStart(2,'0')}`;
-    parseTime(value);
-    return value;
+  function settings() {
+    if (!existsSync(plist)) return {time:'22:00',intervalHours:24,startAt:null};
+    const data=JSON.parse(command('/usr/bin/plutil',['-convert','json','-o','-',plist]).stdout);
+    if(data.Label!==label)throw new Error('定时配置的任务名称不匹配');
+    const env=data.EnvironmentVariables||{};
+    if(env.DUST_SCHEDULE_START_AT){return makePlan({time:env.DUST_SCHEDULE_TIME,intervalHours:Number(env.DUST_SCHEDULE_INTERVAL_HOURS),startAt:env.DUST_SCHEDULE_START_AT});}
+    const {Hour,Minute}=data.StartCalendarInterval??{};
+    const time=`${String(Hour).padStart(2,'0')}:${String(Minute).padStart(2,'0')}`;parseTime(time);
+    return {time,intervalHours:24,startAt:null};
   }
   function render(value) {
-    const { Hour, Minute } = parseTime(value);
+    const plan=typeof value==='string'?makePlan({time:value}):makePlan(value);
+    const slots=calendarSlots(plan.time,plan.intervalHours);
+    const calendar=slot=>`<dict><key>Hour</key><integer>${slot.Hour}</integer><key>Minute</key><integer>${slot.Minute}</integer></dict>`;
     const args = [node, join(root,'scripts/scheduled-run.mjs'), directory, ...runArgs];
     const path = [...new Set([dirname(node), '/opt/homebrew/bin','/usr/local/bin','/usr/bin','/bin','/usr/sbin','/sbin'])].join(':');
     return `<?xml version="1.0" encoding="UTF-8"?>
@@ -68,8 +68,11 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
   <key>EnvironmentVariables</key><dict>
     <key>DUST_HOME</key><string>${xml(resolve(home))}</string>
     <key>PATH</key><string>${xml(path)}</string>
+    <key>DUST_SCHEDULE_TIME</key><string>${xml(plan.time)}</string>
+    <key>DUST_SCHEDULE_START_AT</key><string>${xml(plan.startAt)}</string>
+    <key>DUST_SCHEDULE_INTERVAL_HOURS</key><string>${plan.intervalHours}</string>
   </dict>
-  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>${Hour}</integer><key>Minute</key><integer>${Minute}</integer></dict>
+  <key>StartCalendarInterval</key>${slots.length===1?calendar(slots[0]):`<array>${slots.map(calendar).join('')}</array>`}
   <key>RunAtLoad</key><false/>
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Background</string>
@@ -80,12 +83,12 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
   }
   function configure(value, shouldStart, auto = existsSync(autoPlist)) {
     if (typeof auto !== 'boolean') throw new Error('自动启用选项必须为布尔值');
-    parseTime(value); // 非法输入不得影响已加载的任务。
+    const plan=typeof value==='string'?makePlan({time:value}):makePlan(value); // 非法输入不得影响已加载的任务。
     for (const path of [node, join(root,'run.mjs'), join(root,'scripts/scheduled-run.mjs')]) {
       if (!existsSync(path)) throw new Error(`运行文件不存在：${path}`);
     }
     const state = inspect();
-    const next = render(value);
+    const next = render(plan);
     const old = existsSync(plist) ? readFileSync(plist,'utf8') : null;
     const oldAuto=readAuto();
     if (old === next && (!shouldStart || state.loaded) && (auto ? oldAuto===next : oldAuto===null)) return status();
@@ -119,7 +122,8 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
     return status();
   }
   function status() {
-    return { ...inspect(), time:time(), timezone:Intl.DateTimeFormat().resolvedOptions().timeZone, autoStartAfterReboot:readAuto()!==null,
+    const state=inspect(),plan=settings();
+    return { ...state,...plan,nextRun:state.loaded?nextOccurrence(plan):null, timezone:Intl.DateTimeFormat().resolvedOptions().timeZone, autoStartAfterReboot:readAuto()!==null,
       target, plist, latestLog:latest, lastRun:existsSync(resultFile) ? JSON.parse(readFileSync(resultFile,'utf8')) : null };
   }
   function stop() {
@@ -131,23 +135,36 @@ export function createScheduler({ home = DUST_HOME, directory = join(home, 'sche
     catch(error) { if(state.loaded) command('/bin/launchctl',['bootstrap',domain,plist]); throw error; }
     return status();
   }
-  return { status, start:(value = time()) => configure(value,true), setTime:value => configure(value,false), update:({time:value = time(),autoStartAfterReboot = existsSync(autoPlist)}) => configure(value,false,autoStartAfterReboot), stop, render, target, plist, autoPlist };
+  function update({time,intervalHours,autoStartAfterReboot=existsSync(autoPlist)}={}) {
+    const previous=settings();time??=previous.time;intervalHours??=previous.intervalHours;
+    parseTime(time);parseInterval(intervalHours);
+    const unchanged=time===previous.time&&intervalHours===previous.intervalHours;
+    return configure(makePlan({time,intervalHours,startAt:unchanged?previous.startAt:null}),false,autoStartAfterReboot);
+  }
+  function start(value) {
+    const previous=settings();
+    const plan=makePlan({...previous,...(value!==undefined?{time:value,startAt:value===previous.time?previous.startAt:null}:{})});
+    // 重新开启已过期的计划时，从下一次起始时刻重新开始，避免立即补跑停用期间任务。
+    if(!inspect().loaded&&Date.parse(plan.startAt)<=Date.now())plan.startAt=makePlan({time:plan.time,intervalHours:plan.intervalHours}).startAt;
+    return configure(plan,true);
+  }
+  return {status,start,setTime:value=>update({time:value}),update,stop,render,target,plist,autoPlist};
 }
 
 function main(args) {
   if (args.length === 0 || args[0] === '--help') {
-    console.log('每日定时（默认仅当前登录会话，可显式启用登录自动加载）\n  node scripts/schedule.mjs start [HH:MM]  开启定时，默认/保留 22:00\n  node scripts/schedule.mjs time HH:MM     改时间；已开启则立即更新，已关闭则只保存\n  node scripts/schedule.mjs status         查看真实加载状态\n  node scripts/schedule.mjs stop           关闭定时及登录自动加载，保留时间\n  node scripts/schedule.mjs autostart on|off  登录后自动启用\n\n立即处理一轮：node run.mjs');
+    console.log('间隔定时（默认仅当前登录会话，可显式启用登录自动加载）\n  node scripts/schedule.mjs start [HH:MM]  开启定时，默认/保留 22:00\n  node scripts/schedule.mjs time HH:MM     改时间；已开启则立即更新，已关闭则只保存\n  node scripts/schedule.mjs interval HOURS  设置重复间隔（1–720 整数小时）\n  node scripts/schedule.mjs status         查看真实加载状态\n  node scripts/schedule.mjs stop           关闭定时及登录自动加载，保留时间\n  node scripts/schedule.mjs autostart on|off  登录后自动启用\n\n立即处理一轮：node run.mjs');
     return;
   }
   if (process.platform !== 'darwin') throw new Error('这个定时入口使用 macOS launchd');
   const [action, value, extra] = args;
   if(action==='autostart' && ['on','off'].includes(value) && !extra) { console.log(JSON.stringify(createScheduler().update({autoStartAfterReboot:value==='on'}),null,2)); return; }
-  if (!['start','time','status','stop'].includes(action) || extra !== undefined || (['status','stop'].includes(action) && value !== undefined)) throw new Error('参数不正确，使用 --help 查看用法');
-  if (action === 'time' || value !== undefined) parseTime(value);
+  if (!['start','time','interval','status','stop'].includes(action) || extra !== undefined || (['status','stop'].includes(action) && value !== undefined)) throw new Error('参数不正确，使用 --help 查看用法');
+  if(action==='interval')parseInterval(Number(value));else if (action === 'time' || value !== undefined) parseTime(value);
   const scheduler = createScheduler();
-  const state = action === 'time' ? scheduler.setTime(value) : action === 'start' ? scheduler.start(value) : scheduler[action]();
+  const state = action === 'interval' ? scheduler.update({intervalHours:Number(value)}) : action === 'time' ? scheduler.setTime(value) : action === 'start' ? scheduler.start(value) : scheduler[action]();
   console.log(JSON.stringify(state,null,2));
-  console.log(`每日 ${state.time}（${state.timezone}）：${state.loaded ? state.running ? '正在执行' : '已开启，等待触发' : '已关闭'}；${state.autoStartAfterReboot ? '登录后自动启用' : '重启/注销后需手动开启'}。`);
+  console.log(`起始 ${state.time}，每 ${state.intervalHours} 小时（${state.timezone}）：${state.loaded ? state.running ? '正在执行' : '已开启，等待触发' : '已关闭'}；${state.autoStartAfterReboot ? '登录后自动启用' : '重启/注销后需手动开启'}。`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try { main(process.argv.slice(2)); } catch (error) { console.error(error.message); process.exitCode = 1; }

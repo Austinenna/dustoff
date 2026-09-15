@@ -16,10 +16,10 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   const store=createStore(home);
   scheduler ||= createScheduler({home,root});
   const token=randomBytes(32).toString('hex');
-  let active=null,lastAction=null,origin,auth=null,qrImage=null,qrAt=0;
+  let active=null,lastAction=null,origin,auth=null;
   const actionsDir=localPath(join(home,'console'));
   function state(){const lock=liveLock(home);return {running:!!active||lock.running,pid:active?.pid||lock.pid||null,owned:!!active,kind:active?.kind||null,startedAt:active?.startedAt||null,lastAction};}
-  function scheduleState(){try{const s=scheduler.status();let nextRun=null;if(s.loaded){const [h,m]=s.time.split(':').map(Number);const next=new Date();next.setHours(h,m,0,0);if(next<=new Date())next.setDate(next.getDate()+1);nextRun=next.toISOString();}return {...s,nextRun,error:null};}catch(e){return {error:e.message,loaded:null,time:null};}}
+  function scheduleState(){try{return {...scheduler.status(),error:null};}catch(e){return {error:e.message,loaded:null,time:null,intervalHours:null,nextRun:null};}}
   function start(kind,body={}) {
     if(state().running)throw new HttpError(409,'已有任务正在运行，请等本轮结束');
     let script,args;
@@ -30,7 +30,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       script=join(root,'run.mjs');args=['--limit',String(n),...(body.noScan?['--no-scan']:[])];
     } else if(['login','session-check','login-window'].includes(kind)){
       script=join(root,'scripts','console-session.mjs');args=[kind==='session-check'?'check':kind==='login-window'?'window':'login'];
-      auth={phase:'starting',message:kind==='session-check'?'正在检查登录状态…':'正在准备官方扫码登录…'};qrImage=null;qrAt=0;
+      auth={phase:'starting',message:kind==='session-check'?'正在检查登录状态…':'正在打开 Chrome 官方登录页…'};
     } else {
       if(kind==='retry'){const i=store.item(body.id);if(i.status!=='failed')throw new HttpError(400,'只能重试已失败作品');}
       script=join(root,'scripts','console-action.mjs');args=[kind,...(kind==='retry'?[body.id]:[])];
@@ -46,19 +46,17 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     child.on('message',m=>{
       if(active!==operation||m?.type!=='session'||operation.cancelling&&m.phase!=='cancelled'&&m.phase!=='error')return;
       const {phase,message,deadline}=m;
-      if(!['starting','checking','checked','waiting','qr','scanned','saving','success','expired','timeout','window','cancelled','error'].includes(phase))return;
+      if(!['starting','checking','checked','saving','success','timeout','window','cancelled','error'].includes(phase))return;
       auth={phase,message:String(message||'').slice(0,300),deadline};
-      qrImage=null;qrAt=0;
-      if(['qr','scanned'].includes(phase)&&typeof m.image==='string'&&m.image.length<2*1024*1024&&/^[A-Za-z0-9+/=]+$/.test(m.image)){qrImage=Buffer.from(m.image,'base64');qrAt=Date.now();}
     });
     child.stdout.on('data',log);child.stderr.on('data',log);
     child.once('error',e=>log(`启动失败：${e.message}\n`));
-    child.once('close',(code,signal)=>{lastAction={kind,pid:operation.pid,startedAt:operation.startedAt,finishedAt:Date.now(),exitCode:code??1,signal};log(`结束：退出码 ${lastAction.exitCode}\n`);if(fd!==null){closeSync(fd);fd=null;}atomicWrite(join(actionsDir,'last-action.json'),encode(lastAction));if(active===operation){active=null;if(['login','session-check','login-window'].includes(kind)){qrImage=null;qrAt=0;if(!['checked','success','cancelled','timeout','error'].includes(auth?.phase))auth={phase:'error',message:'登录任务已结束，请重新开始'};}}});
+    child.once('close',(code,signal)=>{lastAction={kind,pid:operation.pid,startedAt:operation.startedAt,finishedAt:Date.now(),exitCode:code??1,signal};log(`结束：退出码 ${lastAction.exitCode}\n`);if(fd!==null){closeSync(fd);fd=null;}atomicWrite(join(actionsDir,'last-action.json'),encode(lastAction));if(active===operation){active=null;if(['login','session-check','login-window'].includes(kind)){if(!['checked','success','cancelled','timeout','error'].includes(auth?.phase))auth={phase:'error',message:'登录任务已结束，请重新开始'};}}});
     return state();
   }
   async function body(req){let size=0,parts=[];for await(const data of req){size+=data.length;if(size>32*1024)throw new HttpError(413,'请求内容过大');parts.push(data);}try{return JSON.parse(Buffer.concat(parts).toString('utf8')||'{}');}catch{throw new HttpError(400,'请求不是有效 JSON');}}
   const server=createServer(async(req,res)=>{
-    const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
+    const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
     const send=(code,value,type='application/json; charset=utf-8')=>{res.writeHead(code,{...headers,'Content-Type':type});res.end(type.startsWith('application/json')?encode(value):value);};
     try {
       if(req.headers.host!==new URL(origin).host)throw new HttpError(403,'请使用控制台的本机地址');
@@ -81,13 +79,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       const params=Object.fromEntries(url.searchParams);
       let result;
       if(req.method==='GET')switch(path){
-        case '/api/session':result={session:store.overview().session,auth,active:!!active&&['login','session-check','login-window'].includes(active.kind),kind:active?.kind,qrAt:Date.now()-qrAt<10000?qrAt:0};break;
-        case '/api/login-image':{
-          const received=Buffer.from(String(req.headers['x-dustoff-token']||''));
-          if(received.length!==token.length||!timingSafeEqual(received,Buffer.from(token)))throw new HttpError(403,'请从本机控制台读取二维码');
-          if(!qrImage||!active||Date.now()-qrAt>=10000)throw new HttpError(404,'二维码已失效或尚未生成');
-          send(200,qrImage,'image/png');return;
-        }
+        case '/api/session':result={session:store.overview().session,auth,active:!!active&&['login','session-check','login-window'].includes(active.kind),kind:active?.kind};break;
         case '/api/health':result={app:'dustoff',home,root,pid:process.pid};break;
         case '/api/overview':result={...store.overview(),execution:state(),scheduler:scheduleState()};break;
         case '/api/items':result=store.listItems(params);break;
@@ -100,7 +92,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       } else switch(path){
         case '/api/settings':result=store.saveSettings(data);break;
         case '/api/schedule':
-          if(data.action==='save'){if(typeof data.time!=='string'||typeof data.autoStartAfterReboot!=='boolean')throw new HttpError(400,'定时参数无效');scheduler.update({time:data.time,autoStartAfterReboot:data.autoStartAfterReboot});}
+          if(data.action==='save'){if(typeof data.time!=='string'||typeof data.autoStartAfterReboot!=='boolean'||typeof data.intervalHours!=='number')throw new HttpError(400,'定时参数无效');scheduler.update({time:data.time,intervalHours:data.intervalHours,autoStartAfterReboot:data.autoStartAfterReboot});}
           else if(data.action==='start')scheduler.start();else if(data.action==='stop')scheduler.stop();else throw new HttpError(400,'定时操作无效');
           result=scheduleState();break;
         case '/api/run':result=start('run',data);break;
@@ -108,15 +100,13 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/login':result=start('login');break;
         case '/api/session-check':result=start('session-check');break;
         case '/api/login-control':{
-          if(!['refresh','window','cancel'].includes(data.action))throw new HttpError(400,'登录操作无效');
-          if(!active&&data.action==='window'){result=start('login-window');break;}
+          if(data.action!=='cancel')throw new HttpError(400,'登录操作无效');
           if(!active||!['login','login-window','session-check'].includes(active.kind))throw new HttpError(409,'当前没有登录任务');
-          if(active.kind==='session-check'&&data.action!=='cancel')throw new HttpError(409,'请等待登录检查结束');
-          if(data.action==='cancel')active.cancelling=true;qrImage=null;qrAt=0;auth={phase:'starting',message:'正在处理…'};active.child.send({action:data.action});result={accepted:true};break;
+          if(data.action==='cancel')active.cancelling=true;auth={phase:'starting',message:'正在处理…'};active.child.send({action:data.action});result={accepted:true};break;
         }
         case '/api/stop':
           if(!active?.pid)throw new HttpError(409,'只能停止本控制台启动的任务');
-          if(['login','session-check','login-window'].includes(active.kind)){active.cancelling=true;qrImage=null;qrAt=0;}
+          if(['login','session-check','login-window'].includes(active.kind)){active.cancelling=true;}
           try{process.kill(-active.pid,'SIGTERM');}catch(e){if(e.code!=='ESRCH')throw e;}
           result={stopping:true};break;
         case '/api/open': {

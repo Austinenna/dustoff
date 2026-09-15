@@ -29,10 +29,10 @@ test('plist 为每天一次、无立即启动、无常驻；路径转义后仍�
 });
 
 // 显式运行此检查会真实加载/触发/移除一个临时 launchd 任务。
-// 使用正式账本的 --dry-run，不扫描、不下载、不调用 ASR/LLM。
-test('真实 launchd：启停、改时间、幂等加载与日常入口连通', { skip:process.env.DUST_SCHEDULER_INTEGRATION !== '1' }, async () => {
+// 使用独立资料目录与未来计划，只验证唤起后不会提前执行业务。
+test('真实 launchd：启停、改时间、幂等加载与未来计划不提前执行', { skip:process.env.DUST_SCHEDULER_INTEGRATION !== '1' }, async () => {
   const directory = mkdtempSync(join(tmpdir(),'dustoff-schedule-live-'));
-  const scheduler = createScheduler({ directory, label:`com.dustoff.verify.${process.pid}`, runArgs:['--dry-run'] });
+  const scheduler = createScheduler({ directory, home:join(directory,'home'), autoDirectory:join(directory,'agents'), label:`com.dustoff.verify.${process.pid}`, runArgs:['--dry-run'] });
   const later = new Date(Date.now() + 6 * 3600_000);
   const time = date => `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
   const first = time(later), second = time(new Date(later.getTime()+60_000));
@@ -48,18 +48,12 @@ test('真实 launchd：启停、改时间、幂等加载与日常入口连通', 
     assert.equal(changed.loaded,true);
     assert.equal(changed.time,second);
     assert.equal(changed.runs,0);
+    // 启用未来计划后 kickstart 只触发时间检查，不应提前运行。
     const triggered = spawnSync('/bin/launchctl',['kickstart',scheduler.target],{ encoding:'utf8' });
     assert.equal(triggered.status,0,triggered.stderr);
     let status;
-    for (let i = 0; i < 100; i++) {
-      await new Promise(resolve => setTimeout(resolve,200));
-      status = scheduler.status();
-      if (status.lastRun?.finishedAt && !status.running) break;
-    }
-    assert.ok(status.lastRun?.finishedAt,'日常入口未在 20 秒内结束');
-    assert.equal(status.lastRun.exitCode,0);
-    assert.equal(status.runs,1);
-    assert.match(readFileSync(join(directory,'latest-run.log'),'utf8'),/已建基线；待办/);
+    for(let i=0;i<100;i++){await new Promise(resolve=>setTimeout(resolve,100));status=scheduler.status();if(status.runs>=1&&!status.running)break;}
+    assert.equal(status.lastRun,null);assert.equal(status.runs,1);
     assert.equal(scheduler.stop().loaded,false);
     assert.equal(scheduler.setTime(first).loaded,false);
     const restarted = scheduler.start();
@@ -87,6 +81,11 @@ test('隔离 launchd：登录自动启用、时间同步、关闭清理以及写
     const saved=JSON.parse(spawnSync('/usr/bin/plutil',['-convert','json','-o','-',scheduler.autoPlist],{encoding:'utf8'}).stdout);
     assert.deepEqual(saved.StartCalendarInterval,{Hour:3,Minute:18});
     assert.equal(scheduler.status().autoStartAfterReboot,true);
+    const changed=scheduler.update({intervalHours:12});assert.equal(changed.intervalHours,12);assert.equal(changed.time,second);assert.ok(changed.nextRun);
+    assert.equal(scheduler.update({intervalHours:12}).startAt,changed.startAt);
+    const updated=JSON.parse(spawnSync('/usr/bin/plutil',['-convert','json','-o','-',scheduler.autoPlist],{encoding:'utf8'}).stdout);
+    assert.deepEqual(updated.StartCalendarInterval,[{Hour:3,Minute:18},{Hour:15,Minute:18}]);
+    assert.throws(()=>scheduler.update({intervalHours:0}));assert.equal(scheduler.status().intervalHours,12);
     scheduler.stop();assert.equal(existsSync(scheduler.autoPlist),false);assert.equal(scheduler.status().loaded,false);
     scheduler.start();
     const blocked=createScheduler({home,directory:join(home,'scheduler'),autoDirectory:join(home,'not-a-directory'),label:`com.dustoff.console-test.${process.pid}`,runArgs:['--dry-run']});

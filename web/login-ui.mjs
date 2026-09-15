@@ -12,7 +12,7 @@ export function statusCard(session,{compact=false,busy=false}={}){
 }
 export function loginFlow(data){
   const a=data?.auth,active=data?.active;
-  if(!a)return '<div class="empty">点击「扫码登录」获取抖音官方二维码。</div>';
-  const scan=active&&data.kind!=='session-check',showQr=scan&&data.qrAt&&['qr','scanned'].includes(a.phase);
-  return `<div class="login-flow-content"><div class="qr-frame">${showQr?'<img id="official-qr" alt="本次抖音官方登录二维码" width="240" height="240">':`<div class="qr-placeholder">${esc(a.phase==='success'?'登录已完成':a.phase==='checked'?'检查已完成':a.phase==='expired'?'二维码已过期':active?'正在准备…':'本次登录已结束')}</div>`}</div><div class="login-instructions"><h2>${esc(a.message)}</h2>${scan?'<p>打开手机抖音，使用「扫一扫」，并在手机上核对、确认本次电脑登录。</p><p class="settings-note">二维码来自抖音官方登录页，仅用于本次登录。不要扫描他人转发的登录二维码。</p>':''}<div class="row">${scan?'<button type="button" data-action="refresh-qr">刷新二维码</button><button type="button" data-action="login-window">在 Chrome 中完成</button>':''}${active?'<button type="button" data-action="cancel-login" class="link">取消本次操作</button>':a.phase!=='checked'?'<button type="button" data-action="login">重新扫码</button>':''}</div>${scan?'<p class="settings-note login-terms">官方页面提示：登录即代表同意<a href="https://www.douyin.com/agreements/?id=6773906068725565448" target="_blank" rel="noopener noreferrer">用户协议</a>和<a href="https://www.douyin.com/agreements/?id=6773901168964798477" target="_blank" rel="noopener noreferrer">隐私政策</a>。请自行阅读并在手机端决定是否确认。需要额外验证时，使用 Chrome 官方窗口完成。</p>':''}</div></div>`;
+  if(!a||a.phase==='cancelled')return '';
+  const scan=active&&data.kind!=='session-check';
+  return `<div class="login-notice"><p role="status">${esc(a.message)}</p>${scan?'<p class="settings-note">使用手机抖音扫描 Chrome 官方页面中的二维码，并在手机上确认登录。二维码过期或需要额外验证时，直接在官方页面操作。</p>':''}${active?'<button type="button" data-action="cancel-login" class="link">取消本次操作</button>':''}</div>`;
 }
