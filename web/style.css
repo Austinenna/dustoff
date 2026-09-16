@@ -48,3 +48,27 @@
 @media(max-width:650px){#dustoff-studio .note-heading h1{font-size:25px}}
 
 #dustoff-studio .session-remaining{margin-top:8px;font-size:26px}#dustoff-studio .session-warning{color:var(--d-warn)}#dustoff-studio .session-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px;margin:26px 0 20px}#dustoff-studio .session-facts p{font-size:14px;margin-top:8px;line-height:1.7}#dustoff-studio .login-notice{padding:0 8px 20px;line-height:1.7}#dustoff-studio .login-notice button{margin-top:10px}#dustoff-studio .session-overview{margin-bottom:20px}@media(max-width:650px){#dustoff-studio .session-facts{grid-template-columns:1fr;gap:14px}#dustoff-studio .session-remaining{font-size:22px}}
+
+/* 账本直接展示用途、处理方式与媒体现状。 */
+#dustoff-studio .routing-intro{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}
+#dustoff-studio .routing-intro p{margin-top:7px;font-size:13px}
+#dustoff-studio .routing-legend{display:flex;gap:8px;flex-wrap:wrap}
+#dustoff-studio .pill.neutral{background:var(--d-bg);color:var(--d-muted)}
+#dustoff-studio .pill.purpose-video,#dustoff-studio .pill.purpose-both{background:light-dark(#f0ebff,#34284b);color:light-dark(#7043b5,#cab0f2)}
+#dustoff-studio .pill.purpose-speech{background:light-dark(#eaf5ee,#21372a);color:light-dark(#32724b,#99d0ac)}
+#dustoff-studio .pill.purpose-visual{background:light-dark(#fff3de,#3c3120);color:light-dark(#91630a,#e6bd6c)}
+#dustoff-studio .pill.purpose-review{background:var(--d-warn-bg);color:var(--d-warn)}
+#dustoff-studio .cell-note{display:block;margin-top:6px;font-size:11px;line-height:1.5}
+#dustoff-studio .ledger-table{min-width:850px;table-layout:fixed}
+#dustoff-studio .ledger-table th:first-child{width:40%}
+#dustoff-studio .ledger-table th:nth-child(2){width:21%}
+#dustoff-studio .ledger-table th:nth-child(3){width:15%}
+#dustoff-studio .ledger-table th:nth-child(4){width:11%}
+#dustoff-studio .ledger-table th:nth-child(5){width:13%}
+#dustoff-studio .ledger-table td{vertical-align:top}
+#dustoff-studio .ledger-title{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;margin-bottom:6px}
+#dustoff-studio .ledger-actions{display:flex;flex-direction:column;align-items:flex-start;gap:9px;font-size:12px}
+
+#dustoff-studio .routing-reason{color:var(--d-muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#dustoff-studio .routing-preview-note{padding:16px;margin-top:16px;background:var(--d-bg);border-radius:12px}
+#dustoff-studio .routing-preview-note p{font-size:13px;margin:10px 0 5px}

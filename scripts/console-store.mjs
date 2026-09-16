@@ -5,6 +5,7 @@ import { existsSync, readFileSync, readdirSync, statSync, statfsSync, openSync, 
 import { join, dirname, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { DUST_HOME, loadConf, makeCfg, expand } from './config.mjs';
+import { readPreviews, previewFor } from './preview-routing.mjs';
 import { chatEndpoint } from './routing.mjs';
 import { sessionSummary } from './session-status.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
@@ -124,7 +125,8 @@ export function createStore(home = DUST_HOME) {
       if(search){where.push("(title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\' OR note_path LIKE ? ESCAPE '\\')");const q='%'+search.replace(/[\\%_]/g,'\\$&')+'%';values.push(q,q,q,q);}
       const clause=where.join(' AND '),total=db.prepare(`SELECT count(*) n FROM items WHERE ${clause}`).get(...values).n,pages=Math.max(1,Math.ceil(total/size)),actual=Math.min(page,pages);
       const rows=db.prepare(`SELECT id,title,author,status,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr FROM items WHERE ${clause} ORDER BY COALESCE(extracted_at,transcribed_at,collected_at,first_seen) DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
-      return {items:rows.map(r=>({...r,display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
+      const previews=readPreviews(home);
+      return {items:rows.map(r=>({...r,routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
     },{items:[],total:0,page:1,pages:1,size});
   }
   function displayTitle(row) {
@@ -147,7 +149,7 @@ export function createStore(home = DUST_HOME) {
     const row=readDb(db=>has(db,'items')?db.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id):null,null);
     if(!row)throw new HttpError(404,'找不到这条作品');
     const inQueue=readDb(db=>has(db,'daily_queue')&&!!db.prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id),false);
-    return JSON.parse(redact({...row,can_change_purpose:inQueue&&!['baseline','gallery','too_long'].includes(row.skip_reason)&&row.status!=='removed',display_title:displayTitle(row)}));
+    return JSON.parse(redact({...row,routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:inQueue&&!['baseline','gallery','too_long'].includes(row.skip_reason)&&row.status!=='removed',display_title:displayTitle(row)}));
   }
   function fileFor(id,kind) {const row=item(id),path=row[kind==='note'?'note_path':kind==='video'?'media_path':'text_path'];if(!['note','text','video'].includes(kind)||!path||(kind==='video'&&row.media_deleted))throw new HttpError(404,'尚未生成这份文件或视频已清理');const p=localPath(path);if(kind==='video'?!['.mp4','.mov','.webm','.m4v'].includes(extname(p)):extname(p)!==(kind==='note'?'.md':'.txt'))throw new HttpError(400,'产物格式不正确');if(!existsSync(p)||!statSync(p).isFile())throw new HttpError(404,'文件已移动或不存在，请核对账本路径');return p;}
   function document(id,kind){if(!['note','text'].includes(kind))throw new HttpError(400,'只支持阅读文字产物');const path=fileFor(id,kind);if(statSync(path).size>4*1024**2)throw new HttpError(413,'文件超过 4 MiB，请在本机阅读器中打开');return {item:item(id),kind,path,content:readFileSync(path,'utf8')};}

@@ -141,3 +141,23 @@ test('用途网关故障不会降级下载、改成跳过或清理已有视频',
     process.exitCode=0;
   }finally{await new Promise(r=>server.close(r));}
 `));
+
+test('旧记录用途预览只写建议，业务字段、队列和额度保持不变，重复执行使用缓存',()=>isolated(`
+  import assert from 'node:assert/strict';
+  const {db,markSkipped,markExtracted}=await import('./scripts/ledger.mjs');
+  const {acceptScan,usage}=await import('./scripts/daily.mjs');
+  const {previewRecent,readPreviews,previewFor}=await import('./scripts/preview-routing.mjs');
+  const {createStore}=await import('./scripts/console-store.mjs');
+  const seed={aweme_id:'100',duration_s:2};
+  acceptScan({ok:true,logged_in:true,truncated:false,items:[seed]});
+  acceptScan({ok:true,logged_in:true,truncated:false,items:[{aweme_id:'1',desc:'舞蹈',author:'测试',duration_s:2},{aweme_id:'2',desc:'图集',is_gallery:true},{aweme_id:'3',desc:'知识介绍',duration_s:5},seed]});
+  markSkipped('1','need_ocr',{needsOcr:true});markExtracted('3',{text_chars:30,text_source:'asr'});
+  const snapshot=()=>JSON.stringify({items:db().prepare('SELECT * FROM items ORDER BY id').all(),queue:db().prepare('SELECT * FROM daily_queue ORDER BY id').all(),used:usage()});
+  const before=snapshot();let calls=0;
+  const classify=async row=>{calls++;return {purpose:row.id==='1'?'video':'speech',reason:'测试建议',model:'glm'};};
+  const result=await previewRecent({classifier:classify});assert.equal(result.classified,2);assert.equal(calls,2);assert.equal(snapshot(),before);
+  const cached=await previewRecent({classifier:classify});assert.equal(cached.cached,2);assert.equal(calls,2);assert.equal(snapshot(),before);
+  const store=createStore(process.env.DUST_HOME),item=store.item('1');assert.equal(item.routing_preview.purpose,'video');assert.equal(item.processing_mode,null);assert.equal(item.status,'skipped');
+  assert.equal(store.listItems({q:'舞蹈'}).items[0].routing_preview.purpose,'video');assert.equal(store.item('100').routing_preview,null);
+  assert.equal(previewFor({...item,title:'标题已修改'},readPreviews()),null);
+`));
