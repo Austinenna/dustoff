@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from 'node:fs';
-import { localPath } from './policy.mjs';
+import { localPath, under, SAVED_MEDIA } from './policy.mjs';
+import { PURPOSES } from './routing.mjs';
 import { db, importScan } from './ledger.mjs';
 import { boundaryIndex } from './incremental.mjs';
 import { POLICY, mediaDecision } from './policy.mjs';
@@ -77,11 +78,28 @@ export function retryItem(id) {
   const d = database();
   if (!inScope(id)) throw new Error('条目不在本次启用范围内');
   const row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
-  if (!row || row.status === 'extracted' || row.skip_reason === 'baseline') throw new Error('已完成或基线条目不能作为失败待办重试');
+  if (!row || ['extracted','saved','review'].includes(row.status) || row.skip_reason === 'baseline') throw new Error('已完成或基线条目不能作为失败待办重试');
   if (row.skip_reason === 'too_long' || row.skip_reason === 'gallery') throw new Error('本轮不支持恢复主动跳过的内容');
   let status = 'pending';
-  if (row.transcribed_at && row.text_path && existsSync(localPath(row.text_path)) && readFileSync(localPath(row.text_path),'utf8').length === row.text_chars) status = 'transcribed';
-  else if (row.media_path && !row.media_deleted && existsSync(localPath(row.media_path))) status = 'downloaded';
+  const profile = PURPOSES[row.processing_mode || 'speech'];
+  const mediaReady = row.media_path && !row.media_deleted && existsSync(localPath(row.media_path))
+    && (profile.quality !== 'high' || row.media_quality === 'high')
+    && (!profile.retain || under(localPath(row.media_path), SAVED_MEDIA));
+  // 改用途后可能仍有旧转写稿；保留视频的路径必须先取得符合新规格的素材。
+  if (profile.transcribe && (!profile.retain || mediaReady) && row.transcribed_at && row.text_path && existsSync(localPath(row.text_path)) && readFileSync(localPath(row.text_path),'utf8').length === row.text_chars) status = 'transcribed';
+  else if (mediaReady) status = 'downloaded';
   d.prepare("UPDATE items SET status=?,attempts=0,last_error=NULL WHERE platform='douyin' AND id=?").run(status,id);
   return status;
+}
+
+/** 手动用途覆盖保留已有成果，重新排队；不处理历史基线、图集或超长条目。 */
+export function setPurpose(id, purpose) {
+  if (!['video','speech','visual','both','review'].includes(purpose)) throw new Error('用途无效');
+  const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+  if (!row || !inScope(id) || ['baseline','gallery','too_long'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
+  const now = Math.floor(Date.now()/1000);
+  d.prepare(`UPDATE items SET processing_mode=?,routing_reason='用户手动选择',routing_source='manual',routing_model=NULL,routed_at=?,
+    status=?,skip_reason=NULL,needs_ocr=?,attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?`)
+    .run(purpose,now,purpose==='review'?'review':'pending',purpose==='visual'?1:0,now,id);
+  return purpose;
 }

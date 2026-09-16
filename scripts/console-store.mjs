@@ -5,6 +5,7 @@ import { existsSync, readFileSync, readdirSync, statSync, statfsSync, openSync, 
 import { join, dirname, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { DUST_HOME, loadConf, makeCfg, expand } from './config.mjs';
+import { chatEndpoint } from './routing.mjs';
 import { sessionSummary } from './session-status.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
 
@@ -14,6 +15,7 @@ const text = (label, group, fallback, type = 'text') => ({ label, group, type, f
 export const FIELDS = {
   DUST_DAILY_LIMIT:number('每日最多处理（条）','policy',50,1,50),
   DUST_MAX_DURATION_MIN:number('视频最长时长（分钟）','policy',10,0.1,10,0.1),
+  DUST_SAVED_MEDIA_MAX_GB:number('视频收藏上限（GiB）','policy',1,0.1,10240,0.1),
   DUST_MEDIA_MAX_GB:number('媒体缓存上限（GiB）','policy',1,0.1,1,0.1),
   DUST_MIN_FREE_GB:number('最低可用空间（GiB）','policy',10,10,10240,0.1),
   DUST_SCAN_COUNT:number('扫描起始窗口（条）','policy',100,1,100),
@@ -21,6 +23,9 @@ export const FIELDS = {
   DUST_REQUEST_TIMEOUT_S:number('单次请求超时（秒）','policy',180,10,3600),
   DUST_RUN_TIMEOUT_S:number('整轮执行时限（秒）','policy',7200,60,86400),
   DUST_NOTIFY:{...text('系统通知','policy','1'),type:'select',options:['1','0']},
+  DUST_ROUTER_BASE:text('用途判断接口（Base URL）','models','http://127.0.0.1:8317/v1','url'),
+  DUST_ROUTER_MODEL:text('用途判断模型','models','glm'),
+  DUST_ROUTER_KEY:text('用途判断模型密钥','models','','password'),
   DUST_ASR_MODEL:text('转写模型','models','qwen-audio-3.0-asr-flash'),
   DUST_LLM_MODEL:text('笔记模型','models','glm-5.3-flash'),
   DUST_LLM_BASE:text('笔记模型接口','models','https://open.bigmodel.cn/api/paas/v4/chat/completions','url'),
@@ -29,6 +34,7 @@ export const FIELDS = {
   DUST_DASHSCOPE_KEY:text('阿里百炼密钥','models','','password'),
   DUST_LLM_KEY:text('笔记模型密钥','models','','password'),
   DUST_NOTES:text('笔记输出目录','paths',join(homedir(),'Documents','抖音收藏'),'path'),
+  DUST_SAVED_MEDIA:text('视频收藏目录','paths','','path'),
   DUST_TEXT:text('原始文字稿目录','paths','','path'),
   DUST_WARN_DAYS:number('登录到期提前提醒（天）','login',7,1,30),
   DUST_ASR_CONTEXT:text('转写热词','login','','textarea'),
@@ -67,7 +73,7 @@ export function createStore(home = DUST_HOME) {
     const current=conf(),get=cfg(),p=policy();
     const effective={DUST_DAILY_LIMIT:p.daily,DUST_SCAN_COUNT:p.scan,DUST_MAX_DURATION_MIN:p.seconds/60,DUST_MEDIA_MAX_GB:p.bytes/1024**3,DUST_MIN_FREE_GB:p.free/1024**3};
     const fields=Object.entries(FIELDS).map(([key,f])=>{
-      let value=get(key,key==='DUST_TEXT'?join(home,'text'):f.fallback);
+      let value=get(key,key==='DUST_TEXT'?join(home,'text'):key==='DUST_SAVED_MEDIA'?join(home,'saved-media'):f.fallback);
       if (key==='DUST_ASR_CONTEXT'&&!value) { const path=localPath(get('DUST_ASR_CONTEXT_FILE',join(home,'asr-context.txt'))); if(existsSync(path))value=readFileSync(path,'utf8').slice(0,8000); }
       const overridden=process.env[key] !== undefined && process.env[key] !== '';
       return {...f,key,value:f.type==='password'?'':effective[key]??value,configured:f.type==='password'?!!value:undefined,overridden,clamped:key in effective && Number(value)!==effective[key]};
@@ -89,13 +95,15 @@ export function createStore(home = DUST_HOME) {
       if(/[\r\n\0]/.test(value)||/\s#/.test(value)||value.length>8000)throw new HttpError(400,`${f.label} 包含不支持的内容`);
       if(f.type==='number') { const n=Number(value); if(!value||!Number.isFinite(n)||n<f.min||n>f.max||(f.step===1&&!Number.isInteger(n)))throw new HttpError(400,`${f.label} 范围为 ${f.min}–${f.max}`); value=String(n); }
       if(f.type==='select'&&!f.options.includes(value))throw new HttpError(400,`${f.label} 选项无效`);
-      if(f.type==='url') { let url;try{url=new URL(value);}catch{} if(!url||url.protocol!=='https:'||url.username||url.password||url.search||url.hash)throw new HttpError(400,'模型接口必须是无内嵌凭据的 HTTPS 地址'); }
+      if(f.type==='url') {try{chatEndpoint(value);}catch{throw new HttpError(400,'模型接口必须是无内嵌凭据的 HTTPS 或本机 HTTP 地址');}}
       if(!value&&!['password','textarea'].includes(f.type))throw new HttpError(400,`${f.label} 不能为空`);
       if(f.type==='path') {value=expand(value);if(!value.startsWith('/'))throw new HttpError(400,'请填写绝对路径或 ~/ 开头的路径');value=localPath(value);if(existsSync(value)&&!statSync(value).isDirectory())throw new HttpError(400,'输出位置必须是文件夹');}
       changes[key]=value;
     }
     const merged={...conf(),...changes},get=makeCfg({conf:merged});
     const media=localPath(get('DUST_MEDIA',join(home,'media'))),temp=localPath(join(home,'tmp-media'));
+    const saved=localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media')));
+    if([media,temp].some(p=>p===saved||under(p,saved)||under(saved,p)))throw new HttpError(400,'视频收藏目录必须与缓存和临时目录分开');
     for(const key of ['DUST_NOTES','DUST_TEXT']) {const path=localPath(get(key,key==='DUST_TEXT'?join(home,'text'):FIELDS[key].fallback));if(path===media||under(path,media)||path===temp||under(path,temp))throw new HttpError(400,'文字稿与笔记目录不能位于媒体缓存或临时目录内');}
     const remaining={...changes};
     const lines=old.split('\n').map(line=>{const match=line.match(/^\s*(DUST_[A-Z0-9_]+)\s*=/);if(match&&Object.hasOwn(changes,match[1])){delete remaining[match[1]];return `${match[1]}=${changes[match[1]]}`;}return line;});
@@ -112,10 +120,10 @@ export function createStore(home = DUST_HOME) {
       const where=["platform='douyin'"],values=[];
       if(params.results==='1') {where.push("((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
       else if(status==='baseline')where.push("skip_reason='baseline'");
-      else if(status!=='all'){if(!['pending','downloaded','transcribed','extracted','failed','skipped','removed'].includes(status))throw new HttpError(400,'状态无效');where.push('status=?');values.push(status);}
+      else if(status!=='all'){if(!['pending','downloaded','transcribed','extracted','saved','review','failed','skipped','removed'].includes(status))throw new HttpError(400,'状态无效');where.push('status=?');values.push(status);}
       if(search){where.push("(title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\' OR note_path LIKE ? ESCAPE '\\')");const q='%'+search.replace(/[\\%_]/g,'\\$&')+'%';values.push(q,q,q,q);}
       const clause=where.join(' AND '),total=db.prepare(`SELECT count(*) n FROM items WHERE ${clause}`).get(...values).n,pages=Math.max(1,Math.ceil(total/size)),actual=Math.min(page,pages);
-      const rows=db.prepare(`SELECT id,title,author,status,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at FROM items WHERE ${clause} ORDER BY COALESCE(extracted_at,transcribed_at,collected_at,first_seen) DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
+      const rows=db.prepare(`SELECT id,title,author,status,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr FROM items WHERE ${clause} ORDER BY COALESCE(extracted_at,transcribed_at,collected_at,first_seen) DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
       return {items:rows.map(r=>({...r,display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
     },{items:[],total:0,page:1,pages:1,size});
   }
@@ -138,10 +146,11 @@ export function createStore(home = DUST_HOME) {
     if(!/^\d{1,30}$/.test(String(id)))throw new HttpError(400,'作品 ID 不正确');
     const row=readDb(db=>has(db,'items')?db.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id):null,null);
     if(!row)throw new HttpError(404,'找不到这条作品');
-    return JSON.parse(redact({...row,display_title:displayTitle(row)}));
+    const inQueue=readDb(db=>has(db,'daily_queue')&&!!db.prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id),false);
+    return JSON.parse(redact({...row,can_change_purpose:inQueue&&!['baseline','gallery','too_long'].includes(row.skip_reason)&&row.status!=='removed',display_title:displayTitle(row)}));
   }
-  function fileFor(id,kind) {const row=item(id),path=row[kind==='note'?'note_path':'text_path'];if(!['note','text'].includes(kind)||!path)throw new HttpError(404,'尚未生成这份文件');const p=localPath(path);if(extname(p)!==(kind==='note'?'.md':'.txt'))throw new HttpError(400,'产物格式不正确');if(!existsSync(p)||!statSync(p).isFile())throw new HttpError(404,'文件已移动或不存在，请核对账本路径');return p;}
-  function document(id,kind){const path=fileFor(id,kind);if(statSync(path).size>4*1024**2)throw new HttpError(413,'文件超过 4 MiB，请在本机阅读器中打开');return {item:item(id),kind,path,content:readFileSync(path,'utf8')};}
+  function fileFor(id,kind) {const row=item(id),path=row[kind==='note'?'note_path':kind==='video'?'media_path':'text_path'];if(!['note','text','video'].includes(kind)||!path||(kind==='video'&&row.media_deleted))throw new HttpError(404,'尚未生成这份文件或视频已清理');const p=localPath(path);if(kind==='video'?!['.mp4','.mov','.webm','.m4v'].includes(extname(p)):extname(p)!==(kind==='note'?'.md':'.txt'))throw new HttpError(400,'产物格式不正确');if(!existsSync(p)||!statSync(p).isFile())throw new HttpError(404,'文件已移动或不存在，请核对账本路径');return p;}
+  function document(id,kind){if(!['note','text'].includes(kind))throw new HttpError(400,'只支持阅读文字产物');const path=fileFor(id,kind);if(statSync(path).size>4*1024**2)throw new HttpError(413,'文件超过 4 MiB，请在本机阅读器中打开');return {item:item(id),kind,path,content:readFileSync(path,'utf8')};}
   function tail(path,limit=128*1024){path=localPath(path);if(!existsSync(path))return '';const fd=openSync(path,'r');try{const size=statSync(path).size,buffer=Buffer.alloc(Math.min(size,limit));readSync(fd,buffer,0,buffer.length,Math.max(0,size-buffer.length));let out=buffer.toString('utf8');if(size>limit)out='（仅显示日志末尾）\n'+out.slice(out.indexOf('\n')+1);return redact(out);}finally{closeSync(fd);}}
   function readJson(path){if(!existsSync(localPath(path)))return null;try{return JSON.parse(readFileSync(path,'utf8'));}catch{return null;}}
   function runs(){const dir=join(home,'runs');if(!existsSync(dir))return [];return readdirSync(dir).filter(n=>/^\d{8}T\d{6}(?:-\d+)?-(run|collect|extract|notes|console-action)$/.test(n)).sort().reverse().slice(0,150).map(id=>{const p=localPath(join(dir,id));return {id,modifiedAt:statSync(p).mtimeMs,result:readJson(join(p,'result.json'))};}).map(r=>JSON.parse(redact(r)));}
@@ -159,10 +168,13 @@ export function createStore(home = DUST_HOME) {
     },{total:0,notes:0,todayNotes:0,pending:0,failed:0,usedToday:0,baseline:null,statuses:[]});
     const get=cfg(),media=localPath(get('DUST_MEDIA',join(home,'media'))),temp=join(home,'tmp-media');let storage={used:null,available:null,error:null};
     try{let p=media;while(!existsSync(p))p=dirname(p);const s=statfsSync(p);storage={used:treeBytes(media)+(under(temp,media)?0:treeBytes(temp)),available:Number(s.bavail)*Number(s.bsize),error:null};}catch(e){storage.error=e.message;}
+    try{storage.savedUsed=treeBytes(localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))));}catch(e){storage.error=e.message;}
+    totals.review=totals.statuses.find(r=>r.status==='review')?.n||0;
+    totals.saved=totals.statuses.find(r=>r.status==='saved')?.n||0;
     const session=readJson(join(home,'state','session.json'));
     const login=readJson(join(home,'console','login.json'));
     const flag=existsSync(join(home,'NEEDS_LOGIN'));
-    return {...totals,day,policy:policy(),lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,home},recent:listItems({results:'1',status:'notes',size:3}).items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
+    return {...totals,day,policy:policy(),lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:listItems({results:'1',status:'notes',size:3}).items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
   }
   return {home,settings,saveSettings,overview,listItems,item,document,fileFor,runs,runDetail,tail,redact,cfg,policy};
 }

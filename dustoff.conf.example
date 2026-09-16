@@ -325,3 +325,12 @@ DUST_LLM_MAX_FAILS=3
 #
 # 留空则三样功能全关：mp4 走保留期删除、转写稿不备份、--init 下到本地。
 DUST_EXTERNAL=/Volumes/T7
+
+# 下载前用途判断（OpenAI 兼容 Chat Completions；只判断元数据）
+# glm 使用 low 思考档位，支持 Base URL 或完整 /chat/completions 地址。
+DUST_ROUTER_BASE=http://127.0.0.1:8317/v1
+DUST_ROUTER_MODEL=glm
+DUST_ROUTER_KEY=
+# 视频收藏 / 画面知识 / 同时保留视频笔记的素材：独立目录和容量，不自动清理。
+DUST_SAVED_MEDIA=~/.dustoff/saved-media
+DUST_SAVED_MEDIA_MAX_GB=1

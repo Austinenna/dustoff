@@ -62,6 +62,8 @@ const DB_PATH = localPath(process.env.DUST_DB || join(DUST_HOME, 'index.sqlite')
 // skipped 是状态而非标记，这样将来想捞某条超长视频，
 // 直接 requeue 改回 pending 即可，不用改表结构。
 export const STATUS = {
+  SAVED: 'saved',            // 视频收藏已保存
+  REVIEW: 'review',          // 等待用户确认用途
   PENDING: 'pending',        // 已知，素材还没下
   DOWNLOADED: 'downloaded',  // 素材已落盘，等转写
   TRANSCRIBED: 'transcribed',// 文字已转出——第二段的终点。过保留期后 mp4 可删
@@ -94,6 +96,14 @@ CREATE TABLE IF NOT EXISTS items (
   last_seen     INTEGER NOT NULL,   -- 最后一次在收藏夹里见到 → 据此发现取消收藏
   status        TEXT NOT NULL,      -- 见 STATUS
   skip_reason   TEXT,               -- gallery / too_long / no_url / need_ocr
+
+  processing_mode TEXT,            -- video / speech / visual / both / review；NULL 为旧流程
+  routing_reason TEXT,
+  routing_source TEXT,             -- model / manual
+  routing_model TEXT,
+  routed_at INTEGER,
+  media_quality TEXT,              -- high / low
+  saved_at INTEGER,
 
   -- ── 素材 ────────────────────────────────────────
   media_path    TEXT,               -- 视频落盘位置
@@ -229,7 +239,7 @@ export function importDownload(results, platform = 'douyin', { countFailures = t
   };
   const upd = d.prepare(`
     UPDATE items SET status = ?, skip_reason = ?, media_path = ?, media_bytes = ?,
-                     gear = ?, has_audio = ?, media_deleted = 0, attempts = 0, last_error = NULL, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
+                     gear = ?, has_audio = ?, media_quality = ?, media_deleted = 0, attempts = 0, last_error = NULL, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
     WHERE platform = ? AND id = ? AND status IN ('pending','skipped')
   `);
   const bump = d.prepare(`
@@ -246,7 +256,7 @@ export function importDownload(results, platform = 'douyin', { countFailures = t
         continue;
       }
       const res = upd.run(m.status, m.reason, r.path || null, r.bytes || null,
-        r.gear || null, r.has_audio === undefined ? null : (r.has_audio ? 1 : 0),
+        r.gear || null, r.has_audio === undefined ? null : (r.has_audio ? 1 : 0), r.quality || null,
         t, t, platform, r.aweme_id);
       touched += res.changes;
     }
@@ -358,7 +368,7 @@ export function markExtracted(id, fields, platform = 'douyin') {
     WHERE platform = ? AND id = ?
   `).run(fields.text_source || null, fields.text_chars || null, fields.keyframes || null,
     fields.note_path || null, fields.category || null, fields.decay || null,
-    fields.needs_ocr ? 1 : 0, fields.prompt_hash || null, now(), now(), platform, id);
+    (fields.needs_ocr || db().prepare("SELECT processing_mode FROM items WHERE platform=? AND id=?").get(platform,id)?.processing_mode === 'visual') ? 1 : 0, fields.prompt_hash || null, now(), now(), platform, id);
 }
 
 /**
@@ -461,6 +471,7 @@ export function requeueSilent(platform = 'douyin') {
 export function cleanable(platform = 'douyin', { limit = 10000 } = {}) {
   return db().prepare(`SELECT * FROM items WHERE platform=? AND transcribed_at IS NOT NULL
     AND text_source='asr' AND text_chars>0 AND media_deleted=0 AND media_path IS NOT NULL
+    AND COALESCE(processing_mode,'speech')='speech' AND COALESCE(needs_ocr,0)=0
     ORDER BY transcribed_at LIMIT ?`).all(platform, limit);
 }
 
@@ -594,4 +605,14 @@ if (isMain) {
     console.error('未知命令。可用: stats | list | show | import | sweep | reconcile | requeue | requeue-silent');
     process.exit(2);
   }
+}
+
+export function markRouting(id, decision) {
+  return db().prepare(`UPDATE items SET processing_mode=?,routing_reason=?,routing_source='model',routing_model=?,routed_at=?,
+    status=CASE WHEN ?='review' THEN 'review' ELSE status END, needs_ocr=?,updated_at=? WHERE platform='douyin' AND id=?`)
+    .run(decision.purpose,decision.reason,decision.model,now(),decision.purpose,decision.purpose==='visual'?1:0,now(),id);
+}
+export function markSaved(id) {
+  return db().prepare("UPDATE items SET status='saved',skip_reason=NULL,saved_at=?,attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?")
+    .run(now(),now(),id);
 }

@@ -33,7 +33,8 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       auth={phase:'starting',message:kind==='session-check'?'正在检查登录状态…':'正在打开 Chrome 官方登录页…'};
     } else {
       if(kind==='retry'){const i=store.item(body.id);if(i.status!=='failed')throw new HttpError(400,'只能重试已失败作品');}
-      script=join(root,'scripts','console-action.mjs');args=[kind,...(kind==='retry'?[body.id]:[])];
+      if(kind==='purpose'){if(!store.item(body.id).can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['video','speech','visual','both','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
+      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
     }
     mkdirSync(actionsDir,{recursive:true,mode:0o700});
     const logfile=join(actionsDir,'latest-action.log');let fd=openSync(logfile,'w',0o600),written=0;
@@ -96,6 +97,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           else if(data.action==='start')scheduler.start();else if(data.action==='stop')scheduler.stop();else throw new HttpError(400,'定时操作无效');
           result=scheduleState();break;
         case '/api/run':result=start('run',data);break;
+        case '/api/purpose':result=start('purpose',data);break;
         case '/api/retry':result=start('retry',data);break;
         case '/api/login':result=start('login');break;
         case '/api/session-check':result=start('session-check');break;
@@ -110,7 +112,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           try{process.kill(-active.pid,'SIGTERM');}catch(e){if(e.code!=='ESRCH')throw e;}
           result={stopping:true};break;
         case '/api/open': {
-          if(!['note','text','folder','source','notes-folder','runs-folder'].includes(data.kind))throw new HttpError(400,'打开目标无效');
+          if(!['note','text','video','folder','source','notes-folder','runs-folder'].includes(data.kind))throw new HttpError(400,'打开目标无效');
           let args;
           if(data.kind==='source'){store.item(data.id);args=[`https://www.douyin.com/video/${data.id}`];}
           else if(data.kind==='notes-folder'||data.kind==='runs-folder'){const p=data.kind==='notes-folder'?store.overview().paths.notes:join(home,'runs');if(!existsSync(localPath(p)))throw new HttpError(404,'文件夹尚不存在');args=[p];}

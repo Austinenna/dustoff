@@ -65,3 +65,27 @@ test('定时 API 同步保存起始时间和小时间隔，拒绝缺失或错误
     const r=await app.post('schedule',{action:'save',time:'22:00',intervalHours:12,autoStartAfterReboot:false});assert.equal(r.status,200);const s=await r.json();assert.equal(s.time,'22:00');assert.equal(s.intervalHours,12);
   }finally{await app.close();f.cleanup();}
 });
+
+test('用途覆盖接口、视频打开、状态筛选及本机网关设置',async()=>{
+  const f=fixture(),opened=[],app=await serve({home:f.home,openFile:async args=>opened.push(args)});
+  try{
+    assert.equal((await app.post('purpose',{id:'1',purpose:'video'})).status,400);
+    assert.equal((await app.post('purpose',{id:'18',purpose:'discard'})).status,400);
+    assert.equal((await app.post('purpose',{id:'18',purpose:'video'},{'X-Dustoff-Token':'wrong'})).status,403);
+    assert.equal((await app.post('purpose',{id:'18',purpose:'video'})).status,200);
+    for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));
+    assert.equal(app.execution().lastAction.exitCode,0);
+    assert.equal(app.store.item('18').processing_mode,'video');assert.equal(app.store.item('18').status,'pending');
+    assert.equal(app.store.overview().usedToday,0);
+    const settings=app.store.settings();
+    app.store.saveSettings({revision:settings.revision,values:{DUST_ROUTER_BASE:'http://127.0.0.1:8317/v1',DUST_ROUTER_KEY:'fixture-router-secret',DUST_ROUTER_MODEL:'glm'}});
+    assert.ok(!JSON.stringify(app.store.settings()).includes('fixture-router-secret'));
+    assert.equal(app.store.redact('fixture-router-secret'),'[已隐藏密钥]');
+    assert.throws(()=>app.store.saveSettings({revision:app.store.settings().revision,values:{DUST_SAVED_MEDIA:join(f.home,'media','saved')}}));
+    const video=join(f.home,'saved-media','18','video.mp4');mkdirSync(dirname(video),{recursive:true});writeFileSync(video,'fixture');
+    const db=new DatabaseSync(join(f.home,'index.sqlite'));db.prepare("UPDATE items SET status='saved',media_path=?,media_deleted=0 WHERE id='18'").run(video);db.close();
+    assert.equal(app.store.listItems({status:'saved'}).total,1);
+    assert.equal((await app.post('open',{kind:'video',id:'18'})).status,200);assert.deepEqual(opened,[[video]]);
+    assert.equal((await fetch(app.url+'/api/document?id=18&kind=video')).status,400);
+  }finally{await app.close();f.cleanup();}
+});

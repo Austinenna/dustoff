@@ -60,15 +60,17 @@ const gearInfo = (g, source, count) => ({
  *
  *  返回 { gear, width, height, size, urls, source, gear_count }；
  *  没有可用 bit_rate 时回退到 play_addr。 */
-export function pickGear(aweme, { requireAudio = true } = {}) {
+export function pickGear(aweme, { requireAudio = true, quality = 'low' } = {}) {
   const v = (aweme && aweme.video) || {};
   const gears = (v.bit_rate || [])
     .filter(b => b && b.play_addr && Array.isArray(b.play_addr.url_list) && b.play_addr.url_list.length)
     .sort((a, b) => (a.bit_rate || 0) - (b.bit_rate || 0));
 
+  if (quality === 'high') gears.sort((a,b) => ((b.play_addr.width||0)*(b.play_addr.height||0)-(a.play_addr.width||0)*(a.play_addr.height||0)) || (b.bit_rate||0)-(a.bit_rate||0));
+
   if (gears.length) {
     let chosen = gears[0];
-    if (requireAudio) {
+    if (requireAudio && quality !== 'high') {
       const name = gears[0].gear_name;
       // 同名但码率更高的那一档：成对结构里它才是带音轨的那个
       const paired = gears.find(g => g !== gears[0] && g.gear_name === name &&
@@ -101,3 +103,10 @@ export const isGallery = aweme =>
   (aweme && aweme.aweme_type === 68) || !!(aweme && Array.isArray(aweme.images) && aweme.images.length);
 
 export const fmtMB = bytes => (bytes ? (bytes / 1024 / 1024).toFixed(2) + 'MB' : '?');
+
+/** 扫描保留两种下载规格，用途判定后再选；默认播放地址仅作为同方向兜底。 */
+export function videoOptions(aweme) {
+  const v = aweme?.video || {}, pa = v.play_addr || {};
+  const standard = { gear:'play_addr', width:pa.width||null, height:pa.height||null, size:pa.data_size||null, urls:pa.url_list||[], source:'play_addr' };
+  return { low:pickGear(aweme), high:pickGear(aweme,{quality:'high'}), standard };
+}

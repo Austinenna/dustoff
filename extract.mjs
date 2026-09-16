@@ -573,7 +573,7 @@ async function main() {
     const status = FORCE ? 'transcribed' : 'downloaded';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
   }
-  items = items.filter(i => inScope(i.id) && !i.transcribed_at);
+  items = items.filter(i => inScope(i.id) && !i.transcribed_at && !['video','review'].includes(i.processing_mode));
   if (LIMIT) items = items.slice(0, LIMIT);
 
   if (!items.length) { log('没有待转写的条目。'); return; }

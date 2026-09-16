@@ -12,6 +12,7 @@ export function readPolicy(conf) {
   daily: Math.max(1, Math.min(50, Math.floor(positive('DUST_DAILY_LIMIT', 50)))),
   seconds: Math.min(600, positive('DUST_MAX_DURATION_MIN', 10) * 60),
   bytes: Math.min(1, positive('DUST_MEDIA_MAX_GB', 1)) * GiB,
+  savedBytes: positive('DUST_SAVED_MEDIA_MAX_GB', 1) * GiB,
   free: Math.max(10, positive('DUST_MIN_FREE_GB', 10)) * GiB,
   requestMs: positive('DUST_REQUEST_TIMEOUT_S', 180) * 1000,
   runMs: positive('DUST_RUN_TIMEOUT_S', 7200) * 1000,
@@ -36,6 +37,8 @@ export function localPath(input, depth = 0) {
 }
 export const MEDIA = localPath(cfg('DUST_MEDIA', join(DUST_HOME, 'media')));
 export const TEMP = localPath(join(DUST_HOME, 'tmp-media'));
+export const SAVED_MEDIA = localPath(cfg('DUST_SAVED_MEDIA', join(DUST_HOME, 'saved-media')));
+if ([MEDIA,TEMP].some(p => p === SAVED_MEDIA || under(p,SAVED_MEDIA) || under(SAVED_MEDIA,p))) throw new Error('视频收藏目录必须与缓存和临时目录分开');
 export function under(path, root) { const p = resolve(path), r = resolve(root); return p.startsWith(r + sep); }
 export function treeBytes(path) {
   if (!existsSync(path)) return 0;
@@ -44,15 +47,16 @@ export function treeBytes(path) {
   if (!st.isDirectory()) return st.size;
   return readdirSync(path).reduce((sum, name) => sum + treeBytes(join(path, name)), 0);
 }
-export function storage(extra = 0) {
-  let probe = localPath(MEDIA);
+export function storage(extra = 0, { retain = false } = {}) {
+  const root = retain ? SAVED_MEDIA : MEDIA, cap = retain ? POLICY.savedBytes : POLICY.bytes;
+  let probe = localPath(root);
   while (!existsSync(probe)) probe = dirname(probe);
   const fs = statfsSync(probe);
   const available = Number(fs.bavail) * Number(fs.bsize);
-  const used = treeBytes(MEDIA) + (under(TEMP, MEDIA) ? 0 : treeBytes(TEMP));
-  if (used + extra > POLICY.bytes || (extra === 0 && used >= POLICY.bytes)) throw new PauseError(`本地媒体达到 ${POLICY.bytes / GiB} GiB 上限`);
+  const used = retain ? treeBytes(SAVED_MEDIA) : treeBytes(MEDIA) + (under(TEMP, MEDIA) ? 0 : treeBytes(TEMP));
+  if (used + extra > cap || (extra === 0 && used >= cap)) throw new PauseError(`${retain ? '视频收藏' : '本地媒体'}达到 ${cap / GiB} GiB 上限`);
   if (available - extra < POLICY.free) throw new PauseError(`本机剩余空间低于 ${POLICY.free / GiB} GiB`);
-  return { used, available, remaining: Math.min(POLICY.bytes - used, available - POLICY.free) };
+  return { used, available, remaining: Math.min(cap - used, available - POLICY.free) };
 }
 export function deadlineMs(cap = POLICY.requestMs) {
   const remaining = Number(process.env.DUST_DEADLINE_MS || (Date.now() + POLICY.runMs)) - Date.now();
@@ -82,12 +86,13 @@ export function atomicWrite(path, text, { verify } = {}) {
 // 每块在写入前核实真实总占用，远端未提供 Content-Length 也不能超预算落盘。
 export async function writeMedia(stream, path) {
   path = localPath(path);
-  if (!under(path, MEDIA) && !under(path, TEMP)) throw new PauseError('媒体写入位置不在预算目录中');
+  const retain = under(path, SAVED_MEDIA);
+  if (!retain && !under(path, MEDIA) && !under(path, TEMP)) throw new PauseError('媒体写入位置不在预算目录中');
   mkdirSync(dirname(path), { recursive: true });
   const fd = openSync(path, 'w', 0o600);
   try {
     for await (const chunk of stream) {
-      deadlineMs(); storage(chunk.length);
+      deadlineMs(); storage(chunk.length, { retain });
       let at = 0;
       while (at < chunk.length) at += writeSync(fd, chunk, at, chunk.length - at);
     }

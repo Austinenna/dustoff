@@ -453,7 +453,7 @@ async function main() {
     const status = FORCE ? 'extracted' : 'transcribed';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
   }
-  if (!DRY_RUN) items = items.filter(i => inScope(i.id));
+  if (!DRY_RUN) items = items.filter(i => inScope(i.id) && !['video','review'].includes(i.processing_mode));
   if (LIMIT) items = items.slice(0, LIMIT);
   if (!items.length) { log('没有待提炼的条目。'); return; }
 

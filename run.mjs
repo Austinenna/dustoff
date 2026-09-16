@@ -5,12 +5,13 @@ import { readFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:f
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DUST_HOME, makeCfg } from './scripts/config.mjs';
-import { POLICY, MEDIA, TEMP, PauseError, mediaDecision, storage, localPath, atomicWrite, deadlineMs } from './scripts/policy.mjs';
+import { POLICY, TEMP, PauseError, mediaDecision, localPath, atomicWrite, deadlineMs } from './scripts/policy.mjs';
 import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem } from './scripts/daily.mjs';
-import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed } from './scripts/ledger.mjs';
+import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { transcribeOne, cleanMedia, CONF as ASR_CONF } from './extract.mjs';
 import { noteOne, writeNote, HASH, CONF as NOTES_CONF } from './notes.mjs';
+import { classifyItem, PURPOSES } from './scripts/routing.mjs';
 import { downloadOne } from './scripts/download.mjs';
 const scripts = join(dirname(fileURLToPath(import.meta.url)), 'scripts');
 const fresh = id => db().prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
@@ -46,7 +47,7 @@ export async function main(args = process.argv.slice(2)) {
   const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', keepRuns: Number(makeCfg()('DUST_KEEP_RUNS',30)), record: !dry });
   const { log } = stage;
   stage.acquireLock();
-  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, skipped: 0, failures: [], paused: null, cleanup: null, transcriptLayouts: [] };
+  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, review: 0, skipped: 0, failures: [], paused: null, cleanup: null, transcriptLayouts: [] };
   let initializedThisRun = false;
   const tmp = localPath(join(TEMP, `run-${process.pid}`));
   try {
@@ -77,8 +78,7 @@ export async function main(args = process.argv.slice(2)) {
       log(`扫描 ${accepted.scanned} 条，新增待办 ${accepted.added} 条`);
       if (accepted.initialized) { initializedThisRun = true; summary.mode = 'baseline'; log('基线建立完成，本次不下载历史视频'); return summary; }
     } else if (!old) throw new Error('尚无基线，请先正常运行一次');
-    if (!downloadOnly && !ASR_CONF.API_KEY) throw new Error('未配置 ASR Key');
-    if (!downloadOnly && !skipNotes && !NOTES_CONF.API_KEY) throw new Error('未配置 LLM Key');
+    // 模型密钥在实际走到对应分支时检查，单纯保存视频无需 ASR/笔记密钥。
     let consecutive = 0;
     const queue = pendingQueue().filter(r => (!downloadOnly || r.status === 'pending') && (!value('--retry') || r.id === value('--retry')));
     for (const candidate of queue) {
@@ -91,31 +91,41 @@ export async function main(args = process.argv.slice(2)) {
         if (row.status === 'pending') {
           const reason = mediaDecision(item);
           if (reason && reason !== 'unknown_duration') { markSkipped(id, reason); summary.skipped++; continue; }
-          storage();
         }
         if (!reserveDaily(id)) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; break; }
         summary.processed++;
         if (row.status === 'pending') {
+          if (!row.processing_mode) {
+            const decision = await classifyItem(item);
+            markRouting(id, decision); row = fresh(id);
+            log(`用途 ${id}：${PURPOSES[decision.purpose].label}`);
+          }
+          if (row.processing_mode === 'review') { summary.review++; consecutive = 0; continue; }
           // 排队地址跨天会失效；即使扫描停在更靠前的边界，也能按 ID 单独刷新。
-          if (!item.fetched_at || Date.now()/1000 - item.fetched_at > 1800 || mediaDecision(item) === 'unknown_duration' || !item.play_urls?.length) {
+          if (!item.fetched_at || Date.now()/1000 - item.fetched_at > 1800 || mediaDecision(item) === 'unknown_duration' || !item.play_urls?.length || (PURPOSES[row.processing_mode]?.quality === 'high' && !item.video_options?.high)) {
             const meta = await script('get_meta.mjs', [`https://www.douyin.com/video/${id}`], {}, log);
             if (!meta.ok || String(meta.aweme_id) !== id) throw new Error('刷新元数据失败或作品 ID 不匹配');
             item = { ...meta, fetched_at: Math.floor(Date.now()/1000) };
             importScan([item]);
             db().prepare('UPDATE daily_queue SET metadata=? WHERE id=?').run(JSON.stringify(item), id);
           }
-          const result = await downloadOne(item);
+          const result = await downloadOne(item, { purpose:row.processing_mode || 'speech' });
           importDownload([result], 'douyin', { countFailures:false });
           row = fresh(id);
           if (row.status === 'skipped') { summary.skipped++; continue; }
         }
+        if (row.processing_mode === 'video' && row.status === 'downloaded') {
+          markSaved(id); summary.saved++; consecutive = 0; log(`视频已保存 ${id}`); continue;
+        }
         if (downloadOnly) { consecutive = 0; continue; }
         if (row.status === 'downloaded') {
+          if (!ASR_CONF.API_KEY) throw new Error('未配置 ASR Key');
           const result = await transcribeOne(row, tmp);
           markTranscribed(id, { text_source:'asr', text_chars:result.chars, text_path:result.textPath, audio_seconds:result.seconds });
           row = fresh(id); summary.text++;
         }
         if (!skipNotes && row.status === 'transcribed') {
+          if (!NOTES_CONF.API_KEY) throw new Error('未配置 LLM Key');
           const result = await noteOne(row);
           if (result.skipped) { markSkipped(id, result.reason, { needsOcr:true }); summary.skipped++; }
           else {
@@ -154,7 +164,8 @@ export async function main(args = process.argv.slice(2)) {
       atomicWrite(join(stage.runDir, 'result.json'), JSON.stringify(summary, null, 2));
       stage.pruneRuns();
       if (summary.failures.length || summary.paused) stage.notify('dustoff 需要留意', summary.paused || `${summary.failures.length} 项失败`);
-      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，待办 ${summary.pending}，${summary.paused || '正常收尾'}`);
+      if (summary.review) stage.notify('dustoff 用途待确认', `${summary.review} 条收藏请在作品详情选择用途`);
+      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || '正常收尾'}`);
       if (summary.failures.length) process.exitCode = 1;
       else if (summary.paused && summary.paused !== `当天累计已达 ${POLICY.daily} 条`) process.exitCode = 5;
     }
