@@ -19,15 +19,19 @@ export function baseline() {
   const r = database().prepare("SELECT value FROM daily_state WHERE name='baseline'").get();
   return r ? JSON.parse(r.value) : null;
 }
+export class ScanError extends Error {}
 export function acceptScan(scan) {
-  if (!scan.ok || !scan.logged_in || scan.scan_error || !Array.isArray(scan.items)) throw new Error('扫描未完整成功，保留原基线与待办');
-  for (const it of scan.items) if (!/^\d+$/.test(String(it.aweme_id))) throw new Error('扫描包含无效作品 ID');
+  if (!scan?.ok || !scan.logged_in || scan.scan_error || !Array.isArray(scan.items)) {
+    const detail = scan?.scan_error ? `：${String(scan.scan_error).replace(/https?:\/\/\S+/g,'[地址已隐藏]').slice(0,240)}` : '';
+    throw new ScanError(`扫描未完整成功，保留原基线与待办${detail}`);
+  }
+  for (const it of scan.items) if (!/^\d+$/.test(String(it?.aweme_id))) throw new ScanError('扫描包含无效作品 ID');
   const d = database(), old = baseline();
-  if (!old && scan.items.length < POLICY.scan && scan.truncated !== false) throw new Error('首次扫描不足基线窗口且未确认到列表末尾，请重试');
-  if (!old && scan.items.length < 100 && scan.truncated !== false) throw new Error('首次基线需要 100 条或已确认的完整列表');
-  if (old && !old.anchors.length && scan.truncated !== false) throw new Error('原基线为空，需确认当前完整列表后才可推进');
+  if (!old && scan.items.length < POLICY.scan && scan.truncated !== false) throw new ScanError('首次扫描不足基线窗口且未确认到列表末尾，请重试');
+  if (!old && scan.items.length < 100 && scan.truncated !== false) throw new ScanError('首次基线需要 100 条或已确认的完整列表');
+  if (old && !old.anchors.length && scan.truncated !== false) throw new ScanError('原基线为空，需确认当前完整列表后才可推进');
   const cut = old ? boundaryIndex(scan.items, old.anchors) : 0;
-  if (old && cut < 0) throw new Error('没有确认到旧边界，保留进度；请检查收藏列表后重试');
+  if (old && cut < 0) throw new ScanError('没有确认到旧边界，保留进度；请检查收藏列表后重试');
   const head = old ? scan.items : scan.items.slice(0, 100);
   const novel = old ? head.slice(0, cut) : [];
   let added = 0;

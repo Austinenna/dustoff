@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DUST_HOME, makeCfg } from './scripts/config.mjs';
 import { POLICY, TEMP, PauseError, mediaDecision, localPath, atomicWrite, deadlineMs } from './scripts/policy.mjs';
-import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem } from './scripts/daily.mjs';
+import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, ScanError } from './scripts/daily.mjs';
 import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { transcribeOne, cleanMedia, CONF as ASR_CONF } from './extract.mjs';
@@ -33,7 +33,7 @@ async function script(name, args, env, log) {
     });
   });
 }
-export async function main(args = process.argv.slice(2)) {
+export async function main(args = process.argv.slice(2), { runScript = script } = {}) {
   const has = f => args.includes(f);
   const value = f => { const i = args.indexOf(f); return i < 0 ? null : args[i+1]; };
   const dry = has('--dry-run'), noScan = has('--no-scan'), downloadOnly = has('--download-only'), skipNotes = has('--skip-notes');
@@ -47,7 +47,7 @@ export async function main(args = process.argv.slice(2)) {
   const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', keepRuns: Number(makeCfg()('DUST_KEEP_RUNS',30)), record: !dry });
   const { log } = stage;
   stage.acquireLock();
-  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, review: 0, skipped: 0, failures: [], paused: null, cleanup: null, transcriptLayouts: [] };
+  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, review: 0, skipped: 0, failures: [], paused: null, scanWarning: null, cleanup: null, transcriptLayouts: [] };
   let initializedThisRun = false;
   const tmp = localPath(join(TEMP, `run-${process.pid}`));
   try {
@@ -72,11 +72,25 @@ export async function main(args = process.argv.slice(2)) {
     if (!noScan) {
       const anchorFile = join(tmp, 'anchors.json');
       if (old) atomicWrite(anchorFile, JSON.stringify(old.anchors));
-      const scan = await script('get_collection.mjs', [String(old ? scanCount : 100)], old ? { DUST_ANCHORS_FILE: anchorFile } : { DUST_ANCHORS_FILE: '' }, log);
-      const accepted = acceptScan(scan);
-      Object.assign(summary, accepted);
-      log(`扫描 ${accepted.scanned} 条，新增待办 ${accepted.added} 条`);
-      if (accepted.initialized) { initializedThisRun = true; summary.mode = 'baseline'; log('基线建立完成，本次不下载历史视频'); return summary; }
+      try {
+        let scan;
+        try {
+          scan = await runScript('get_collection.mjs', [String(old ? scanCount : 100)], old ? { DUST_ANCHORS_FILE: anchorFile } : { DUST_ANCHORS_FILE: '' }, log);
+        } catch(e) {
+          if (e instanceof PauseError) throw e;
+          throw new ScanError(e.code === 4 ? '收藏扫描需要重新登录' : e.message);
+        }
+        const accepted = acceptScan(scan);
+        Object.assign(summary, accepted);
+        log(`扫描 ${accepted.scanned} 条，新增待办 ${accepted.added} 条`);
+        if (accepted.initialized) { initializedThisRun = true; summary.mode = 'baseline'; log('基线建立完成，本次不下载历史视频'); return summary; }
+      } catch(e) {
+        // 扫描只负责发现新增；已有可靠待办不依赖本轮扫描成功。
+        // 首次建基线、存储/数据库异常或总时限耗尽仍须停止。
+        if (!old || !(e instanceof ScanError)) throw e;
+        summary.scanWarning = e.message;
+        log(`扫描未完成：${e.message}；本轮不导入扫描结果，继续处理已有待办`);
+      }
     } else if (!old) throw new Error('尚无基线，请先正常运行一次');
     // 模型密钥在实际走到对应分支时检查，单纯保存视频无需 ASR/笔记密钥。
     let consecutive = 0;
@@ -103,7 +117,7 @@ export async function main(args = process.argv.slice(2)) {
           if (row.processing_mode === 'review') { summary.review++; consecutive = 0; continue; }
           // 排队地址跨天会失效；即使扫描停在更靠前的边界，也能按 ID 单独刷新。
           if (!item.fetched_at || Date.now()/1000 - item.fetched_at > 1800 || mediaDecision(item) === 'unknown_duration' || !item.play_urls?.length || (PURPOSES[row.processing_mode]?.quality === 'high' && !item.video_options?.high)) {
-            const meta = await script('get_meta.mjs', [`https://www.douyin.com/video/${id}`], {}, log);
+            const meta = await runScript('get_meta.mjs', [`https://www.douyin.com/video/${id}`], {}, log);
             if (!meta.ok || String(meta.aweme_id) !== id) throw new Error('刷新元数据失败或作品 ID 不匹配');
             item = { ...meta, fetched_at: Math.floor(Date.now()/1000) };
             importScan([item]);
@@ -164,10 +178,12 @@ export async function main(args = process.argv.slice(2)) {
       atomicWrite(join(stage.runDir, 'result.json'), JSON.stringify(summary, null, 2));
       stage.pruneRuns();
       if (summary.failures.length || summary.paused) stage.notify('dustoff 需要留意', summary.paused || `${summary.failures.length} 项失败`);
+      if (summary.scanWarning) stage.notify('dustoff 扫描未完成', `已继续处理已有待办；${summary.scanWarning}`);
       if (summary.review) stage.notify('dustoff 用途待确认', `${summary.review} 条收藏请在作品详情选择用途`);
-      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || '正常收尾'}`);
+      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || (summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
       if (summary.failures.length) process.exitCode = 1;
       else if (summary.paused && summary.paused !== `当天累计已达 ${POLICY.daily} 条`) process.exitCode = 5;
+      else if (summary.scanWarning) process.exitCode = 1;
     }
     } finally { stage.releaseLock(); }
   }
