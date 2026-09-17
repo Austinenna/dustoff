@@ -62,7 +62,7 @@ function pagination(data,kind) {
 }
 
 function videoCards(items) {
-  return items.map(i=>`<button class="video-card" data-action="play-video" data-id="${i.id}"><span class="video-cover"><img src="/api/video-poster?id=${i.id}" alt="" loading="lazy"><span class="video-symbol" aria-hidden="true">▷</span><small class="video-duration">${duration(i.duration_s)}</small></span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(mediaLabel(i))}</small>${i.note_path?'<span class="video-note-label">也有知识笔记</span>':''}</button>`).join('');
+  return items.map(i=>`<button class="video-card" data-action="play-video" data-id="${i.id}"><span class="video-cover"><img src="/api/video-poster?id=${i.id}" alt="" loading="lazy"><small class="video-duration">${duration(i.duration_s)}</small></span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(mediaLabel(i))}</small>${i.note_path?'<span class="video-note-label">也有知识笔记</span>':''}</button>`).join('');
 }
 function overviewPage() {
   const o=state.overview,s=o.scheduler,summary=runSummary(o.lastRun);
