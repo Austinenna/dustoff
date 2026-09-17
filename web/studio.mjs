@@ -5,8 +5,8 @@ import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,fmt,bytes,duration,titleOf,mediaL
 
 const root=document.querySelector('#dustoff-studio'),main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 const token=document.querySelector('meta[name="dustoff-token"]').content;
-const routes={results:'结果浏览',collection:'收藏',run:'运行',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
-const state={route:'results',overview:null,settings:null,results:{q:'',status:'all',page:1,id:null,kind:'note',reader:false},collection:{q:'',status:'all',page:1},runs:[],runId:null,logKind:'business',runPage:1};
+const routes={overview:'总览',notes:'笔记',results:'笔记',videos:'视频',collection:'收藏记录',run:'运行',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
+const state={route:'overview',overview:null,settings:null,results:{q:'',status:'all',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},collection:{q:'',status:'all',page:1},runs:[],runId:null,logKind:'business',runPage:1};
 let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null;
 const $=selector=>root.querySelector(selector);
 const query=values=>new URLSearchParams(values).toString();
@@ -15,6 +15,8 @@ const button=(label,action,attrs='',style='')=>`<button type="button" class="but
 const empty=(text='暂无内容')=>`<div class="empty">${esc(text)}</div>`;
 const busy=()=>!!state.overview?.execution.running;
 const icons={book:'M3 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-3H3zm18 0h-6a3 3 0 0 0-3 3v14a4 4 0 0 1 4-3h5z',layers:'m12 3 10 5-10 5L2 8zm-10 9 10 5 10-5M2 16l10 5 10-5',play:'M9 7v10l8-5z M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',settings:'M4 7h16M4 17h16M8 4v6M16 14v6'};
+icons.overview='M3 3h7v7H3zM14 3h7v11h-7zM3 14h7v7H3zM14 18h7v3h-7z';
+icons.video='M3 5h18v16H3zM3 10h18M7 5l3 5M14 5l3 5m-7 3v5l5-2.5z';
 root.querySelectorAll('[data-icon]').forEach(el=>{el.innerHTML=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="${icons[el.dataset.icon]}"></path></svg>`;});
 
 async function api(path,data) {
@@ -36,16 +38,19 @@ function tabs(group) {
 }
 function syncChrome() {
   const o=state.overview;if(!o)return;
-  const group=['run','schedule','history'].includes(state.route)?'run':SETTINGS[state.route]?'settings':state.route;
+  const group=['run','schedule','history'].includes(state.route)?'run':SETTINGS[state.route]?'settings':state.route==='results'?'notes':state.route;
   root.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===group)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
   $('#collection-count').textContent=o.total;
+  $('#notes-count').textContent=o.notes;
+  $('#videos-count').textContent=o.videos;
   $('#running-dot').className=o.execution.running?'dot':'';
   const s=o.scheduler;
   $('#schedule-summary').innerHTML=s.error?'自动安排暂不可用':`${s.loaded?'自动整理已开启':'自动整理已关闭'}<small>${s.loaded?'下一次 · '+esc(fmt(s.nextRun)):'可在运行中开启'}</small>`;
   root.querySelectorAll('[data-idle]').forEach(b=>{b.disabled=o.execution.running;});
   if($('#run-status'))$('#run-status').innerHTML=executionPanel();
 }
-async function refreshOverview() {state.overview=await api('overview');syncChrome();}
+const overviewKey=o=>o&&JSON.stringify([o.notes,o.todayNotes,o.videos,o.pending,o.usedToday,o.review,o.failed,o.scheduler,o.execution,o.lastRun,o.recent,o.recentVideos,o.session.online,o.baseline]);
+async function refreshOverview() {const before=overviewKey(state.overview);state.overview=await api('overview');syncChrome();if(state.route==='overview'&&!dialog.open&&before!==overviewKey(state.overview))main.innerHTML=overviewPage();}
 function filterButtons(items,selected,action) {
   return `<div class="filters" aria-label="筛选">${items.map(([value,label])=>button(esc(label),action,`data-filter="${value}" aria-pressed="${selected===value}"`,'quiet')).join('')}</div>`;
 }
@@ -56,9 +61,33 @@ function pagination(data,kind) {
   return `<div class="pagination"><span>共 ${data.total} 条</span><div>${button('上一页','paginate',`data-kind="${kind}" data-step="-1" ${data.page<=1?'disabled':''}`,'quiet')}<span>${data.page} / ${data.pages}</span>${button('下一页','paginate',`data-kind="${kind}" data-step="1" ${data.page>=data.pages?'disabled':''}`,'quiet')}</div></div>`;
 }
 
+function videoCards(items) {
+  return items.map(i=>`<button class="video-card" data-action="open" data-kind="video" data-id="${i.id}"><span class="video-cover"><span class="video-symbol" aria-hidden="true">▷</span><small class="video-duration">${duration(i.duration_s)}</small></span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(mediaLabel(i))}</small>${i.note_path?'<span class="video-note-label">也有知识笔记</span>':''}</button>`).join('');
+}
+function overviewPage() {
+  const o=state.overview,s=o.scheduler,summary=runSummary(o.lastRun);
+  const next=s.nextRun?new Date(s.nextRun):null;
+  const nextTime=next&&!Number.isNaN(next.getTime())?next.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}):'尚未安排';
+  return `${head('总览',`最近同步 · ${esc(fmt(o.baseline?.scanned_at))}`,button('刷新','refresh','','quiet'))}
+    <div class="overview-metrics"><a href="#notes"><span>知识笔记</span><div><strong>${o.notes}</strong><small>篇 · 今天 +${o.todayNotes}</small></div></a><a href="#videos"><span>本地视频</span><div><strong>${o.videos}</strong><small>个 · 已保留</small></div></a><a href="#run"><span>等待整理</span><div><strong>${o.pending}</strong><small>条</small></div></a></div>
+    <div class="overview-columns"><div class="overview-content"><section><div class="section-heading"><h2>最近笔记</h2><a href="#notes">全部笔记 ↗</a></div><div class="recent-notes">${o.recent.length?o.recent.map(i=>`<button class="recent-note" data-action="read" data-id="${i.id}" data-kind="note"><span class="note-symbol" aria-hidden="true">▤</span><span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(i.category||'未分类')} · ${esc(fmt(i.extracted_at))}</small></span><span aria-hidden="true">›</span></button>`).join(''):empty('整理完成的知识笔记会显示在这里')} </div>${o.textOnly?`<button class="button quiet text-only-link" data-action="text-only">还有 ${o.textOnly} 份独立文字稿 →</button>`:''}</section>
+    <section><div class="section-heading"><h2>最近保存的视频</h2><a href="#videos">全部视频 ↗</a></div><div class="video-grid">${o.recentVideos.length?videoCards(o.recentVideos):empty('选择「保存视频」或「视频和笔记」后，保留的视频会显示在这里')}</div></section></div>
+    <aside class="overview-aside"><section class="overview-schedule"><a class="schedule-state-label" href="#schedule"><span class="dot"></span>${s.error?'自动安排暂不可用':s.loaded?'自动整理已开启':'自动整理已关闭'}</a><p>下一次运行</p><a class="next-time" href="#schedule">${s.loaded?esc(nextTime):'尚未安排'}</a><small>${s.loaded?`${esc(fmt(s.nextRun))} · 每 ${s.intervalHours} 小时一次`:'在自动安排中设置时间'}</small>${button(busy()?'查看本轮进度':'▷ 运行一轮',busy()?'run-page':'manual-run','','primary')}<dl><dt>今日已处理</dt><dd>${o.usedToday} / ${o.policy.daily} 条</dd><dt>最近一轮</dt><dd><a href="#history">${o.lastRun?esc(summary.label):'暂无记录'}</a></dd><dt>账号连接</dt><dd><a href="#account">${o.session.online==='verified'?'上次验证可用':o.session.online==='login_required'?'需要重新登录':'尚未在线确认'}</a></dd></dl></section>
+    <section class="overview-attention"><h2>需要你看一下</h2>${o.review?button(`${o.review} 条用途待确认 ›`,'review-items','','attention-link'):''}${o.failed?button(`${o.failed} 条处理失败 ›`,'failed-items','','attention-link'):''}${!o.review&&!o.failed?'<p class="muted">暂时没有需要处理的事项。</p>':''}</section></aside></div><footer class="overview-footer">共 ${o.total} 条收藏 · <a href="#collection">查看收藏记录</a> · 视频保存在本机</footer>`;
+}
+function videosPage() {
+  return `${head('视频','<span id="video-count">读取中</span>')}<div class="toolbar"><span class="muted">已保留的视频，与笔记独立浏览</span>${searchField(state.videos.q,'搜索标题、作者','videos-search')}</div><div id="video-list">${empty('正在读取…')}</div>`;
+}
+async function loadVideos() {
+  const epoch=++listEpoch,page=pageEpoch,s=state.videos;
+  const data=await api('items?'+query({videos:1,size:12,q:s.q,page:s.page}));
+  if(epoch!==listEpoch||page!==pageEpoch)return;s.data=data;s.page=data.page;
+  $('#video-count').textContent=`${data.total} 个视频`;
+  $('#video-list').innerHTML=data.items.length?`<div class="video-grid video-library">${videoCards(data.items)}</div>${pagination(data,'videos')}`:empty(s.q?'没有找到匹配的视频':'还没有保留的视频，可在收藏记录中选择视频用途');
+}
 function resultsPage() {
   const s=state.results;
-  return `${head('结果浏览','<span id="result-count">读取中</span>',button('笔记目录 ↗','open','data-kind="notes-folder"','quiet'))}<section class="reading" data-reader="${s.reader}">
+  return `${head('笔记','<span id="result-count">读取中</span>',button('笔记目录 ↗','open','data-kind="notes-folder"','quiet'))}<section class="reading" data-reader="${s.reader}">
     <aside class="reading-list" aria-label="结果列表">${searchField(s.q,'搜索标题、作者','results-search')}${filterButtons([['all','全部'],['notes','笔记'],['text','仅文字稿']],s.status,'result-filter')}<div id="result-list">${empty('正在读取…')}</div></aside>
     <section id="reader" class="reader" aria-label="阅读正文">${empty('选择一份内容开始阅读')}</section></section>`;
 }
@@ -88,7 +117,7 @@ async function loadDocument() {
 }
 function collectionPage() {
   const s=state.collection,o=state.overview;
-  return `${head('收藏',`${o.total} 条 · 最近同步 ${esc(fmt(o.baseline?.scanned_at))}`,button('刷新','refresh','','quiet'))}<div class="toolbar">${filterButtons([['all','全部'],['review',`待确认 · ${o.review}`],['failed',`失败 · ${o.failed}`],['saved','已保存视频']],s.status,'collection-filter')}${searchField(s.q,'搜索标题、作者','collection-search')}<label class="extra-filter">更多状态<select id="collection-status" aria-label="更多收藏状态"><option value="all">更多状态</option>${Object.entries(STATUSES).map(([key,label])=>`<option value="${key}" ${s.status===key?'selected':''}>${label}</option>`).join('')}<option value="baseline" ${s.status==='baseline'?'selected':''}>历史基线</option></select></label></div><div id="collection-list">${empty('正在读取…')}</div>`;
+  return `${head('收藏记录',`${o.total} 条 · 最近同步 ${esc(fmt(o.baseline?.scanned_at))}`,button('刷新','refresh','','quiet'))}<div class="toolbar">${filterButtons([['all','全部'],['review',`待确认 · ${o.review}`],['failed',`失败 · ${o.failed}`],['saved','已保存视频']],s.status,'collection-filter')}${searchField(s.q,'搜索标题、作者','collection-search')}<label class="extra-filter">更多状态<select id="collection-status" aria-label="更多收藏状态"><option value="all">更多状态</option>${Object.entries(STATUSES).map(([key,label])=>`<option value="${key}" ${s.status===key?'selected':''}>${label}</option>`).join('')}<option value="baseline" ${s.status==='baseline'?'selected':''}>历史基线</option></select></label></div><div id="collection-list">${empty('正在读取…')}</div>`;
 }
 async function loadCollection() {
   const epoch=++listEpoch,page=pageEpoch,s=state.collection;
@@ -185,15 +214,15 @@ async function loadSession() {
 }
 async function go(route) {
   clearTimeout(searchTimer);if(route!==state.route)window.scrollTo({top:0,behavior:'instant'});const epoch=++pageEpoch;++listEpoch;++docEpoch;++logEpoch;
-  if(dialog.open)dialog.close();state.route=routes[route]?route:'results';route=state.route;
+  if(dialog.open)dialog.close();state.route=routes[route]?(route==='results'?'notes':route):'overview';route=state.route;
   document.title=`dustoff · ${routes[route]}`;main.innerHTML=empty('正在读取…');syncChrome();
   try {
     const [o,extra]=await Promise.all([api('overview'),SETTINGS[route]?api('settings'):route==='run'?api('queue'):route==='history'?api('runs'):null]);
     if(epoch!==pageEpoch)return;state.overview=o;syncChrome();
     if(SETTINGS[route])state.settings=extra;
     if(route==='history'){state.runs=extra.runs;state.runId=state.runs.some(r=>r.id===state.runId)?state.runId:state.runs[0]?.id;}
-    main.innerHTML=route==='results'?resultsPage():route==='collection'?collectionPage():route==='run'?runPage(extra):route==='schedule'?schedulePage():route==='history'?historyPage():settingsPage();
-    if(route==='results')await loadResults();if(route==='collection')await loadCollection();if(route==='schedule')schedulePreview();if(route==='history'){runRows();await loadLog();}if(route==='account')await loadSession();
+    main.innerHTML=route==='overview'?overviewPage():route==='videos'?videosPage():route==='notes'?resultsPage():route==='collection'?collectionPage():route==='run'?runPage(extra):route==='schedule'?schedulePage():route==='history'?historyPage():settingsPage();
+    if(route==='notes')await loadResults();if(route==='videos')await loadVideos();if(route==='collection')await loadCollection();if(route==='schedule')schedulePreview();if(route==='history'){runRows();await loadLog();}if(route==='account')await loadSession();
   }catch(e){if(epoch===pageEpoch)main.innerHTML=`${head(routes[route])}${empty(e.message)}${button('重新读取','refresh')}`;}
 }
 function navigate(route) {if(location.hash==='#'+route)void go(route);else location.hash=route;}
@@ -226,11 +255,13 @@ root.addEventListener('click',async event=>{
     else if(a==='close-dialog')closeDialog();
     else if(a==='detail')await detail(id);
     else if(a==='manual-run')manualRun();
+    else if(a==='run-page')navigate('run');
+    else if(a==='text-only'){Object.assign(state.results,{q:'',page:1,status:'text',reader:false});navigate('notes');}
     else if(a==='open')await mutate('open',{kind:b.dataset.kind,id,fileKind:b.dataset.fileKind},'已在本机打开。');
     else if(a==='stop')await mutate('stop',{},'已发送停止请求，正在完成收尾。');
     else if(a==='retry')await queueMutation('retry',{id});
     else if(a==='review-items'||a==='failed-items'){Object.assign(state.collection,{status:a==='review-items'?'review':'failed',q:'',page:1});navigate('collection');}
-    else if(a==='read'){Object.assign(state.results,{id,q:id,page:1,status:'all',kind:b.dataset.kind,reader:true});closeDialog();navigate('results');}
+    else if(a==='read'){Object.assign(state.results,{id,q:id,page:1,status:'all',kind:b.dataset.kind,reader:true});closeDialog();navigate('notes');}
     else if(a==='select-result'){state.results.id=id;state.results.kind=state.results.data.items.find(i=>i.id===id).note_path?'note':'text';state.results.reader=true;$('.reading').dataset.reader='true';resultRows();await loadDocument();$('#reader')?.scrollIntoView({block:'start',behavior:'instant'});}
     else if(a==='reader-back'){state.results.reader=false;$('.reading').dataset.reader='false';$('.reading').scrollIntoView({block:'start'});}
     else if(a==='document-kind'){state.results.kind=b.dataset.filter;await loadDocument();}
@@ -239,7 +270,7 @@ root.addEventListener('click',async event=>{
       if(kind==='results'){main.innerHTML=resultsPage();await loadResults();}else{main.innerHTML=collectionPage();await loadCollection();}
     }else if(a==='paginate'){
       const kind=b.dataset.kind,step=Number(b.dataset.step);
-      if(kind==='runs'){state.runPage+=step;runRows();}else{state[kind].page+=step;if(kind==='results')await loadResults();else await loadCollection();}
+      if(kind==='runs'){state.runPage+=step;runRows();}else{state[kind].page+=step;if(kind==='results')await loadResults();else if(kind==='videos')await loadVideos();else await loadCollection();}
     }else if(a==='schedule-toggle'){await mutate('schedule',{action:b.dataset.value},b.dataset.value==='start'?'自动整理已开启。':'自动整理及登录自动启用已关闭。');await go('schedule');}
     else if(a==='log-kind'){state.logKind=b.dataset.filter;main.innerHTML=historyPage();runRows();await loadLog();}
     else if(a==='select-run'){state.runId=id;runRows();await loadLog();}
@@ -249,10 +280,10 @@ root.addEventListener('click',async event=>{
 });
 root.addEventListener('input',event=>{
   const input=event.target;
-  if(input.id==='results-search'||input.id==='collection-search'){
-    const kind=input.id==='results-search'?'results':'collection';state[kind].q=input.value;state[kind].page=1;
+  if(['results-search','collection-search','videos-search'].includes(input.id)){
+    const kind=input.id.split('-')[0];state[kind].q=input.value;state[kind].page=1;
     // 立即使旧请求失效，避免请求返回时覆盖正在输入的新查询。
-    ++listEpoch;++docEpoch;clearTimeout(searchTimer);searchTimer=setTimeout(()=>{(kind==='results'?loadResults():loadCollection()).catch(e=>notice(e.message,true));},250);
+    ++listEpoch;++docEpoch;clearTimeout(searchTimer);searchTimer=setTimeout(()=>{(kind==='results'?loadResults():kind==='videos'?loadVideos():loadCollection()).catch(e=>notice(e.message,true));},250);
   }
   if(input.closest('#schedule-form'))schedulePreview();
 });
@@ -273,7 +304,7 @@ root.addEventListener('submit',async event=>{
   }catch(e){notice(e.message,true);}finally{if(submit.isConnected)submit.disabled=submit.hasAttribute('data-idle')&&busy();}
 });
 window.addEventListener('hashchange',()=>{notice('');void go(location.hash.slice(1));});
-void go(location.hash.slice(1)||'results');
+void go(location.hash.slice(1)||'overview');
 setInterval(async()=>{
   if(polling||document.hidden)return;polling=true;
   try{

@@ -11,6 +11,7 @@ import { sessionSummary } from './session-status.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
+const savedVideoWhere = "media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (status='saved' OR processing_mode IN ('video','both'))";
 const number = (label, group, fallback, min, max, step = 1) => ({ label, group, type:'number', fallback, min, max, step });
 const text = (label, group, fallback, type = 'text') => ({ label, group, type, fallback });
 export const FIELDS = {
@@ -119,12 +120,14 @@ export function createStore(home = DUST_HOME) {
     return readDb(db=>{
       if(!has(db,'items'))return {items:[],total:0,page:1,pages:1,size};
       const where=["platform='douyin'"],values=[];
-      if(params.results==='1') {where.push("((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
+      if(params.videos==='1')where.push(savedVideoWhere);
+      else if(params.results==='1') {where.push("((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
       else if(status==='baseline')where.push("skip_reason='baseline'");
       else if(status!=='all'){if(!['pending','downloaded','transcribed','extracted','saved','review','failed','skipped','removed'].includes(status))throw new HttpError(400,'状态无效');where.push('status=?');values.push(status);}
       if(search){where.push("(title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\' OR note_path LIKE ? ESCAPE '\\')");const q='%'+search.replace(/[\\%_]/g,'\\$&')+'%';values.push(q,q,q,q);}
       const clause=where.join(' AND '),total=db.prepare(`SELECT count(*) n FROM items WHERE ${clause}`).get(...values).n,pages=Math.max(1,Math.ceil(total/size)),actual=Math.min(page,pages);
-      const rows=db.prepare(`SELECT id,title,author,status,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr FROM items WHERE ${clause} ORDER BY COALESCE(extracted_at,transcribed_at,collected_at,first_seen) DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
+      const order=params.videos==='1'?'COALESCE(updated_at,collected_at,first_seen)':'COALESCE(extracted_at,transcribed_at,collected_at,first_seen)';
+      const rows=db.prepare(`SELECT id,title,author,status,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
       const previews=readPreviews(home);
       return {items:rows.map(r=>({...r,routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
     },{items:[],total:0,page:1,pages:1,size});
@@ -181,10 +184,15 @@ export function createStore(home = DUST_HOME) {
     try{storage.savedUsed=treeBytes(localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))));}catch(e){storage.error=e.message;}
     totals.review=totals.statuses.find(r=>r.status==='review')?.n||0;
     totals.saved=totals.statuses.find(r=>r.status==='saved')?.n||0;
+    const notes=listItems({results:'1',status:'notes',size:3});
+    const videos=listItems({videos:'1',size:3});
+    totals.notes=notes.total;
+    totals.videos=videos.total;
+    totals.textOnly=listItems({results:'1',status:'text',size:1}).total;
     const session=readJson(join(home,'state','session.json'));
     const login=readJson(join(home,'console','login.json'));
     const flag=existsSync(join(home,'NEEDS_LOGIN'));
-    return {...totals,day,policy:policy(),lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:listItems({results:'1',status:'notes',size:3}).items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
+    return {...totals,day,policy:policy(),lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:notes.items,recentVideos:videos.items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
   }
   return {home,settings,saveSettings,overview,listItems,pendingItems,item,document,fileFor,runs,runDetail,tail,redact,cfg,policy};
 }

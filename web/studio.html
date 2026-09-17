@@ -4,17 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="dustoff-token" content="__CSRF_TOKEN__">
-  <title>dustoff · 结果浏览</title>
+  <title>dustoff · 总览</title>
   <link rel="stylesheet" href="/studio.css">
   <script type="module" src="/studio.mjs"></script>
 </head>
 <body>
   <div id="dustoff-studio">
     <aside class="sidebar">
-      <a class="brand" href="#results" aria-label="dustoff 结果浏览"><span class="mark">d.</span>dustoff</a>
+      <a class="brand" href="#overview" aria-label="dustoff 总览"><span class="mark">d.</span>dustoff</a>
       <nav aria-label="主导航">
-        <a href="#results" data-nav="results"><span data-icon="book"></span>结果浏览</a>
-        <a href="#collection" data-nav="collection"><span data-icon="layers"></span>收藏<small id="collection-count"></small></a>
+        <a href="#overview" data-nav="overview"><span data-icon="overview"></span>总览</a>
+        <a href="#notes" data-nav="notes"><span data-icon="book"></span>笔记<small id="notes-count"></small></a>
+        <a href="#videos" data-nav="videos"><span data-icon="video"></span>视频<small id="videos-count"></small></a>
+        <div class="nav-separator"></div>
+        <a href="#collection" data-nav="collection"><span data-icon="layers"></span>收藏记录<small id="collection-count"></small></a>
         <a href="#run" data-nav="run"><span data-icon="play"></span>运行<span id="running-dot"></span></a>
       </nav>
       <div class="sidebar-bottom">

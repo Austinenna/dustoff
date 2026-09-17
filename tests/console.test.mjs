@@ -26,12 +26,25 @@ function fixture(){
   return {home,cleanup:()=>rmSync(home,{recursive:true,force:true})};
 }
 const fakeScheduler=()=>{let current={loaded:false,running:false,time:'22:00',intervalHours:24,nextRun:null,autoStartAfterReboot:false,timezone:'Asia/Taipei'};return {status:()=>({...current}),update:v=>Object.assign(current,v),start:()=>{current.loaded=true;},stop:()=>{current.loaded=false;current.autoStartAfterReboot=false;}};};
+
+test('总览与视频独立按产物统计，同时保留笔记的视频仍在视频区',()=>{
+  const f=fixture();
+  try{
+    const db=new DatabaseSync(join(f.home,'index.sqlite'));
+    db.exec("UPDATE items SET media_path='/saved.mp4',media_deleted=0,processing_mode='both',status='failed' WHERE id='1'; UPDATE items SET media_path='/removed.mp4',media_deleted=1,processing_mode='video' WHERE id='2'; UPDATE items SET media_path='/cache.mp4',media_deleted=0,processing_mode='speech' WHERE id='3'; UPDATE items SET media_path='/saved2.mp4',media_deleted=0,processing_mode='video',status='saved' WHERE id='18';");
+    db.close();const store=createStore(f.home),videos=store.listItems({videos:'1'}),o=store.overview();
+    assert.deepEqual(videos.items.map(i=>i.id),['18','1']);
+    assert.equal(store.listItems({videos:'1',q:'100%'}).total,0);
+    assert.equal(o.videos,2);assert.equal(o.notes,17);assert.equal(o.textOnly,1);
+    assert.equal(o.recentVideos.length,2);assert.equal(store.listItems({results:'1',q:'1'}).items.some(i=>i.id==='1'),true);
+  }finally{f.cleanup();}
+});
 async function serve(options){const app=createConsole({...options,scheduler:fakeScheduler()});const url=await app.listen(0);const html=await (await fetch(url)).text();const token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];return {...app,url,token,post:(path,data,headers={})=>fetch(url+'/api/'+path,{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token,...headers},body:JSON.stringify(data)}),close:()=>new Promise(resolve=>app.server.close(resolve))};}
 
 test('紧凑前端默认入口及依赖均可加载，旧入口不参与运行',async()=>{
   const f=fixture(),app=await serve({home:f.home});
   try{
-    const html=await(await fetch(app.url)).text();assert.ok(html.includes('/studio.mjs'));assert.ok(html.includes('href="#results"'));assert.ok(!html.includes('__CSRF_TOKEN__'));
+    const html=await(await fetch(app.url)).text();assert.ok(html.includes('/studio.mjs'));for(const route of ['overview','notes','videos'])assert.ok(html.includes(`href="#${route}"`));assert.ok(!html.includes('__CSRF_TOKEN__'));
     for(const path of ['/studio.mjs','/studio-view.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs','/studio.css'])assert.equal((await fetch(app.url+path)).status,200,path);
     assert.equal((await fetch(app.url+'/studio.html')).status,404);
     assert.equal((await fetch(app.url+'/app.js')).status,404);
