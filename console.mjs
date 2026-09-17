@@ -63,9 +63,9 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       if(req.headers.host!==new URL(origin).host)throw new HttpError(403,'请使用控制台的本机地址');
       if(req.headers['sec-fetch-site']==='cross-site')throw new HttpError(403,'不接受跨站请求');
       const url=new URL(req.url,origin),path=url.pathname;
-      if(req.method==='GET'&&['/','/app.js','/style.css','/markdown.mjs','/login-ui.mjs'].includes(path)) {
-        const name=path==='/'?'index.html':path.slice(1),types={html:'text/html; charset=utf-8',js:'text/javascript; charset=utf-8',mjs:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8'};
-        let content=readFileSync(join(root,'web',name),'utf8');if(path==='/')content=content.replace('__CSRF_TOKEN__',token);
+      if(req.method==='GET'&&['/','/studio.mjs','/studio.css','/studio-view.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs'].includes(path)) {
+        const name=path==='/'?'studio.html':path.slice(1),types={html:'text/html; charset=utf-8',js:'text/javascript; charset=utf-8',mjs:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8'};
+        let content=readFileSync(join(root,name==='schedule-plan.mjs'?'scripts':'web',name),'utf8');if(path==='/')content=content.replace('__CSRF_TOKEN__',token);
         send(200,content,types[name.split('.').pop()]);return;
       }
       if(!path.startsWith('/api/'))throw new HttpError(404,'页面不存在');
@@ -84,6 +84,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/health':result={app:'dustoff',home,root,pid:process.pid};break;
         case '/api/overview':result={...store.overview(),execution:state(),scheduler:scheduleState()};break;
         case '/api/items':result=store.listItems(params);break;
+        case '/api/queue':result=store.pendingItems();break;
         case '/api/item':result=store.item(params.id);break;
         case '/api/document':result=store.document(params.id,params.kind);break;
         case '/api/settings':result=store.settings();break;

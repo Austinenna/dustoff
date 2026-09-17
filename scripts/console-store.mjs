@@ -144,6 +144,14 @@ export function createStore(home = DUST_HOME) {
     }
     return row.title||row.id;
   }
+  function pendingItems() {
+    // 与 daily.mjs 的队列筛选、顺序相同；metadata 含下载信息，不发送给浏览器。
+    return readDb(db=>{
+      if(!has(db,'items')||!has(db,'daily_queue'))return {items:[]};
+      const rows=db.prepare("SELECT i.id,i.title,i.author,i.status,i.processing_mode,i.duration_s,i.note_path,i.attempts FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform='douyin' WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3 ORDER BY q.enqueued ASC,q.rowid DESC LIMIT 10").all();
+      return {items:rows.map(row=>({...row,display_title:displayTitle(row)}))};
+    },{items:[]});
+  }
   function item(id) {
     if(!/^\d{1,30}$/.test(String(id)))throw new HttpError(400,'作品 ID 不正确');
     const row=readDb(db=>has(db,'items')?db.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id):null,null);
@@ -178,5 +186,5 @@ export function createStore(home = DUST_HOME) {
     const flag=existsSync(join(home,'NEEDS_LOGIN'));
     return {...totals,day,policy:policy(),lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:listItems({results:'1',status:'notes',size:3}).items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
   }
-  return {home,settings,saveSettings,overview,listItems,item,document,fileFor,runs,runDetail,tail,redact,cfg,policy};
+  return {home,settings,saveSettings,overview,listItems,pendingItems,item,document,fileFor,runs,runDetail,tail,redact,cfg,policy};
 }

@@ -28,6 +28,29 @@ function fixture(){
 const fakeScheduler=()=>{let current={loaded:false,running:false,time:'22:00',intervalHours:24,nextRun:null,autoStartAfterReboot:false,timezone:'Asia/Taipei'};return {status:()=>({...current}),update:v=>Object.assign(current,v),start:()=>{current.loaded=true;},stop:()=>{current.loaded=false;current.autoStartAfterReboot=false;}};};
 async function serve(options){const app=createConsole({...options,scheduler:fakeScheduler()});const url=await app.listen(0);const html=await (await fetch(url)).text();const token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];return {...app,url,token,post:(path,data,headers={})=>fetch(url+'/api/'+path,{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token,...headers},body:JSON.stringify(data)}),close:()=>new Promise(resolve=>app.server.close(resolve))};}
 
+test('紧凑前端默认入口及依赖均可加载，旧入口不参与运行',async()=>{
+  const f=fixture(),app=await serve({home:f.home});
+  try{
+    const html=await(await fetch(app.url)).text();assert.ok(html.includes('/studio.mjs'));assert.ok(html.includes('href="#results"'));assert.ok(!html.includes('__CSRF_TOKEN__'));
+    for(const path of ['/studio.mjs','/studio-view.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs','/studio.css'])assert.equal((await fetch(app.url+path)).status,200,path);
+    assert.equal((await fetch(app.url+'/studio.html')).status,404);
+    assert.equal((await fetch(app.url+'/app.js')).status,404);
+  }finally{await app.close();f.cleanup();}
+});
+test('运行页队列沿用真实处理范围与顺序，只读且不暴露下载元数据',async()=>{
+  const f=fixture();let app;
+  try{
+    const db=new DatabaseSync(join(f.home,'index.sqlite'));
+    db.exec("UPDATE items SET status='pending',attempts=0 WHERE id IN ('1','2','3'); UPDATE items SET status='transcribed',attempts=2 WHERE id='4'; UPDATE items SET status='pending',attempts=3 WHERE id='5';");
+    for(const [id,enqueued] of [['1',10],['2',10],['4',20],['5',1]])db.prepare('INSERT INTO daily_queue VALUES(?,?,?)').run(id,JSON.stringify({url:'https://signed.invalid/private-download'}),enqueued);
+    db.close();const before=readFileSync(join(f.home,'index.sqlite'));
+    app=await serve({home:f.home});const data=await(await fetch(app.url+'/api/queue')).json();
+    assert.deepEqual(data.items.map(i=>i.id),['2','1','4']);
+    assert.ok(data.items.every(i=>!Object.hasOwn(i,'metadata')));assert.ok(!JSON.stringify(data).includes('signed.invalid'));
+    assert.deepEqual(readFileSync(join(f.home,'index.sqlite')),before);
+  }finally{if(app)await app.close();f.cleanup();}
+});
+
 test('只读账本分页、字面搜索、缺失文件和查询期间业务锁不冲突',()=>{const f=fixture();try{const store=createStore(f.home),before=readFileSync(join(f.home,'index.sqlite'));writeFileSync(join(f.home,'.lock.pipeline'),String(process.pid));const a=store.listItems({results:'1',page:2,size:6});assert.equal(a.items.length,6);assert.equal(a.page,2);assert.equal(a.total,18);assert.equal(store.listItems({q:'%'}).total,1);assert.equal(store.listItems({q:"' OR 1=1 --"}).total,0);assert.equal(store.overview().lock.running,true);assert.equal(store.overview().pending,0);assert.ok(store.document('1','note').content.includes('# 测试'));assert.equal(store.item('1').display_title,'整理后的标题');assert.equal(a.items[0].display_title,'整理后的标题');assert.equal(store.item('18').display_title,'测试作品 18');assert.throws(()=>store.document('../dustoff.conf','text'));assert.throws(()=>store.document('18','note'));assert.deepEqual(readFileSync(join(f.home,'index.sqlite')),before);}finally{f.cleanup();}});
 
 test('配置验证、即时有效值、保留注释、密钥不回显及过期保存拦截',()=>{const f=fixture();try{const store=createStore(f.home),original=store.settings();assert.ok(!JSON.stringify(original).includes('fixture-only-secret'));assert.throws(()=>store.saveSettings({revision:original.revision,values:{DUST_DAILY_LIMIT:51}}));assert.throws(()=>store.saveSettings({revision:original.revision,values:{DUST_TEXT:join(f.home,'tmp-media','text')}}));assert.throws(()=>store.saveSettings({revision:original.revision,values:{DUST_TEXT:join(f.home,'media')}}));assert.throws(()=>store.saveSettings({revision:original.revision,values:{DUST_DAILY_LIMIT:'5\nDUST_LLM_KEY=oops'}}));const saved=store.saveSettings({revision:original.revision,values:{DUST_DAILY_LIMIT:20,DUST_DASHSCOPE_KEY:'',DUST_ASR_CONTEXT:'术语一\n术语二'}});assert.equal(store.policy().daily,20);assert.ok(readFileSync(join(f.home,'dustoff.conf'),'utf8').includes('# 保留这条注释'));assert.ok(readFileSync(join(f.home,'dustoff.conf'),'utf8').includes('fixture-only-secret'));assert.throws(()=>store.saveSettings({revision:original.revision,values:{DUST_DAILY_LIMIT:10}}),/刷新/);assert.notEqual(saved.revision,original.revision);assert.equal(store.redact('token fixture-only-secret-not-real'),'token [已隐藏密钥]');}finally{f.cleanup();}});

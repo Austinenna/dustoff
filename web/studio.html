@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="dustoff-token" content="__CSRF_TOKEN__">
+  <title>dustoff · 结果浏览</title>
+  <link rel="stylesheet" href="/studio.css">
+  <script type="module" src="/studio.mjs"></script>
+</head>
+<body>
+  <div id="dustoff-studio">
+    <aside class="sidebar">
+      <a class="brand" href="#results" aria-label="dustoff 结果浏览"><span class="mark">d.</span>dustoff</a>
+      <nav aria-label="主导航">
+        <a href="#results" data-nav="results"><span data-icon="book"></span>结果浏览</a>
+        <a href="#collection" data-nav="collection"><span data-icon="layers"></span>收藏<small id="collection-count"></small></a>
+        <a href="#run" data-nav="run"><span data-icon="play"></span>运行<span id="running-dot"></span></a>
+      </nav>
+      <div class="sidebar-bottom">
+        <a class="schedule-link" href="#schedule"><span class="dot"></span><span id="schedule-summary">正在读取自动安排…</span><span>›</span></a>
+        <a href="#account" data-nav="settings"><span data-icon="settings"></span>设置</a>
+        <small class="local-label"><span class="dot"></span>本机工作空间</small>
+      </div>
+    </aside>
+    <div class="workspace">
+      <div id="notice" role="status" aria-live="polite" hidden></div>
+      <main id="main" aria-label="页面内容"><div class="empty">正在读取…</div></main>
+    </div>
+    <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  </div>
+</body>
+</html>
