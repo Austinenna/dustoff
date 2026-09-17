@@ -70,6 +70,25 @@ test('配置验证、即时有效值、保留注释、密钥不回显及过期�
 
 test('HTTP 来源验证、静态文件边界、分页读取和受控打开',async()=>{const f=fixture();const opened=[];const app=await serve({home:f.home,openFile:async args=>opened.push(args)});try{assert.equal((await fetch(app.url+'/api/health')).status,200);assert.equal(await new Promise((resolve,reject)=>{const r=request(app.url+'/api/overview',{headers:{Host:'malicious.invalid'}},res=>{res.resume();resolve(res.statusCode);});r.on('error',reject);r.end();}),403);assert.equal((await app.post('settings',{}, {'X-Dustoff-Token':'wrong'})).status,403);assert.equal((await app.post('run',{}, {Origin:'https://other.invalid'})).status,403);assert.equal((await fetch(app.url+'/api/overview',{headers:{'Sec-Fetch-Site':'cross-site'}})).status,403);assert.equal((await fetch(app.url+'/scripts/config.mjs')).status,404);const result=await (await fetch(app.url+'/api/items?results=1&size=6')).json();assert.equal(result.items.length,6);assert.equal((await app.post('open',{kind:'file',path:'/etc/passwd'})).status,400);assert.equal((await app.post('open',{kind:'note',id:'1'})).status,200);assert.deepEqual(opened,[['-a','Obsidian',join(f.home,'notes','1.md')]]);const settings=await (await fetch(app.url+'/api/settings')).json();assert.equal((await app.post('settings',{revision:settings.revision,values:{DUST_DAILY_LIMIT:25}})).status,200);assert.equal((await(await fetch(app.url+'/api/overview')).json()).policy.daily,25);}finally{await app.close();f.cleanup();}});
 
+test('页内视频通过作品ID受控读取，支持HEAD和分段，清理标记立即阻止播放',async()=>{
+  const f=fixture(),app=await serve({home:f.home});
+  try{
+    const video=join(f.home,'video.mp4');writeFileSync(video,'0123456789');
+    const db=new DatabaseSync(join(f.home,'index.sqlite'));db.prepare("UPDATE items SET media_path=?,media_deleted=0 WHERE id='1'").run(video);db.close();
+    const url=app.url+'/api/video?id=1';
+    const head=await fetch(url,{method:'HEAD'});assert.equal(head.status,200);assert.equal(head.headers.get('Content-Length'),'10');assert.equal(await head.text(),'');
+    const part=await fetch(url,{headers:{Range:'bytes=3-6'}});assert.equal(part.status,206);assert.equal(part.headers.get('Content-Range'),'bytes 3-6/10');assert.equal(part.headers.get('Content-Type'),'video/mp4');assert.equal(await part.text(),'3456');
+    assert.equal(await(await fetch(url,{headers:{Range:'bytes=-3'}})).text(),'789');
+    const invalid=await fetch(url,{headers:{Range:'bytes=10-'}});assert.equal(invalid.status,416);assert.equal(invalid.headers.get('Content-Range'),'bytes */10');
+    assert.equal(await(await fetch(url)).text(),'0123456789');
+    assert.equal((await fetch(url,{headers:{'Sec-Fetch-Site':'cross-site'}})).status,403);
+    assert.equal((await fetch(app.url+'/api/video?id=../video.mp4')).status,400);
+    assert.equal((await app.post('video-prepare',{id:'1'},{'X-Dustoff-Token':'wrong'})).status,403);
+    const changed=new DatabaseSync(join(f.home,'index.sqlite'));changed.exec("UPDATE items SET media_deleted=1 WHERE id='1'");changed.close();
+    assert.equal((await fetch(url)).status,404);assert.equal((await fetch(app.url+'/api/video-status?id=1')).status,404);assert.equal((await app.post('video-prepare',{id:'1'})).status,404);
+  }finally{await app.close();f.cleanup();}
+});
+
 test('控制台操作互斥且能停止自己启动的进程组',async()=>{const f=fixture();const app=await serve({home:f.home,spawnProcess:(node,args,opts)=>spawn(node,['-e','console.log("fixture running");setInterval(()=>{},1000)'],opts)});try{assert.equal((await app.post('run',{limit:1})).status,200);assert.equal((await app.post('run',{limit:1})).status,409);assert.equal((await app.post('login',{})).status,409);assert.equal((await app.post('stop',{})).status,200);for(let n=0;n<50&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));assert.equal(app.execution().running,false);assert.ok(app.execution().lastAction.finishedAt);}finally{if(app.execution().running)await app.post('stop',{});await app.close();f.cleanup();}});
 
 test('真实 retry 子进程只恢复失败待办，不调用模型也不占额度',async()=>{const f=fixture();const app=await serve({home:f.home});try{assert.equal((await app.post('retry',{id:'1'})).status,400);assert.equal((await app.post('retry',{id:'18'})).status,200);for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));assert.equal(app.execution().lastAction.exitCode,0);assert.equal(app.store.item('18').status,'transcribed');assert.equal(app.store.overview().usedToday,0);assert.equal(app.store.overview().pending,1);}finally{await app.close();f.cleanup();}});

@@ -182,6 +182,7 @@ export function createStore(home = DUST_HOME) {
     const get=cfg(),media=localPath(get('DUST_MEDIA',join(home,'media'))),temp=join(home,'tmp-media');let storage={used:null,available:null,error:null};
     try{let p=media;while(!existsSync(p))p=dirname(p);const s=statfsSync(p);storage={used:treeBytes(media)+(under(temp,media)?0:treeBytes(temp)),available:Number(s.bavail)*Number(s.bsize),error:null};}catch(e){storage.error=e.message;}
     try{storage.savedUsed=treeBytes(localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))));}catch(e){storage.error=e.message;}
+    try{storage.previewUsed=treeBytes(localPath(join(home,'console','media-preview')));}catch(e){storage.error=e.message;}
     totals.review=totals.statuses.find(r=>r.status==='review')?.n||0;
     totals.saved=totals.statuses.find(r=>r.status==='saved')?.n||0;
     const notes=listItems({results:'1',status:'notes',size:3});

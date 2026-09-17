@@ -6,8 +6,8 @@ import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,fmt,bytes,duration,titleOf,mediaL
 const root=document.querySelector('#dustoff-studio'),main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 const token=document.querySelector('meta[name="dustoff-token"]').content;
 const routes={overview:'总览',notes:'笔记',results:'笔记',videos:'视频',collection:'收藏记录',run:'运行',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
-const state={route:'overview',overview:null,settings:null,results:{q:'',status:'all',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},collection:{q:'',status:'all',page:1},runs:[],runId:null,logKind:'business',runPage:1};
-let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null;
+const state={route:'overview',overview:null,settings:null,results:{q:'',status:'notes',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},collection:{q:'',status:'all',page:1},runs:[],runId:null,logKind:'business',runPage:1};
+let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null,videoTimer;
 const $=selector=>root.querySelector(selector);
 const query=values=>new URLSearchParams(values).toString();
 const tag=(value,tone='')=>`<span class="tag ${tone}">${esc(value)}</span>`;
@@ -62,7 +62,7 @@ function pagination(data,kind) {
 }
 
 function videoCards(items) {
-  return items.map(i=>`<button class="video-card" data-action="open" data-kind="video" data-id="${i.id}"><span class="video-cover"><span class="video-symbol" aria-hidden="true">▷</span><small class="video-duration">${duration(i.duration_s)}</small></span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(mediaLabel(i))}</small>${i.note_path?'<span class="video-note-label">也有知识笔记</span>':''}</button>`).join('');
+  return items.map(i=>`<button class="video-card" data-action="play-video" data-id="${i.id}"><span class="video-cover"><img src="/api/video-poster?id=${i.id}" alt="" loading="lazy"><span class="video-symbol" aria-hidden="true">▷</span><small class="video-duration">${duration(i.duration_s)}</small></span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(mediaLabel(i))}</small>${i.note_path?'<span class="video-note-label">也有知识笔记</span>':''}</button>`).join('');
 }
 function overviewPage() {
   const o=state.overview,s=o.scheduler,summary=runSummary(o.lastRun);
@@ -126,15 +126,49 @@ async function loadCollection() {
   $('#collection-list').innerHTML=data.items.length?`<div class="table-wrap"><table class="collection-table"><thead><tr><th>收藏内容</th><th>用途</th><th>视频现状</th><th>当前结果</th><th aria-label="操作"></th></tr></thead><tbody>${data.items.map(i=>`<tr><td><button class="item-title" data-action="detail" data-id="${i.id}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${duration(i.duration_s)}</small>${i.last_error?`<span class="cell-error">${esc(i.last_error)}</span>`:''}</td><td>${esc(PURPOSES[i.processing_mode]||'尚未分流')}${i.routing_preview?`<small class="suggestion">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)} · 未应用</small>`:''}</td><td>${esc(mediaLabel(i))}</td><td>${['failed','review'].includes(i.status)&& (i.note_path||i.text_path)?tag(STATUSES[i.status],i.status==='failed'?'danger':'warn')+' ':''}${tag(resultLabel(i),i.status==='failed'?'danger':i.status==='review'?'warn':i.note_path||i.status==='saved'?'green':'')}${i.skip_reason?`<small>${esc(REASONS[i.skip_reason]||i.skip_reason)}</small>`:''}</td><td>${i.note_path||i.text_path?button('阅读','read',`data-id="${i.id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):button('详情','detail',`data-id="${i.id}"`,'quiet')}</td></tr>`).join('')}</tbody></table></div>${pagination(data,'collection')}`:empty(s.q?'没有找到匹配的收藏':'这个筛选下还没有收藏');
 }
 function openDialog(html,drawer=false) {
+  stopVideo();
   dialog.className=drawer?'drawer':'modal';dialog.innerHTML=html;if(!dialog.open)dialog.showModal();
 }
 const dialogHead=title=>`<header class="dialog-head"><h2 id="dialog-title">${title}</h2>${button('关闭','close-dialog','','quiet')}</header>`;
+function stopVideo(){clearTimeout(videoTimer);const v=dialog.querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load();}}
+function videoMessage(message){const p=dialog.querySelector('#video-message');if(p)p.textContent=message;}
+async function preparePlayback(id,epoch) {
+  if(epoch!==dialogEpoch||!dialog.open)return;
+  const v=dialog.querySelector('video');if(!v||v.dataset.preparing==='true')return;
+  v.dataset.preparing='true';v.pause();videoMessage('正在准备兼容播放，首次需要稍等；原视频会保留。');
+  try {
+    let status=await api('video-prepare',{id});
+    const check=async()=>{
+      if(epoch!==dialogEpoch||!dialog.open)return;
+      if(status.state==='ready'){
+        v.dataset.compatible='true';v.dataset.preparing='false';v.src='/api/video?'+query({id,compatible:1});v.load();void v.play().catch(()=>{});videoMessage('播放兼容副本 · 原视频保留');return;
+      }
+      if(status.state==='failed')throw new Error(status.error);
+      videoTimer=setTimeout(async()=>{try{status=await api('video-status?'+query({id}));await check();}catch(e){if(epoch===dialogEpoch){v.dataset.preparing='false';videoMessage(e.message);}}},1200);
+    };
+    await check();
+  } catch(e){if(epoch===dialogEpoch){v.dataset.preparing='false';videoMessage(e.message);}}
+}
+async function playVideo(id) {
+  const epoch=++dialogEpoch;drawerId=null;
+  openDialog(dialogHead('视频 · 页内播放')+empty('正在读取本地视频…'));dialog.classList.add('video-dialog');
+  try {
+    const [i,status]=await Promise.all([api('item?'+query({id})),api('video-status?'+query({id}))]);
+    if(epoch!==dialogEpoch||!dialog.open)return;
+    const compatible=status.state==='ready';
+    dialog.innerHTML=dialogHead('视频 · 页内播放')+`<video class="local-video" controls playsinline autoplay preload="metadata" aria-label="${esc(titleOf(i))}" poster="/api/video-poster?id=${id}" data-compatible="${compatible}" src="/api/video?${query({id,...(compatible?{compatible:1}:{})})}"></video><div class="video-details"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${duration(i.duration_s)} · ${esc(mediaLabel(i))}</p><p id="video-message" role="status" aria-live="polite">${compatible?'播放兼容副本 · 原视频保留':'正在载入本地视频…'}</p><div class="row">${i.note_path||i.text_path?button('阅读笔记 / 文字稿','read',`data-id="${id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):''}${button('用外部播放器打开 ↗','open',`data-id="${id}" data-kind="video"`,'quiet')}${button('切换兼容播放','prepare-video',`data-id="${id}"`,'quiet')}</div></div>`;
+    const v=dialog.querySelector('video');
+    v.addEventListener('loadeddata',()=>{if(epoch===dialogEpoch)videoMessage(v.dataset.compatible==='true'?'播放兼容副本 · 原视频保留':'本地原视频 · 无需上传');});
+    v.addEventListener('error',()=>{if(epoch!==dialogEpoch||!dialog.open)return;if(v.dataset.compatible==='true')videoMessage('播放失败，可尝试外部播放器，或重新打开此视频。');else void preparePlayback(id,epoch);});
+    if(status.state==='processing')await preparePlayback(id,epoch);
+  }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('视频暂不可播放')+empty(e.message);}
+}
 async function detail(id) {
   drawerId=id;const epoch=++dialogEpoch;
   openDialog(dialogHead('收藏详情')+empty('正在读取…'),true);
   try {
     const i=await api('item?'+query({id}));if(epoch!==dialogEpoch||!dialog.open)return;
-    dialog.innerHTML=dialogHead('收藏详情')+`<div class="drawer-body"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${duration(i.duration_s)}</p><div class="row">${tag(STATUSES[i.status]||i.status)}${tag(mediaLabel(i))}</div><section><h3>留下的内容</h3><div class="file-actions">${i.note_path?button('阅读知识笔记','read',`data-id="${id}" data-kind="note"`):''}${i.text_path?button('阅读文字稿','read',`data-id="${id}" data-kind="text"`):''}${i.media_path&&!i.media_deleted?button('打开视频 ↗','open',`data-id="${id}" data-kind="video"`):''}${button('查看原视频 ↗','open',`data-id="${id}" data-kind="source"`,'quiet')}</div>${!i.note_path&&!i.text_path?'<p class="muted">暂未生成文字内容。</p>':''}</section><section><h3>这条收藏用来做什么</h3><p class="muted">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form method="post" id="purpose-form"><input type="hidden" name="id" value="${id}"><div class="purpose-options">${Object.entries(PURPOSES).map(([key,label])=>`<label><input type="radio" name="purpose" value="${key}" ${i.processing_mode===key?'checked':''} ${!i.can_change_purpose?'disabled':''} required><span>${label}<small>${({video:'保留视频文件',speech:'生成文字稿和知识笔记',visual:'保留素材，等待画面文字提取',both:'保留视频，并整理笔记',review:'暂缓处理，等你确认'})[key]}</small></span></label>`).join('')}</div>${i.can_change_purpose?`<p class="muted">保存后更新用途与待办状态，下一轮运行时处理；已有文件保留。</p><button class="button primary" data-idle ${busy()?'disabled':''}>保存用途</button>`:'<p class="muted">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>${i.last_error?`<section class="error-detail"><h3>上次未完成</h3><p>${esc(i.last_error)}</p>${i.status==='failed'?button('恢复为待办','retry',`data-id="${id}" data-idle ${busy()?'disabled':''}`):''}</section>`:''}<details><summary>作品信息</summary><dl><dt>作品 ID</dt><dd>${id}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd></dl></details></div>`;
+    dialog.innerHTML=dialogHead('收藏详情')+`<div class="drawer-body"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${duration(i.duration_s)}</p><div class="row">${tag(STATUSES[i.status]||i.status)}${tag(mediaLabel(i))}</div><section><h3>留下的内容</h3><div class="file-actions">${i.note_path?button('阅读知识笔记','read',`data-id="${id}" data-kind="note"`):''}${i.text_path?button('阅读文字稿','read',`data-id="${id}" data-kind="text"`):''}${i.media_path&&!i.media_deleted?button('播放视频','play-video',`data-id="${id}"`):''}${button('查看原视频 ↗','open',`data-id="${id}" data-kind="source"`,'quiet')}</div>${!i.note_path&&!i.text_path?'<p class="muted">暂未生成文字内容。</p>':''}</section><section><h3>这条收藏用来做什么</h3><p class="muted">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form method="post" id="purpose-form"><input type="hidden" name="id" value="${id}"><div class="purpose-options">${Object.entries(PURPOSES).map(([key,label])=>`<label><input type="radio" name="purpose" value="${key}" ${i.processing_mode===key?'checked':''} ${!i.can_change_purpose?'disabled':''} required><span>${label}<small>${({video:'保留视频文件',speech:'生成文字稿和知识笔记',visual:'保留素材，等待画面文字提取',both:'保留视频，并整理笔记',review:'暂缓处理，等你确认'})[key]}</small></span></label>`).join('')}</div>${i.can_change_purpose?`<p class="muted">保存后更新用途与待办状态，下一轮运行时处理；已有文件保留。</p><button class="button primary" data-idle ${busy()?'disabled':''}>保存用途</button>`:'<p class="muted">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>${i.last_error?`<section class="error-detail"><h3>上次未完成</h3><p>${esc(i.last_error)}</p>${i.status==='failed'?button('恢复为待办','retry',`data-id="${id}" data-idle ${busy()?'disabled':''}`):''}</section>`:''}<details><summary>作品信息</summary><dl><dt>作品 ID</dt><dd>${id}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd></dl></details></div>`;
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('收藏详情')+empty(e.message);}
 }
 function executionPanel() {
@@ -198,7 +232,7 @@ function settingsPage() {
   let content;
   if(route==='account')content=`<div id="session-card">${sessionCard(o.session)}</div><div id="login-flow"></div>${sectionFields('登录提醒',SETTINGS.account)}`;
   if(route==='models')content=`<div class="model-grid">${[['用途判断','选择如何处理收藏',SETTINGS.models.slice(0,3)],['语音转写','把口播内容转换为文字',SETTINGS.models.slice(3,5)],['笔记整理','从文字稿中整理知识',SETTINGS.models.slice(5,10)]].map(([title,desc,keys])=>`<section class="model-card"><span class="model-mark">${title.slice(0,1)}</span><h2>${title}</h2><p class="muted">${desc}</p>${keys.map(field).join('')}</section>`).join('')}</div><details><summary>转写热词与请求超时</summary><div class="fields">${SETTINGS.models.slice(10).map(field).join('')}</div></details>`;
-  if(route==='storage')content=`<div class="storage-summary"><div><small>保留的视频</small><strong>${bytes(o.storage.savedUsed)}</strong></div><div><small>临时媒体缓存</small><strong>${bytes(o.storage.used)}</strong></div><div><small>磁盘可用</small><strong>${bytes(o.storage.available)}</strong></div></div>${o.storage.error?`<div class="callout">部分空间信息未能读取：${esc(o.storage.error)}</div>`:''}${sectionFields('保存位置',SETTINGS.storage.slice(0,3),'修改目录只影响新产物，已有文件不会搬迁。')}<div class="row">${button('打开笔记目录 ↗','open','data-kind="notes-folder"','quiet')}${button('打开运行日志目录 ↗','open','data-kind="runs-folder"','quiet')}</div>${sectionFields('空间与保留',SETTINGS.storage.slice(3),'视频收藏独立保存，不自动清理；缓存按现有清理规则回收。')}<details><summary>数据与缓存路径</summary><dl>${[['运行数据',s.home],['账本数据库',s.database],['媒体缓存',s.media]].map(([name,path])=>`<dt>${name}</dt><dd>${esc(path)}</dd>`).join('')}</dl></details>`;
+  if(route==='storage')content=`<div class="storage-summary"><div><small>保留的视频</small><strong>${bytes(o.storage.savedUsed)}</strong></div><div><small>临时媒体缓存</small><strong>${bytes(o.storage.used)}</strong></div><div><small>磁盘可用</small><strong>${bytes(o.storage.available)}</strong></div></div><p class="muted">封面与播放副本缓存：${bytes(o.storage.previewUsed)} · 最多 512 MiB，自动回收，可重新生成；原视频不受影响。</p>${o.storage.error?`<div class="callout">部分空间信息未能读取：${esc(o.storage.error)}</div>`:''}${sectionFields('保存位置',SETTINGS.storage.slice(0,3),'修改目录只影响新产物，已有文件不会搬迁。')}<div class="row">${button('打开笔记目录 ↗','open','data-kind="notes-folder"','quiet')}${button('打开运行日志目录 ↗','open','data-kind="runs-folder"','quiet')}</div>${sectionFields('空间与保留',SETTINGS.storage.slice(3),'视频收藏独立保存，不自动清理；缓存按现有清理规则回收。')}<details><summary>数据与缓存路径</summary><dl>${[['运行数据',s.home],['账本数据库',s.database],['媒体缓存',s.media]].map(([name,path])=>`<dt>${name}</dt><dd>${esc(path)}</dd>`).join('')}</dl></details>`;
   if(route==='rules')content=`${sectionFields('日常处理',SETTINGS.rules.slice(0,3),'发现新收藏后，按用途保存视频或提取知识。已有历史基线不会自动进入待办。')}<section class="flow-explanation"><span>发现新收藏</span><b>›</b><span>判断用途</span><b>›</b><span>保存视频 / 整理笔记</span></section><details><summary>扫描与整轮时限</summary><div class="fields">${SETTINGS.rules.slice(3).map(field).join('')}</div><p class="muted">起始窗口只是首次扫描的数量；未确认到历史边界时会继续翻页。已有基线时，可恢复的扫描错误不会阻断原有待办。</p></details>`;
   return `${head('设置')}${tabs('settings')}<form method="post" id="settings-form"><div class="settings-body">${content}<div class="savebar"><button class="button primary">保存设置</button><small>新配置从下一轮处理开始生效。</small></div></div></form>`;
 }
@@ -227,7 +261,7 @@ async function go(route) {
 }
 function navigate(route) {if(location.hash==='#'+route)void go(route);else location.hash=route;}
 function closeDialog(){dialog.close();}
-dialog.addEventListener('close',()=>{++dialogEpoch;drawerId=null;});
+dialog.addEventListener('close',()=>{++dialogEpoch;drawerId=null;stopVideo();});
 dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeDialog();}});
 async function mutate(path,data,message) {const result=await api(path,data);if(result.error)throw new Error(result.error);await refreshOverview();notice(message);return result;}
 async function queueMutation(path,data) {
@@ -254,6 +288,8 @@ root.addEventListener('click',async event=>{
     else if(a==='refresh')await go(state.route);
     else if(a==='close-dialog')closeDialog();
     else if(a==='detail')await detail(id);
+    else if(a==='play-video')await playVideo(id);
+    else if(a==='prepare-video')await preparePlayback(id,dialogEpoch);
     else if(a==='manual-run')manualRun();
     else if(a==='run-page')navigate('run');
     else if(a==='text-only'){Object.assign(state.results,{q:'',page:1,status:'text',reader:false});navigate('notes');}
@@ -261,7 +297,7 @@ root.addEventListener('click',async event=>{
     else if(a==='stop')await mutate('stop',{},'已发送停止请求，正在完成收尾。');
     else if(a==='retry')await queueMutation('retry',{id});
     else if(a==='review-items'||a==='failed-items'){Object.assign(state.collection,{status:a==='review-items'?'review':'failed',q:'',page:1});navigate('collection');}
-    else if(a==='read'){Object.assign(state.results,{id,q:id,page:1,status:'all',kind:b.dataset.kind,reader:true});closeDialog();navigate('notes');}
+    else if(a==='read'){Object.assign(state.results,{id,q:id,page:1,status:b.dataset.kind==='note'?'notes':'all',kind:b.dataset.kind,reader:true});closeDialog();navigate('notes');}
     else if(a==='select-result'){state.results.id=id;state.results.kind=state.results.data.items.find(i=>i.id===id).note_path?'note':'text';state.results.reader=true;$('.reading').dataset.reader='true';resultRows();await loadDocument();$('#reader')?.scrollIntoView({block:'start',behavior:'instant'});}
     else if(a==='reader-back'){state.results.reader=false;$('.reading').dataset.reader='false';$('.reading').scrollIntoView({block:'start'});}
     else if(a==='document-kind'){state.results.kind=b.dataset.filter;await loadDocument();}
@@ -287,6 +323,7 @@ root.addEventListener('input',event=>{
   }
   if(input.closest('#schedule-form'))schedulePreview();
 });
+root.addEventListener('error',event=>{if(event.target.matches?.('.video-cover img'))event.target.hidden=true;},true);
 root.addEventListener('change',event=>{if(event.target.id==='collection-status'){state.collection.status=event.target.value;state.collection.page=1;main.innerHTML=collectionPage();loadCollection().catch(e=>notice(e.message,true));}});
 root.addEventListener('submit',async event=>{
   const form=event.target,formId=form.getAttribute('id');if(!['settings-form','schedule-form','purpose-form','run-form'].includes(formId))return;event.preventDefault();

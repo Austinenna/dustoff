@@ -10,10 +10,12 @@ import { DUST_HOME } from './scripts/config.mjs';
 import { createStore, liveLock, HttpError } from './scripts/console-store.mjs';
 import { createScheduler } from './scripts/schedule.mjs';
 import { localPath, atomicWrite } from './scripts/policy.mjs';
+import { createMediaService, streamMedia } from './scripts/console-media.mjs';
 const ROOT=dirname(fileURLToPath(import.meta.url));
 const encode=value=>JSON.stringify(value,(_,v)=>typeof v==='bigint'?Number(v):v);
 export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
   const store=createStore(home);
+  const media=createMediaService({store,home});
   scheduler ||= createScheduler({home,root});
   const token=randomBytes(32).toString('hex');
   let active=null,lastAction=null,origin,auth=null;
@@ -69,6 +71,13 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         send(200,content,types[name.split('.').pop()]);return;
       }
       if(!path.startsWith('/api/'))throw new HttpError(404,'页面不存在');
+      if(['GET','HEAD'].includes(req.method)&&path==='/api/video'){
+        const file=media.video(url.searchParams.get('id'),url.searchParams.get('compatible')==='1');
+        await streamMedia(req,res,file,headers);return;
+      }
+      if(req.method==='GET'&&path==='/api/video-poster'){
+        await streamMedia(req,res,await media.poster(url.searchParams.get('id')),headers);return;
+      }
       if(!['GET','POST'].includes(req.method))throw new HttpError(405,'请求方式不支持');
       let data={};
       if(req.method==='POST') {
@@ -84,6 +93,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/health':result={app:'dustoff',home,root,pid:process.pid};break;
         case '/api/overview':result={...store.overview(),execution:state(),scheduler:scheduleState()};break;
         case '/api/items':result=store.listItems(params);break;
+        case '/api/video-status':result=media.status(params.id);break;
         case '/api/queue':result=store.pendingItems();break;
         case '/api/item':result=store.item(params.id);break;
         case '/api/document':result=store.document(params.id,params.kind);break;
@@ -93,6 +103,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         default:throw new HttpError(404,'接口不存在');
       } else switch(path){
         case '/api/settings':result=store.saveSettings(data);break;
+        case '/api/video-prepare':result=media.prepare(data.id);break;
         case '/api/schedule':
           if(data.action==='save'){if(typeof data.time!=='string'||typeof data.autoStartAfterReboot!=='boolean'||typeof data.intervalHours!=='number')throw new HttpError(400,'定时参数无效');scheduler.update({time:data.time,intervalHours:data.intervalHours,autoStartAfterReboot:data.autoStartAfterReboot});}
           else if(data.action==='start')scheduler.start();else if(data.action==='stop')scheduler.stop();else throw new HttpError(400,'定时操作无效');
@@ -123,7 +134,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         default:throw new HttpError(404,'接口不存在');
       }
       send(200,JSON.parse(store.redact(result)));
-    }catch(e){send(e.status||400,{error:store.redact(e.message||'操作失败')});}
+    }catch(e){if(res.headersSent){res.destroy();return;}send(e.status||400,{error:store.redact(e.message||'操作失败')});}
   });
   server.requestTimeout=15000;server.headersTimeout=10000;
   return {server,store,listen(port=47831){return new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>{origin=`http://127.0.0.1:${server.address().port}`;resolve(origin);});});},execution:state};
