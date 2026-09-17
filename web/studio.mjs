@@ -247,7 +247,7 @@ async function loadSession() {
   if($('#login-flow').innerHTML!==flow)$('#login-flow').innerHTML=flow;
 }
 async function go(route) {
-  clearTimeout(searchTimer);if(route!==state.route)window.scrollTo({top:0,behavior:'instant'});const epoch=++pageEpoch;++listEpoch;++docEpoch;++logEpoch;
+  clearTimeout(searchTimer);if(route!==state.route){window.scrollTo({top:0,behavior:'instant'});$('.workspace').scrollTo({top:0,left:0,behavior:'instant'});}const epoch=++pageEpoch;++listEpoch;++docEpoch;++logEpoch;
   if(dialog.open)dialog.close();state.route=routes[route]?(route==='results'?'notes':route):'overview';route=state.route;
   document.title=`dustoff · ${routes[route]}`;main.innerHTML=empty('正在读取…');syncChrome();
   try {
