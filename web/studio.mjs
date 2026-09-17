@@ -153,14 +153,14 @@ async function playVideo(id) {
   const epoch=++dialogEpoch;drawerId=null;
   openDialog(dialogHead('视频 · 页内播放')+empty('正在读取本地视频…'));dialog.classList.add('video-dialog');
   try {
-    const [i,status]=await Promise.all([api('item?'+query({id})),api('video-status?'+query({id}))]);
+    const [i]=await Promise.all([api('item?'+query({id})),api('video-status?'+query({id}))]);
     if(epoch!==dialogEpoch||!dialog.open)return;
-    const compatible=status.state==='ready';
+    // 即使已有兼容缓存，也优先尝试原片，避免支持原格式的浏览器默认降画质。
+    const compatible=false;
     dialog.innerHTML=dialogHead('视频 · 页内播放')+`<video class="local-video" controls playsinline autoplay preload="metadata" aria-label="${esc(titleOf(i))}" poster="/api/video-poster?id=${id}" data-compatible="${compatible}" src="/api/video?${query({id,...(compatible?{compatible:1}:{})})}"></video><div class="video-details"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${duration(i.duration_s)} · ${esc(mediaLabel(i))}</p><p id="video-message" role="status" aria-live="polite">${compatible?'播放兼容副本 · 原视频保留':'正在载入本地视频…'}</p><div class="row">${i.note_path||i.text_path?button('阅读笔记 / 文字稿','read',`data-id="${id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):''}${button('用外部播放器打开 ↗','open',`data-id="${id}" data-kind="video"`,'quiet')}${button('切换兼容播放','prepare-video',`data-id="${id}"`,'quiet')}</div></div>`;
     const v=dialog.querySelector('video');
     v.addEventListener('loadeddata',()=>{if(epoch===dialogEpoch)videoMessage(v.dataset.compatible==='true'?'播放兼容副本 · 原视频保留':'本地原视频 · 无需上传');});
     v.addEventListener('error',()=>{if(epoch!==dialogEpoch||!dialog.open)return;if(v.dataset.compatible==='true')videoMessage('播放失败，可尝试外部播放器，或重新打开此视频。');else void preparePlayback(id,epoch);});
-    if(status.state==='processing')await preparePlayback(id,epoch);
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('视频暂不可播放')+empty(e.message);}
 }
 async function detail(id) {
