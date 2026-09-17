@@ -21,3 +21,50 @@ dialog{background:var(--bg);color:var(--ink);border:1px solid var(--line);box-sh
 @media(prefers-reduced-motion:no-preference){.button,.sidebar a{transition:background .12s ease,border-color .12s ease}}
 
 .table-wrap{position:relative}.timeline{margin:24px 0;padding-left:4px}.timeline>div{display:grid;grid-template-columns:65px minmax(0,1fr);gap:14px;position:relative;border-left:1px solid var(--line);padding:0 0 19px 17px;font-size:12px;overflow-wrap:anywhere}.timeline>div:before{content:"";position:absolute;left:-4px;top:7px;width:7px;height:7px;background:var(--accent);border-radius:50%}.timeline time{color:var(--muted);font-size:11px}
+
+/* 阅读内容沿用改版前的字体排版；页面标题和导航仍使用紧凑布局。 */
+.reading {
+  --ink: #1d1d1f;
+  --muted: #6e6e73;
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif;
+}
+.reading .note-item strong {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+  -webkit-line-clamp: 2;
+}
+.reading .note-item .between small,
+.reading .note-item .tag { font-size: 11px; }
+.reading .article { font-size: 14px; line-height: 1.9; }
+.reading .article > h2 {
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: -.7px;
+}
+.reading .byline { font-size: 12px; line-height: 1.7; }
+.reading .prose { font-size: 14px; line-height: 1.9; }
+.reading .prose p { margin: 12px 0; }
+.reading .prose h2 {
+  font-size: 28px;
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: -.7px;
+  margin: 32px 0 14px;
+}
+.reading .prose h3 {
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1.9;
+  margin: 26px 0 10px;
+}
+.reading .prose h4 { font-size: 14px; margin-top: 20px; }
+.reading .prose ul { padding-left: 22px; }
+.reading .prose li { margin: 0 0 6px; }
+.reading .prose blockquote { color: var(--muted); }
+.reading .prose table { font-size: 14px; }
+@media (max-width: 650px) {
+  .reading .article > h2 { font-size: 25px; }
+}
