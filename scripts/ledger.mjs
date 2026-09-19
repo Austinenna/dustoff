@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS items (
   status        TEXT NOT NULL,      -- 见 STATUS
   skip_reason   TEXT,               -- gallery / too_long / no_url / need_ocr
 
-  processing_mode TEXT,            -- video / speech / visual / both / review；NULL 为旧流程
+  processing_mode TEXT,            -- note / video / gallery；review 为待确认，NULL 为未判断
   routing_reason TEXT,
   routing_source TEXT,             -- model / manual
   routing_model TEXT,
@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS items (
   media_bytes   INTEGER,            -- 体积
   gear          TEXT,               -- 下的哪一档码率
   media_deleted INTEGER DEFAULT 0,  -- mp4 是否已清理。1 表示提取完删掉了
+  retain_media  INTEGER DEFAULT 0,  -- 笔记仍有内容缺项时保留素材，不代表另一处理类型
   has_audio     INTEGER,            -- 文件有没有音轨。NULL=未检测 0=无 1=有
                                     -- 无音轨的没法做 ASR，需要重下（见 requeueSilent）
 
@@ -365,12 +366,12 @@ export function markTranscribed(id, fields, platform = 'douyin') {
 export function markExtracted(id, fields, platform = 'douyin') {
   return db().prepare(`
     UPDATE items SET status = 'extracted', text_source = ?, text_chars = ?, keyframes = ?,
-                     note_path = ?, category = ?, decay = ?, needs_ocr = ?,
+                     note_path = ?, category = ?, decay = ?, needs_ocr = ?, retain_media = ?,
                      prompt_hash = ?, extracted_at = ?, updated_at = ?
     WHERE platform = ? AND id = ?
   `).run(fields.text_source || null, fields.text_chars || null, fields.keyframes || null,
     fields.note_path || null, fields.category || null, fields.decay || null,
-    (fields.needs_ocr || db().prepare("SELECT processing_mode FROM items WHERE platform=? AND id=?").get(platform,id)?.processing_mode === 'visual') ? 1 : 0, fields.prompt_hash || null, now(), now(), platform, id);
+    fields.needs_ocr ? 1 : 0, fields.retain_media ? 1 : 0, fields.prompt_hash || null, now(), now(), platform, id);
 }
 
 /**
@@ -473,7 +474,9 @@ export function requeueSilent(platform = 'douyin') {
 export function cleanable(platform = 'douyin', { limit = 10000 } = {}) {
   return db().prepare(`SELECT * FROM items WHERE platform=? AND transcribed_at IS NOT NULL
     AND text_source='asr' AND text_chars>0 AND media_deleted=0 AND media_path IS NOT NULL
-    AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'speech')='speech' AND COALESCE(needs_ocr,0)=0
+    AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND COALESCE(needs_ocr,0)=0
+    AND status='extracted' AND note_path IS NOT NULL
+    AND COALESCE(retain_media,0)=0
     ORDER BY transcribed_at LIMIT ?`).all(platform, limit);
 }
 
@@ -610,9 +613,10 @@ if (isMain) {
 }
 
 export function markRouting(id, decision) {
+  if (!['note','video','gallery','review'].includes(decision.purpose)) throw new Error('用途无效');
   return db().prepare(`UPDATE items SET processing_mode=?,routing_reason=?,routing_source='model',routing_model=?,routed_at=?,
     status=CASE WHEN ?='review' THEN 'review' ELSE status END, needs_ocr=?,updated_at=? WHERE platform='douyin' AND id=?`)
-    .run(decision.purpose,decision.reason,decision.model,now(),decision.purpose,decision.purpose==='visual'?1:0,now(),id);
+    .run(decision.purpose,decision.reason,decision.model??null,now(),decision.purpose,0,now(),id);
 }
 export function markSaved(id) {
   return db().prepare("UPDATE items SET status='saved',skip_reason=NULL,saved_at=?,attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?")

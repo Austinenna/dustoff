@@ -54,7 +54,7 @@ export function storage(extra = 0, { retain = false } = {}) {
   const fs = statfsSync(probe);
   const available = Number(fs.bavail) * Number(fs.bsize);
   const used = retain ? treeBytes(SAVED_MEDIA) : treeBytes(MEDIA) + (under(TEMP, MEDIA) ? 0 : treeBytes(TEMP));
-  if (used + extra > cap || (extra === 0 && used >= cap)) throw new PauseError(`${retain ? '视频收藏' : '本地媒体'}达到 ${cap / GiB} GiB 上限`);
+  if (used + extra > cap || (extra === 0 && used >= cap)) throw Object.assign(new PauseError(`${retain ? '视频收藏' : '本地媒体'}达到 ${cap / GiB} GiB 上限`), {scope:retain?'saved-media':'media'});
   if (available - extra < POLICY.free) throw new PauseError(`本机剩余空间低于 ${POLICY.free / GiB} GiB`);
   return { used, available, remaining: Math.min(cap - used, available - POLICY.free) };
 }

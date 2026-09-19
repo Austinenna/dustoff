@@ -35,7 +35,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       auth={phase:'starting',message:kind==='session-check'?'正在检查登录状态…':'正在打开 Chrome 官方登录页…'};
     } else {
       if(kind==='retry'){const i=store.item(body.id);if(i.status!=='failed')throw new HttpError(400,'只能重试已失败作品');}
-      if(kind==='purpose'){if(!store.item(body.id).can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['video','speech','visual','both','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
+      if(kind==='purpose'){if(!store.item(body.id).can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['note','video','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
       if(kind==='video-delete'){if(store.item(body.id).media_type==='gallery')throw new HttpError(400,'此操作只支持视频');}
       script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose','video-delete'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
     }

@@ -12,7 +12,7 @@ import { readGallery } from './gallery.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
-const savedVideoWhere = "COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (status='saved' OR processing_mode IN ('video','both'))";
+const savedVideoWhere = "COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (processing_mode='video' OR (processing_mode IS NULL AND status='saved'))";
 const number = (label, group, fallback, min, max, step = 1) => ({ label, group, type:'number', fallback, min, max, step });
 const text = (label, group, fallback, type = 'text') => ({ label, group, type, fallback });
 export const FIELDS = {
@@ -123,7 +123,7 @@ export function createStore(home = DUST_HOME) {
       const where=["platform='douyin'"],values=[];
       if(params.galleries==='1')where.push("media_type='gallery' AND status='saved' AND media_path IS NOT NULL AND COALESCE(media_deleted,0)=0");
       else if(params.videos==='1')where.push(savedVideoWhere);
-      else if(params.results==='1') {where.push("((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
+      else if(params.results==='1') {where.push("COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
       else if(status==='baseline')where.push("skip_reason='baseline'");
       else if(status!=='all'){if(!['pending','downloaded','transcribed','extracted','saved','review','failed','skipped','removed'].includes(status))throw new HttpError(400,'状态无效');where.push('status=?');values.push(status);}
       if(search){where.push("(title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\' OR note_path LIKE ? ESCAPE '\\')");const q='%'+search.replace(/[\\%_]/g,'\\$&')+'%';values.push(q,q,q,q);}
@@ -189,7 +189,7 @@ export function createStore(home = DUST_HOME) {
     const midnight=new Date(date.getFullYear(),date.getMonth(),date.getDate()).getTime()/1000;
     const totals=readDb(db=>{
       const out={total:0,notes:0,todayNotes:0,pending:0,failed:0,usedToday:0,baseline:null,statuses:[]};
-      if(has(db,'items')){out.statuses=db.prepare("SELECT status,count(*) n FROM items WHERE platform='douyin' GROUP BY status").all();out.total=out.statuses.reduce((s,r)=>s+r.n,0);out.notes=out.statuses.find(r=>r.status==='extracted')?.n||0;out.failed=out.statuses.find(r=>r.status==='failed')?.n||0;out.todayNotes=db.prepare("SELECT count(*) n FROM items WHERE platform='douyin' AND extracted_at>=?").get(midnight).n;}
+      if(has(db,'items')){out.statuses=db.prepare("SELECT status,count(*) n FROM items WHERE platform='douyin' GROUP BY status").all();out.total=out.statuses.reduce((s,r)=>s+r.n,0);out.notes=out.statuses.find(r=>r.status==='extracted')?.n||0;out.failed=out.statuses.find(r=>r.status==='failed')?.n||0;out.todayNotes=db.prepare("SELECT count(*) n FROM items WHERE platform='douyin' AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND extracted_at>=?").get(midnight).n;}
       if(has(db,'daily_queue')&&has(db,'items'))out.pending=db.prepare("SELECT count(*) n FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform='douyin' WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3").get().n;
       if(has(db,'daily_usage'))out.usedToday=db.prepare('SELECT count(*) n FROM daily_usage WHERE day=?').get(day).n;
       if(has(db,'daily_state')){const r=db.prepare("SELECT value FROM daily_state WHERE name='baseline'").get();if(r)out.baseline=JSON.parse(r.value);}

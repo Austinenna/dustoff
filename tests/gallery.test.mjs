@@ -40,7 +40,7 @@ test('图集整组保存：坏内容回退、部分失败续跑、独立浏览�
   acceptScan({ok:true,logged_in:true,truncated:false,items:[seed]});
   const item={aweme_id:'1',is_gallery:true,desc:'两张图片',author:'测试作者',images:[{uri:'1',urls:[base+'/bad',base+'/1']},{uri:'2',urls:[base+'/2']}]};
   acceptScan({ok:true,logged_in:true,truncated:false,items:[item,seed],fetched_at:Date.now()/1000});
-  assert.equal(pendingQueue().length,1);assert.throws(()=>setPurpose('1','speech'));
+  assert.equal(pendingQueue().length,1);assert.throws(()=>setPurpose('1','note'));
   const manifest=join(process.env.DUST_HOME,'saved-media','1','images','gallery.json');
   let app;
   try {
@@ -48,7 +48,7 @@ test('图集整组保存：坏内容回退、部分失败续跑、独立浏览�
     assert.equal(existsSync(join(dirname(manifest),'001.png')),true);assert.equal(existsSync(join(dirname(manifest),'002.part')),false);process.exitCode=0;
     fail=false;const second=await main(['--no-scan']);assert.deepEqual(second.failures,[]);assert.equal(second.galleries,1);assert.equal(second.saved,0);assert.equal(second.notes,0);assert.equal(second.text,0);
     assert.equal(requests.filter(url=>url==='/1').length,1);assert.equal(usage(),1);assert.equal(pendingQueue().length,0);
-    const row=db().prepare("SELECT * FROM items WHERE id='1'").get();assert.equal(row.status,'saved');assert.equal(row.image_count,2);assert.equal(row.text_path,null);assert.equal(row.processing_mode,null);assert.equal(row.media_bytes,2*content.length);assert.deepEqual(cleanable(),[]);
+    const row=db().prepare("SELECT * FROM items WHERE id='1'").get();assert.equal(row.status,'saved');assert.equal(row.image_count,2);assert.equal(row.text_path,null);assert.equal(row.processing_mode,'gallery');assert.equal(row.media_bytes,2*content.length);assert.deepEqual(cleanable(),[]);
     const gallery=readGallery(manifest,'1');assert.deepEqual(gallery.images.map(i=>i.file),['001.png','002.png']);assert.ok(!readFileSync(manifest,'utf8').includes(base));
     const before=requests.length;await main(['--no-scan']);assert.equal(requests.length,before);
     const opened=[];app=createConsole({home:process.env.DUST_HOME,scheduler:{status:()=>({loaded:false})},openFile:async args=>opened.push(args)});const url=await app.listen(0);

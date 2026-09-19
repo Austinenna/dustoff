@@ -27,7 +27,7 @@ export function downloadChoices(item, quality) {
   if (options) return [options[quality],options.standard].filter(g => g?.urls?.length);
   return [{gear:item.gear,urls:item.play_urls||[]},{gear:'play_addr',urls:item.play_urls_fallback||[]}];
 }
-export async function downloadOne(item, { purpose = 'speech' } = {}) {
+export async function downloadOne(item, { purpose = 'note' } = {}) {
   if(item.is_gallery||item.media_type==='gallery')return downloadGallery(item);
   const profile = PURPOSES[purpose];
   if (!profile?.quality) throw new Error('请先确认作品用途');

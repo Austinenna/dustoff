@@ -33,7 +33,7 @@ test('用途请求仅传元数据，使用 low，拒绝丢弃指令；错误不�
   assert.ok(!JSON.stringify(request).includes('private-signed-url'));
   await assert.rejects(()=>classifyItem({},{config:{base:'http://localhost/v1',key:'private-key',model:'glm'},fetchImpl:async()=>new Response('private-key',{status:401})}),e=>e.message==='用途模型 HTTP 401');
 });
-test('旧账本无损迁移；人工覆盖、清理保护与 OCR 标记遵守用途',()=>isolated(`
+test('旧账本结构无损升级；人工覆盖与清理仅作用于对应类型',()=>isolated(`
   import assert from 'node:assert/strict';
   import {DatabaseSync} from 'node:sqlite';
   import {join} from 'node:path';
@@ -47,15 +47,15 @@ test('旧账本无损迁移；人工覆盖、清理保护与 OCR 标记遵守用
   acceptScan({ok:true,logged_in:true,truncated:false,items:[{aweme_id:'100',desc:'基线',duration_s:2}],fetched_at:Date.now()/1000});
   const items=['1','2','3','4','5'].map(aweme_id=>({aweme_id,desc:'fixture',duration_s:5}));
   acceptScan({ok:true,logged_in:true,truncated:false,items:[...items,{aweme_id:'100',desc:'基线',duration_s:2}],fetched_at:Date.now()/1000});
-  for(const [id,purpose] of [['1','speech'],['2','video'],['3','visual'],['4','both'],['5','review']]){
+  for(const [id,purpose] of [['1','note'],['2','video'],['3','video'],['4','note'],['5','review']]){
     markRouting(id,{purpose,reason:'test',model:'glm'});
     if(purpose==='review')continue;
     db().prepare('UPDATE items SET media_path=?,media_deleted=0 WHERE id=?').run('/tmp/fixture.mp4',id);
     markTranscribed(id,{text_source:'asr',text_chars:5,text_path:'/tmp/text.txt'});
-    markExtracted(id,{text_source:'asr',text_chars:5,needs_ocr:false});
+    markExtracted(id,{text_source:'asr',text_chars:5,note_path:'/tmp/note.md'});
   }
-  assert.deepEqual(cleanable().map(r=>r.id),['1']);
-  assert.equal(db().prepare("SELECT needs_ocr FROM items WHERE id='3'").get().needs_ocr,1);
+  assert.deepEqual(cleanable().map(r=>r.id),['1','4']);
+  assert.equal(db().prepare("SELECT needs_ocr FROM items WHERE id='3'").get().needs_ocr,0);
   assert.ok(!pendingQueue().some(r=>r.id==='5'));
   setPurpose('5','video');assert.ok(pendingQueue().some(r=>r.id==='5'));
   assert.equal(db().prepare("SELECT routing_source FROM items WHERE id='5'").get().routing_source,'manual');
@@ -70,7 +70,7 @@ test('旧账本无损迁移；人工覆盖、清理保护与 OCR 标记遵守用
   assert.equal(retryItem('1'),'downloaded'); // 保存视频不走旧文字的笔记阶段
 
 `));
-test('真实媒体下载与编排：视频保存、口播低档、画面高清、待确认不下载，重跑不重复调用',()=>isolated(`
+test('真实媒体下载与编排：视频高清独立保存、知识笔记低档、待确认不下载，重跑不重复调用',()=>isolated(`
   import assert from 'node:assert/strict';
   import {createServer} from 'node:http';
   import {spawnSync} from 'node:child_process';
@@ -84,7 +84,7 @@ test('真实媒体下载与编排：视频保存、口播低档、画面高清�
     if(req.url==='/v1/chat/completions'){
       let body='';for await(const c of req)body+=c;
       const bodyJson=JSON.parse(body),title=JSON.parse(bodyJson.messages[1].content).title;calls.push(title);
-      const purpose=title==='舞蹈'?'video':title==='演示'?'visual':title==='未知'?'review':'speech';
+      const purpose=title==='舞蹈'?'video':title==='演示'?'video':title==='未知'?'review':'note';
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({purpose,reason:'测试用途'})}}]}));
     }else{requests.push(req.url);res.setHeader('Content-Type','video/mp4');res.end(bytes);}
   });
@@ -101,15 +101,19 @@ test('真实媒体下载与编排：视频保存、口播低档、画面高清�
     const items=['舞蹈','口播','演示','未知'].map((desc,i)=>({aweme_id:String(i+1),desc,duration_s:2,play_urls:[base+'/low/'+i],video_options:{low:{gear:'low',urls:[base+'/low/'+i]},high:{gear:'high',urls:[base+'/high/'+i]},standard:{gear:'default',urls:[base+'/standard/'+i]}}}));
     acceptScan({ok:true,logged_in:true,truncated:false,items:[...items,{aweme_id:'100',desc:'基线',duration_s:2}],fetched_at:Date.now()/1000});
     const summary=await main(['--no-scan','--download-only']);
-    assert.deepEqual(summary.failures,[]);assert.equal(summary.saved,1);assert.equal(summary.review,1);
+    assert.deepEqual(summary.failures,[]);assert.equal(summary.saved,2);assert.equal(summary.review,1);
     assert.deepEqual(new Set(requests),new Set(['/high/0','/low/1','/high/2']));
     const one=db().prepare("SELECT * FROM items WHERE id='1'").get();
     assert.equal(one.status,'saved');assert.ok(one.media_path.startsWith(SAVED_MEDIA));assert.equal(one.has_audio,1);assert.equal(one.media_quality,'high');
     assert.equal(db().prepare("SELECT status FROM items WHERE id='4'").get().status,'review');
-    assert.equal(pendingQueue().length,2);
+    assert.equal(pendingQueue().length,1);
     await main(['--no-scan','--download-only']);assert.equal(calls.length,4);assert.equal(requests.length,3);
     const text=join(process.env.DUST_HOME,'text.txt');atomicWrite(text,'测试文字');
-    for(const id of ['2','3'])markTranscribed(id,{text_source:'asr',text_chars:4,text_path:text});
+    markTranscribed('2',{text_source:'asr',text_chars:4,text_path:text});
+    cleanMedia();assert.ok(existsSync(join(MEDIA,'2','video.mp4'))); // 仅转写成功不足以清理。
+    db().prepare("UPDATE items SET status='extracted',note_path=?,retain_media=1 WHERE id='2'").run(join(process.env.DUST_HOME,'note.md'));
+    cleanMedia();assert.ok(existsSync(join(MEDIA,'2','video.mp4'))); // 缺料的笔记保护素材。
+    db().exec("UPDATE items SET retain_media=0 WHERE id='2'");
     cleanMedia();assert.ok(!existsSync(join(MEDIA,'2','video.mp4')));assert.ok(existsSync(join(SAVED_MEDIA,'3','video.mp4')));assert.ok(existsSync(one.media_path));
     setPurpose('4','video');await main(['--no-scan','--skip-notes']);assert.equal(calls.length,4);assert.equal(db().prepare("SELECT status FROM items WHERE id='4'").get().status,'saved');
   }finally{await new Promise(r=>server.close(r));}
@@ -154,7 +158,7 @@ test('旧记录用途预览只写建议，业务字段、队列和额度保持�
   markSkipped('1','need_ocr',{needsOcr:true});markExtracted('3',{text_chars:30,text_source:'asr'});
   const snapshot=()=>JSON.stringify({items:db().prepare('SELECT * FROM items ORDER BY id').all(),queue:db().prepare('SELECT * FROM daily_queue ORDER BY id').all(),used:usage()});
   const before=snapshot();let calls=0;
-  const classify=async row=>{calls++;return {purpose:row.id==='1'?'video':'speech',reason:'测试建议',model:'glm'};};
+  const classify=async row=>{calls++;return {purpose:row.id==='1'?'video':'note',reason:'测试建议',model:'glm'};};
   const result=await previewRecent({classifier:classify});assert.equal(result.classified,2);assert.equal(calls,2);assert.equal(snapshot(),before);
   const cached=await previewRecent({classifier:classify});assert.equal(cached.cached,2);assert.equal(calls,2);assert.equal(snapshot(),before);
   const store=createStore(process.env.DUST_HOME),item=store.item('1');assert.equal(item.routing_preview.purpose,'video');assert.equal(item.processing_mode,null);assert.equal(item.status,'skipped');

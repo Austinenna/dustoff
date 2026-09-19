@@ -15,6 +15,7 @@ test('结果摘要区分暂停、失败和扫描警告，不将异常批次标�
   assert.equal(runSummary({result:{paused:'额度耗尽'}}).label,'已暂停');
   assert.equal(runSummary({result:{scanWarning:'未找到旧边界',notes:2}}).label,'扫描受阻，已继续待办');
   assert.equal(runSummary({result:{failures:[],notes:2}}).label,'已完成');
+  assert.equal(runSummary({result:{pausedTypes:{note:'连续失败'}}}).label,'部分类型暂停');
 });
 test('媒体现状与既有文字产物独立展示，不把删除的视频误报为保留',()=>{
   assert.equal(mediaLabel({media_deleted:1,media_path:'/old.mp4',processing_mode:'video'}),'视频已清理');

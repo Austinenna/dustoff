@@ -69,7 +69,7 @@ const NOTIFY      = cfg('DUST_NOTIFY', '1') !== '0';
 const KEEP_RUNS   = Number(cfg('DUST_KEEP_RUNS', 30));
 
 // 转写稿短到这个数以下就不送 LLM 了。这不是「不配」，是材料不够——
-// 落 skipped + needs_ocr，等 OCR 补完画面文字再退回来重走。
+// 标记文字材料不足，保留原稿与素材；当前不创建 OCR 待办。
 const MIN_CHARS = Number(cfg('DUST_NOTE_MIN_CHARS', 50));
 
 // 思考 token 计入 completion_tokens，也就计入 max_tokens。给小了模型会把
@@ -149,7 +149,7 @@ const PROMPT = `你同时完成两项任务，只输出一个 JSON 对象：
 不要写「画面中也没有」「画面里未给出」这类你无法知道的话。
 当转写稿提到某样东西却没给出内容（阵容码、仓库地址、型号、链接、屏幕上的代码），
 就在这里写明缺的是什么，措辞落在转写稿上——比如「转写稿里没有出现仓库地址」。
-将来会对这些条目集中补 OCR。没有缺的就留空字符串。
+当前没有 OCR；只如实记录转写稿缺少的内容，不承诺后续自动补全。没有缺的就留空字符串。
 
 **分类**：一个词的名词短语，自己判断，不要硬套到某个预设列表里。
 **时效**：none=不过期（原理、方法论、审美）· slow=年为单位（工具用法、职业建议）·
@@ -399,6 +399,7 @@ function writeNote(item, note, { dir, metadataDir = TRANSCRIPT_METADATA_DIR }) {
 // ── 单条流程 ──────────────────────────────────────────────────────
 
 async function noteOne(item) {
+  if (item.media_type === 'gallery' || ![null,undefined,'note','speech'].includes(item.processing_mode)) throw new PermanentError('只有知识笔记类型可以整理笔记');
   if (!item.text_path || !existsSync(localPath(item.text_path))) {
     throw new PermanentError('转写稿不在磁盘上');
   }
@@ -406,21 +407,21 @@ async function noteOne(item) {
 
   // 硬门槛：太短的不送 LLM。免费挡掉一批，也省得让模型对着三句话硬凑。
   if (source.text.trim().length < MIN_CHARS) {
-    return { skipped: true, reason: 'need_ocr',
-      why: `转写稿只有 ${source.text.trim().length} 字，撑不起一篇笔记——关键信息多半在画面上` };
+    return { skipped: true, reason: 'insufficient_text',
+      why: `转写稿只有 ${source.text.trim().length} 字，文字材料不足，保留原稿与素材` };
   }
 
   const { note, usage } = await ask(item, source);
   transcriptSources.set(note, source);
 
-  // 软判断：模型说材料不够。同样进 OCR 补料队列，不是扔掉。
+  // 材料不足只结束本条笔记处理，不转入视频或图集流程。
   if (note.够写 === false) {
-    return { skipped: true, reason: 'need_ocr', usage,
+    return { skipped: true, reason: 'insufficient_text', usage,
       why: note.缺料说明 || '模型判断材料撑不起一篇笔记' };
   }
   if (!String(note.正文 || '').trim()) throw new Error('模型没给正文');
 
-  return { note, usage, needsOcr: !!String(note.缺料说明 || '').trim() };
+  return { note, usage, missingContent: !!String(note.缺料说明 || '').trim() };
 }
 
 // ── 主流程 ────────────────────────────────────────────────────────
@@ -453,7 +454,7 @@ async function main() {
     const status = FORCE ? 'extracted' : 'transcribed';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
   }
-  if (!DRY_RUN) items = items.filter(i => inScope(i.id) && !['video','review'].includes(i.processing_mode));
+  items = items.filter(i => (DRY_RUN || inScope(i.id)) && i.media_type !== 'gallery' && [null,'note','speech'].includes(i.processing_mode));
   if (LIMIT) items = items.slice(0, LIMIT);
   if (!items.length) { log('没有待提炼的条目。'); return; }
 
@@ -472,14 +473,14 @@ async function main() {
       const y = short ? 0 : ((i.text_chars || 0) * 0.76 + 500) * PRICE_IN / 1e6 + 900 * PRICE_OUT / 1e6;
       yuan += y;
       log(`  ${i.id}  ${String(i.text_chars || 0).padStart(5)} 字  ` +
-        (short ? '跳过（材料不够，进 OCR 队列）' : `约 ¥${y.toFixed(4)}`) +
+        (short ? '跳过（文字材料不足，保留原稿与素材）' : `约 ¥${y.toFixed(4)}`) +
         `  ${String(i.title || '').replace(/\n/g, ' ').slice(0, 26)}`);
     }
     log(`\n合计预估 ¥${yuan.toFixed(3)}（单价 ¥${PRICE_IN}/¥${PRICE_OUT} 每百万 token）`);
     return;
   }
 
-  const stat = { ok: 0, skip: 0, fail: 0, ocr: 0, in: 0, out: 0, think: 0, yuan: 0 };
+  const stat = { ok: 0, skip: 0, fail: 0, missing: 0, in: 0, out: 0, think: 0, yuan: 0 };
   const failures = [], transcriptLayouts = [];
   const cats = new Map();
   let consecutiveFails = 0, aborted = false;
@@ -499,8 +500,8 @@ async function main() {
           stat.think += r.usage.think; stat.yuan += r.usage.yuan;
         }
         if (r.skipped) {
-          if (!TRIAL) markSkipped(item.id, r.reason, { needsOcr: true });
-          stat.skip++; stat.ocr++;
+          if (!TRIAL) markSkipped(item.id, r.reason);
+          stat.skip++; stat.missing++;
           consecutiveFails = 0;
           log(`  ⊘ ${label} — ${r.why}`);
           continue;
@@ -512,16 +513,16 @@ async function main() {
           markExtracted(item.id, {
             text_source: item.text_source || 'asr', text_chars: item.text_chars,
             keyframes: item.keyframes, note_path: w.file,
-            category: r.note.分类 || null, decay: w.decay, needs_ocr: r.needsOcr,
+            category: r.note.分类 || null, decay: w.decay, retain_media: r.missingContent,
             prompt_hash: HASH,
           });
         }
-        if (r.needsOcr) stat.ocr++;
+        if (r.missingContent) stat.missing++;
         cats.set(r.note.分类 || '未分类', (cats.get(r.note.分类 || '未分类') || 0) + 1);
         consecutiveFails = 0;
         stat.ok++;
         log(`  ✓ ${label} — 「${r.note.标题}」${r.note.分类}/${w.decay}` +
-          `${r.needsOcr ? ' ⚠️缺料' : ''}，¥${r.usage.yuan.toFixed(4)}，${((Date.now() - t0) / 1000).toFixed(1)}s`);
+          `${r.missingContent ? ' ⚠️缺料' : ''}，¥${r.usage.yuan.toFixed(4)}，${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         stat.fail++;
         failures.push({ id: item.id, title: item.title, error: e.message });
@@ -549,7 +550,7 @@ async function main() {
   if (cats.size) {
     log(`分类分布：${[...cats].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
   }
-  if (stat.ocr) log(`${stat.ocr} 条标了 needs_ocr——关键信息在画面上，等 OCR 那一轮集中补`);
+  if (stat.missing) log(`${stat.missing} 条文字材料不足或存在缺项；未创建 OCR 待办`);
   if (TRIAL) log(`\n试跑，账本未改动。看完觉得行，去掉 --out 再正式跑一遍。`);
 
   if (!CASUAL) {

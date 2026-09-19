@@ -89,7 +89,8 @@ export function retryItem(id) {
     return 'pending';
   }
   let status = 'pending';
-  const profile = PURPOSES[row.processing_mode || 'speech'];
+  const profile = PURPOSES[row.processing_mode || 'note'];
+  if (!profile) throw new Error('旧用途需要先按新规则重新判断');
   const mediaReady = row.media_path && !row.media_deleted && existsSync(localPath(row.media_path))
     && (profile.quality !== 'high' || row.media_quality === 'high')
     && (!profile.retain || under(localPath(row.media_path), SAVED_MEDIA));
@@ -102,14 +103,34 @@ export function retryItem(id) {
 
 /** 手动用途覆盖保留已有成果，重新排队；不处理历史基线、图集或超长条目。 */
 export function setPurpose(id, purpose) {
-  if (!['video','speech','visual','both','review'].includes(purpose)) throw new Error('用途无效');
+  if (!['note','video','review'].includes(purpose)) throw new Error('用途无效');
   const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
   if (!row || row.media_type === 'gallery' || !inScope(id) || ['baseline','gallery','too_long'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
   const now = Math.floor(Date.now()/1000);
   d.prepare(`UPDATE items SET processing_mode=?,routing_reason='用户手动选择',routing_source='manual',routing_model=NULL,routed_at=?,
     status=?,skip_reason=NULL,needs_ocr=?,attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?`)
-    .run(purpose,now,purpose==='review'?'review':'pending',purpose==='visual'?1:0,now,id);
+    .run(purpose,now,purpose==='review'?'review':'pending',0,now,id);
+  if (purpose !== 'review') retryItem(id);
   return purpose;
+}
+
+/** 调用方持有流水线锁。只恢复未完成的旧混合用途；已有成果、文件、基线与额度保留。 */
+export function migratePurposes() {
+  const d=database();
+  d.exec('BEGIN IMMEDIATE');
+  try {
+    const requeued=d.prepare(`UPDATE items SET processing_mode=NULL,status='pending',attempts=0,last_error=NULL,
+      routing_reason=NULL,routing_source=NULL,routing_model=NULL,routed_at=NULL,needs_ocr=0
+      WHERE platform='douyin' AND processing_mode IN ('visual','both') AND status IN ('pending','downloaded','transcribed','failed','review')
+        AND COALESCE(skip_reason,'') NOT IN ('baseline','too_long','video_deleted') AND id IN (SELECT id FROM daily_queue)`).run().changes;
+    const renamed=d.prepare(`UPDATE items SET processing_mode=CASE WHEN media_type='gallery' THEN 'gallery'
+      WHEN processing_mode='speech' OR note_path IS NOT NULL OR text_path IS NOT NULL OR status='extracted' THEN 'note' ELSE 'video' END
+      WHERE platform='douyin' AND ((media_type='gallery' AND COALESCE(processing_mode,'')!='gallery') OR processing_mode IN ('speech','visual','both')
+        OR (processing_mode IS NULL AND (status='extracted' OR note_path IS NOT NULL OR text_path IS NOT NULL)))
+        AND NOT (processing_mode IS NULL AND status='pending')`).run().changes;
+    d.prepare("UPDATE items SET skip_reason='insufficient_text' WHERE skip_reason='need_ocr'").run();
+    d.exec('COMMIT');return {requeued,renamed};
+  } catch(e) {d.exec('ROLLBACK');throw e;}
 }
 
 /** 恢复过去仅因不支持图集而跳过的新收藏；历史基线不变。调用方持有流水线锁。 */

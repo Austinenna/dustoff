@@ -5,7 +5,7 @@
 // node extract.mjs [--limit 1] [--id ID] [--dry-run] [--clean-only]
 // 外接盘归档和文字备份代码保留但禁用，强制重转及旧外接参数当前拒绝执行。
 
-import { POLICY, MEDIA, TEMP, localPath, under, storage, writeMedia, requestSignal, deadlineMs, atomicWrite, PauseError, mediaDecision } from './scripts/policy.mjs';
+import { POLICY, MEDIA, SAVED_MEDIA, TEMP, localPath, under, storage, writeMedia, requestSignal, deadlineMs, atomicWrite, PauseError, mediaDecision } from './scripts/policy.mjs';
 import { inScope, reserveDaily } from './scripts/daily.mjs';
 import { spawnSync, spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, cpSync, readdirSync } from 'node:fs';
@@ -272,9 +272,10 @@ async function asr(file, tries = 3) {
 // ── 单条流程 ──────────────────────────────────────────────────────
 
 async function transcribeOne(item, tmpRoot) {
+  if (item.media_type === 'gallery' || ![null,undefined,'note','speech'].includes(item.processing_mode)) throw new PermanentError('只有知识笔记类型可以转写');
   const mp4 = item.media_path ? localPath(item.media_path) : null;
   if (mediaDecision(item)) throw new PermanentError('视频时长未知或超过上限，不能转写');
-  if (!mp4 || !under(mp4, MEDIA)) throw new PermanentError('视频不在本地媒体目录');
+  if (!mp4 || (!under(mp4, MEDIA) && !under(mp4, SAVED_MEDIA))) throw new PermanentError('视频不在已配置的本地媒体目录');
   if (!mp4 || !existsSync(mp4)) throw new PermanentError('媒体文件不存在（外接盘没挂载？）');
   if (item.has_audio === 0) throw new PermanentError('文件无音轨，需要重下');
 
@@ -573,7 +574,7 @@ async function main() {
     const status = FORCE ? 'transcribed' : 'downloaded';
     items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
   }
-  items = items.filter(i => inScope(i.id) && !i.transcribed_at && !['video','review'].includes(i.processing_mode));
+  items = items.filter(i => inScope(i.id) && !i.transcribed_at && i.media_type !== 'gallery' && [null,'note','speech'].includes(i.processing_mode));
   if (LIMIT) items = items.slice(0, LIMIT);
 
   if (!items.length) { log('没有待转写的条目。'); return; }

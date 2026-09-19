@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DUST_HOME, makeCfg } from './scripts/config.mjs';
 import { POLICY, TEMP, PauseError, mediaDecision, localPath, atomicWrite, deadlineMs } from './scripts/policy.mjs';
-import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, queueSkippedGalleries, ScanError } from './scripts/daily.mjs';
+import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, queueSkippedGalleries, migratePurposes, ScanError } from './scripts/daily.mjs';
 import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { transcribeOne, cleanMedia, CONF as ASR_CONF } from './extract.mjs';
@@ -48,7 +48,7 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
   const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', keepRuns: Number(makeCfg()('DUST_KEEP_RUNS',30)), record: !dry });
   const { log } = stage;
   stage.acquireLock();
-  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, galleries: 0, review: 0, skipped: 0, failures: [], paused: null, scanWarning: null, cleanup: null, transcriptLayouts: [] };
+  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, galleries: 0, review: 0, skipped: 0, failures: [], paused: null, pausedTypes: {}, scanWarning: null, cleanup: null, transcriptLayouts: [] };
   let initializedThisRun = false;
   const tmp = localPath(join(TEMP, `run-${process.pid}`));
   try {
@@ -56,6 +56,8 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
     if (has('--status') && has('--retry')) throw new Error('--status 不能与 --retry 同用');
     if (has('--retry') && !/^\d+$/.test(value('--retry') || '')) throw new Error('--retry 需要作品 ID');
     if (!dry && !has('--status') && old) {
+      const migrated = migratePurposes();
+      if (migrated.requeued) log(`恢复 ${migrated.requeued} 条旧混合用途，按新规则重新判断；现有文件保留`);
       const restored = queueSkippedGalleries();
       if (restored) log(`恢复 ${restored} 条此前跳过的图集为待办`);
     }
@@ -98,7 +100,7 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
       }
     } else if (!old) throw new Error('尚无基线，请先正常运行一次');
     // 模型密钥在实际走到对应分支时检查，单纯保存视频无需 ASR/笔记密钥。
-    let consecutive = 0;
+    const consecutive = {};
     const queue = pendingQueue().filter(r => (!downloadOnly || r.status === 'pending') && (!value('--retry') || r.id === value('--retry')));
     for (const candidate of queue) {
       if (summary.processed >= limit) break;
@@ -106,6 +108,8 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
       let row = fresh(candidate.id);
       let item = JSON.parse(candidate.metadata);
       const id = row.id;
+      let kind = row.media_type === 'gallery' ? 'gallery' : row.processing_mode || 'routing';
+      if (summary.pausedTypes[kind]) continue;
       try {
         if (row.status === 'pending') {
           const reason = mediaDecision(item);
@@ -113,7 +117,17 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
         }
         if (!reserveDaily(id)) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; break; }
         summary.processed++;
+        if (kind === 'routing') {
+          const decision = await classifyItem(item);
+          consecutive.routing = 0;
+          markRouting(id, decision); row = fresh(id); kind = decision.purpose;
+          log(`用途 ${id}：${PURPOSES[kind].label}`);
+          if (kind === 'review') { summary.review++; continue; }
+          retryItem(id); row = fresh(id); // 可复用旧分类留下的视频或文字稿。
+        }
+        if (summary.pausedTypes[kind]) continue;
         if (row.media_type === 'gallery') {
+          if (row.processing_mode !== 'gallery') markRouting(id,{purpose:'gallery',reason:'媒体格式为图集'});
           // 图集不调用用途模型、ASR 或笔记模型；旧地址按作品单独刷新。
           if (row.status === 'pending') {
             if (!item.fetched_at || Date.now()/1000-item.fetched_at > 1800 || !item.images?.length || item.images.some(image=>!image.urls?.length)) {
@@ -125,15 +139,9 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
             }
             importDownload([await downloadGallery(item)],'douyin',{countFailures:false});
           }
-          markSaved(id);summary.galleries++;consecutive=0;log(`图集已保存 ${id}`);continue;
+          markSaved(id);summary.galleries++;consecutive[kind]=0;log(`图集已保存 ${id}`);continue;
         }
         if (row.status === 'pending') {
-          if (!row.processing_mode) {
-            const decision = await classifyItem(item);
-            markRouting(id, decision); row = fresh(id);
-            log(`用途 ${id}：${PURPOSES[decision.purpose].label}`);
-          }
-          if (row.processing_mode === 'review') { summary.review++; consecutive = 0; continue; }
           // 排队地址跨天会失效；即使扫描停在更靠前的边界，也能按 ID 单独刷新。
           if (!item.fetched_at || Date.now()/1000 - item.fetched_at > 1800 || mediaDecision(item) === 'unknown_duration' || !item.play_urls?.length || (PURPOSES[row.processing_mode]?.quality === 'high' && !item.video_options?.high)) {
             const meta = await runScript('get_meta.mjs', [`https://www.douyin.com/video/${id}`], {}, log);
@@ -142,15 +150,16 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
             importScan([item]);
             db().prepare('UPDATE daily_queue SET metadata=? WHERE id=?').run(JSON.stringify(item), id);
           }
-          const result = await downloadOne(item, { purpose:row.processing_mode || 'speech' });
+          const result = await downloadOne(item, { purpose:row.processing_mode });
           importDownload([result], 'douyin', { countFailures:false });
           row = fresh(id);
           if (row.status === 'skipped') { summary.skipped++; continue; }
         }
         if (row.processing_mode === 'video' && row.status === 'downloaded') {
-          markSaved(id); summary.saved++; consecutive = 0; log(`视频已保存 ${id}`); continue;
+          markSaved(id); summary.saved++; consecutive[kind] = 0; log(`视频已保存 ${id}`); continue;
         }
-        if (downloadOnly) { consecutive = 0; continue; }
+        if (downloadOnly) { consecutive[kind] = 0; continue; }
+        if (row.processing_mode !== 'note') throw new Error('只有知识笔记类型可以转写和整理');
         if (row.status === 'downloaded') {
           if (!ASR_CONF.API_KEY) throw new Error('未配置 ASR Key');
           const result = await transcribeOne(row, tmp);
@@ -160,22 +169,30 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
         if (!skipNotes && row.status === 'transcribed') {
           if (!NOTES_CONF.API_KEY) throw new Error('未配置 LLM Key');
           const result = await noteOne(row);
-          if (result.skipped) { markSkipped(id, result.reason, { needsOcr:true }); summary.skipped++; }
+          if (result.skipped) { markSkipped(id, result.reason); summary.skipped++; }
           else {
             const note = writeNote(row, result.note, { dir: NOTES_CONF.NOTES_DIR });
             summary.transcriptLayouts.push({ id, ...note.transcript });
             if (note.transcript.mode === 'original') log(`转写排版回退完整原稿 ${id}：${note.transcript.reason}`);
-            markExtracted(id, { text_source:'asr', text_chars:row.text_chars, note_path:note.file, category:result.note.分类, decay:note.decay, needs_ocr:result.needsOcr, prompt_hash:HASH });
+            markExtracted(id, { text_source:'asr', text_chars:row.text_chars, note_path:note.file, category:result.note.分类, decay:note.decay, retain_media:result.missingContent, prompt_hash:HASH });
             summary.notes++;
           }
         }
-        consecutive = 0; log(`完成 ${id}，本轮 ${summary.processed} 条`);
+        consecutive[kind] = 0; log(`完成 ${id}，本轮 ${summary.processed} 条`);
       } catch (e) {
-        if (e instanceof PauseError) { summary.paused = e.message; break; }
+        if (e instanceof PauseError) {
+          if (!e.scope) { summary.paused = e.message; break; }
+          summary.pausedTypes[kind] = e.message;
+          log(`${PURPOSES[kind]?.label || '用途判断'}暂停：${e.message}；继续其他类型`);continue;
+        }
         markFailed(id, e.message, 'douyin', 3);
         summary.failures.push({ id, error:e.message });
         log(`失败 ${id}：${e.message}`);
-        if (++consecutive >= 3) { summary.paused = '连续 3 条失败，停止本轮'; break; }
+        consecutive[kind] = (consecutive[kind] || 0) + 1;
+        if (consecutive[kind] >= 3) {
+          summary.pausedTypes[kind] = '连续 3 条失败，本轮暂停该类型';
+          log(`${PURPOSES[kind]?.label || '用途判断'}连续 3 条失败；继续其他类型`);
+        }
       }
     }
     return summary;
@@ -197,11 +214,13 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
       atomicWrite(join(stage.runDir, 'result.json'), JSON.stringify(summary, null, 2));
       stage.pruneRuns();
       if (summary.failures.length || summary.paused) stage.notify('dustoff 需要留意', summary.paused || `${summary.failures.length} 项失败`);
+      else if (Object.keys(summary.pausedTypes).length) stage.notify('dustoff 部分类型暂停', Object.values(summary.pausedTypes).join('；'));
       if (summary.scanWarning) stage.notify('dustoff 扫描未完成', `已继续处理已有待办；${summary.scanWarning}`);
       if (summary.review) stage.notify('dustoff 用途待确认', `${summary.review} 条收藏请在作品详情选择用途`);
-      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，保存图集 ${summary.galleries}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || (summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
+      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，保存图集 ${summary.galleries}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || (Object.keys(summary.pausedTypes).length ? '部分类型暂停，其他类型已继续' : summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
       if (summary.failures.length) process.exitCode = 1;
       else if (summary.paused && summary.paused !== `当天累计已达 ${POLICY.daily} 条`) process.exitCode = 5;
+      else if (Object.keys(summary.pausedTypes).length) process.exitCode = 5;
       else if (summary.scanWarning) process.exitCode = 1;
     }
     } finally { stage.releaseLock(); }
