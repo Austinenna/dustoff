@@ -75,6 +75,9 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         const file=media.video(url.searchParams.get('id'),url.searchParams.get('compatible')==='1');
         await streamMedia(req,res,file,headers);return;
       }
+      if(['GET','HEAD'].includes(req.method)&&path==='/api/gallery-image'){
+        await streamMedia(req,res,store.galleryFile(url.searchParams.get('id'),url.searchParams.get('index')??0),headers);return;
+      }
       if(req.method==='GET'&&path==='/api/video-poster'){
         await streamMedia(req,res,await media.poster(url.searchParams.get('id')),headers);return;
       }
@@ -93,6 +96,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/health':result={app:'dustoff',home,root,pid:process.pid};break;
         case '/api/overview':result={...store.overview(),execution:state(),scheduler:scheduleState()};break;
         case '/api/items':result=store.listItems(params);break;
+        case '/api/gallery':result=store.gallery(params.id);break;
         case '/api/video-status':result=media.status(params.id);break;
         case '/api/queue':result=store.pendingItems();break;
         case '/api/item':result=store.item(params.id);break;
@@ -124,9 +128,10 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           try{process.kill(-active.pid,'SIGTERM');}catch(e){if(e.code!=='ESRCH')throw e;}
           result={stopping:true};break;
         case '/api/open': {
-          if(!['note','text','video','folder','source','notes-folder','runs-folder'].includes(data.kind))throw new HttpError(400,'打开目标无效');
+          if(!['note','text','video','gallery-folder','folder','source','notes-folder','runs-folder'].includes(data.kind))throw new HttpError(400,'打开目标无效');
           let args;
-          if(data.kind==='source'){store.item(data.id);args=[`https://www.douyin.com/video/${data.id}`];}
+          if(data.kind==='source'){const row=store.item(data.id);args=[`https://www.douyin.com/${row.media_type==='gallery'?'note':'video'}/${data.id}`];}
+          else if(data.kind==='gallery-folder'){args=[dirname(store.galleryFile(data.id,0))];}
           else if(data.kind==='notes-folder'||data.kind==='runs-folder'){const p=data.kind==='notes-folder'?store.overview().paths.notes:join(home,'runs');if(!existsSync(localPath(p)))throw new HttpError(404,'文件夹尚不存在');args=[p];}
           else {const kind=data.kind==='folder'?(data.fileKind||'note'):data.kind;const p=store.fileFor(data.id,kind);args=data.kind==='folder'?['-R',p]:data.kind==='note'?['-a','Obsidian',p]:[p];}
           await openFile(args);result={opened:true};break;

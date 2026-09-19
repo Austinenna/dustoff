@@ -84,6 +84,10 @@ export function retryItem(id) {
   const row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
   if (!row || ['extracted','saved','review'].includes(row.status) || row.skip_reason === 'baseline') throw new Error('已完成或基线条目不能作为失败待办重试');
   if (row.skip_reason === 'too_long' || row.skip_reason === 'gallery') throw new Error('本轮不支持恢复主动跳过的内容');
+  if (row.media_type === 'gallery') {
+    d.prepare("UPDATE items SET status='pending',attempts=0,last_error=NULL WHERE platform='douyin' AND id=?").run(id);
+    return 'pending';
+  }
   let status = 'pending';
   const profile = PURPOSES[row.processing_mode || 'speech'];
   const mediaReady = row.media_path && !row.media_deleted && existsSync(localPath(row.media_path))
@@ -100,10 +104,24 @@ export function retryItem(id) {
 export function setPurpose(id, purpose) {
   if (!['video','speech','visual','both','review'].includes(purpose)) throw new Error('用途无效');
   const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
-  if (!row || !inScope(id) || ['baseline','gallery','too_long'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
+  if (!row || row.media_type === 'gallery' || !inScope(id) || ['baseline','gallery','too_long'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
   const now = Math.floor(Date.now()/1000);
   d.prepare(`UPDATE items SET processing_mode=?,routing_reason='用户手动选择',routing_source='manual',routing_model=NULL,routed_at=?,
     status=?,skip_reason=NULL,needs_ocr=?,attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?`)
     .run(purpose,now,purpose==='review'?'review':'pending',purpose==='visual'?1:0,now,id);
   return purpose;
+}
+
+/** 恢复过去仅因不支持图集而跳过的新收藏；历史基线不变。调用方持有流水线锁。 */
+export function queueSkippedGalleries() {
+  const d = database();
+  const rows = d.prepare("SELECT * FROM items WHERE platform='douyin' AND media_type='gallery' AND status='skipped' AND skip_reason='gallery'").all();
+  d.exec('BEGIN IMMEDIATE');
+  try {
+    for (const row of rows) {
+      d.prepare('INSERT OR IGNORE INTO daily_queue(id,metadata,enqueued) VALUES(?,?,?)').run(row.id, JSON.stringify({aweme_id:row.id,is_gallery:true,desc:row.title,author:row.author}), row.first_seen*1000);
+      d.prepare("UPDATE items SET status='pending',skip_reason=NULL,attempts=0,last_error=NULL WHERE platform='douyin' AND id=?").run(row.id);
+    }
+    d.exec('COMMIT');return rows.length;
+  } catch(e) { d.exec('ROLLBACK');throw e; }
 }

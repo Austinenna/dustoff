@@ -30,7 +30,7 @@ export async function previewRecent({home=DUST_HOME,classifier=classifyItem,log=
     // 日常队列涵盖这次正式启用后的新收藏，排除仅作历史参照的基线。
     rows=d.prepare(`SELECT i.id,i.title,i.author,i.duration_s,i.processing_mode FROM items i
       JOIN daily_queue q ON q.id=i.id AND i.platform='douyin'
-      WHERE i.processing_mode IS NULL AND i.status IN ('extracted','skipped')
+      WHERE COALESCE(i.media_type,'video')!='gallery' AND i.processing_mode IS NULL AND i.status IN ('extracted','skipped')
         AND COALESCE(i.skip_reason,'') NOT IN ('baseline','gallery','too_long')
       ORDER BY i.first_seen DESC,i.collected_at DESC LIMIT 50`).all();
   } finally { d.close(); }

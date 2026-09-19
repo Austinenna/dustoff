@@ -18,7 +18,7 @@ import { boundaryIndex, collectionChain } from './incremental.mjs';
 import { makeCfg, DUST_HOME } from './config.mjs';
 import { localPath, POLICY, requestSignal } from './policy.mjs';
 import { existsSync, readFileSync } from 'node:fs';
-import { videoOptions, pickGear, playAddrUrls, isGallery, expiryOf } from './lib.mjs';
+import { galleryImages, videoOptions, pickGear, playAddrUrls, isGallery, expiryOf } from './lib.mjs';
 import { guardSession } from './session_guard.mjs';
 
 const CHROME = process.env.DUST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -236,6 +236,7 @@ function assignCollectedAt(items, pages, fetchedAt) {
               aweme_id: a.aweme_id,
               aweme_type: a.aweme_type ?? null,      // 0=视频 68=图集
               is_gallery: gallery,
+              images: gallery ? galleryImages(a) : [],
               video_options: gallery ? null : videoOptions(a),
               desc: a.desc || '',
               author: (a.author && a.author.nickname) || '',

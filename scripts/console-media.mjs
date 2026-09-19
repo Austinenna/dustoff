@@ -25,7 +25,7 @@ export function byteRange(header,size) {
 
 export async function streamMedia(req,res,file,headers) {
   const size=statSync(file).size;
-  const type=({'.mp4':'video/mp4','.m4v':'video/mp4','.mov':'video/quicktime','.webm':'video/webm','.jpg':'image/jpeg'})[extname(file)]||'application/octet-stream';
+  const type=({'.mp4':'video/mp4','.m4v':'video/mp4','.mov':'video/quicktime','.webm':'video/webm','.jpg':'image/jpeg','.png':'image/png','.webp':'image/webp','.gif':'image/gif','.avif':'image/avif'})[extname(file)]||'application/octet-stream';
   let range;
   try{range=byteRange(req.headers.range,size);}catch(e){res.writeHead(416,{...headers,'Accept-Ranges':'bytes','Content-Range':`bytes */${size}`,'Content-Length':0});res.end();return;}
   const start=range?.start||0,end=range?.end??size-1;

@@ -102,6 +102,15 @@ export function playAddrUrls(aweme) {
 export const isGallery = aweme =>
   (aweme && aweme.aweme_type === 68) || !!(aweme && Array.isArray(aweme.images) && aweme.images.length);
 
+/** 保留图集原顺序和每张图的备用地址，不用封面代替正文图片。 */
+export function galleryImages(aweme) {
+  return (Array.isArray(aweme?.images) ? aweme.images : []).map(image => ({
+    uri: image.uri || null, width: image.width || null, height: image.height || null,
+    urls: [...new Set([...(image.url_list || []), ...(image.download_url_list || [])])]
+      .filter(url => typeof url === 'string' && /^https?:\/\//.test(url)),
+  }));
+}
+
 export const fmtMB = bytes => (bytes ? (bytes / 1024 / 1024).toFixed(2) + 'MB' : '?');
 
 /** 扫描保留两种下载规格，用途判定后再选；默认播放地址仅作为同方向兜底。 */

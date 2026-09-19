@@ -2,8 +2,8 @@
 import {escapeHtml} from './markdown.mjs';
 export const esc = escapeHtml;
 export const PURPOSES = {video:'保存视频',speech:'提取口播知识',visual:'画面知识',both:'视频和笔记',review:'待确认用途'};
-export const STATUSES = {pending:'待处理',downloaded:'已下载',transcribed:'已转写',extracted:'已整理',saved:'已保存视频',review:'待确认',failed:'失败',skipped:'已跳过',removed:'已取消收藏'};
-export const REASONS = {baseline:'历史基线，不自动处理',gallery:'图集暂不处理',too_long:'超过时长限制',need_ocr:'等待画面文字提取',no_url:'缺少下载地址'};
+export const STATUSES = {pending:'待处理',downloaded:'已下载',transcribed:'已转写',extracted:'已整理',saved:'已保存',review:'待确认',failed:'失败',skipped:'已跳过',removed:'已取消收藏'};
+export const REASONS = {baseline:'历史基线，不自动处理',gallery:'图集将在下次运行恢复处理',too_long:'超过时长限制',need_ocr:'等待画面文字提取',no_url:'缺少下载地址'};
 export const SETTINGS = {
   account:['DUST_WARN_DAYS'],
   models:['DUST_ROUTER_BASE','DUST_ROUTER_MODEL','DUST_ROUTER_KEY','DUST_ASR_MODEL','DUST_DASHSCOPE_KEY','DUST_LLM_BASE','DUST_LLM_MODEL','DUST_LLM_KEY','DUST_LLM_EFFORT','DUST_LLM_MAX_TOKENS','DUST_ASR_CONTEXT','DUST_REQUEST_TIMEOUT_S'],
@@ -19,11 +19,13 @@ export const bytes = value => value===null||value===undefined?'未知':value>=10
 export const duration = value => Number(value)>0?`${Math.floor(value/60)}:${String(Math.floor(value%60)).padStart(2,'0')}`:'时长未知';
 export const titleOf = item => item.display_title||item.title||item.id;
 export function mediaLabel(item) {
+  if(item.media_type==='gallery')return item.media_path&&!item.media_deleted?`已保存图集${item.image_count?' · '+item.image_count+' 张':''}`:'图片尚未保存';
   if(item.media_deleted)return '视频已清理';
   if(item.media_path)return `${item.status==='saved'||['video','both'].includes(item.processing_mode)?'已保留':'缓存中'}${item.media_quality==='high'?' · 高清':item.media_quality==='low'?' · 低清':''}`;
   return '未保存视频';
 }
 export function resultLabel(item) {
+  if(item.media_type==='gallery'&&item.status==='saved')return '图集已保存';
   return [item.note_path&&'知识笔记',item.text_path&&'文字稿',item.needs_ocr&&'待 OCR'].filter(Boolean).join(' · ')||STATUSES[item.status]||item.status||'暂无结果';
 }
 export function runSummary(run) {

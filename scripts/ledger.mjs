@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS items (
 
   -- ── 素材 ────────────────────────────────────────
   media_path    TEXT,               -- 视频落盘位置
+  image_count   INTEGER,            -- 图集图片数
   media_bytes   INTEGER,            -- 体积
   gear          TEXT,               -- 下的哪一档码率
   media_deleted INTEGER DEFAULT 0,  -- mp4 是否已清理。1 表示提取完删掉了
@@ -205,6 +206,7 @@ export function importScan(items, platform = 'douyin') {
       title      = COALESCE(excluded.title, items.title),
       author     = COALESCE(excluded.author, items.author),
       duration_s = COALESCE(excluded.duration_s, items.duration_s),
+      media_type = excluded.media_type,
       -- 只认第一次算出来的值：页边界每次扫描落点不同，插值结果会有一两小时的抖动，
       -- 每天覆盖一遍等于让收藏时刻天天变，文件名也就跟着变
       collected_at = COALESCE(items.collected_at, excluded.collected_at),
@@ -239,7 +241,7 @@ export function importDownload(results, platform = 'douyin', { countFailures = t
   };
   const upd = d.prepare(`
     UPDATE items SET status = ?, skip_reason = ?, media_path = ?, media_bytes = ?,
-                     gear = ?, has_audio = ?, media_quality = ?, media_deleted = 0, attempts = 0, last_error = NULL, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
+                     gear = ?, has_audio = ?, media_quality = ?, image_count = ?, media_deleted = 0, attempts = 0, last_error = NULL, downloaded_at = COALESCE(downloaded_at, ?), updated_at = ?
     WHERE platform = ? AND id = ? AND status IN ('pending','skipped')
   `);
   const bump = d.prepare(`
@@ -256,7 +258,7 @@ export function importDownload(results, platform = 'douyin', { countFailures = t
         continue;
       }
       const res = upd.run(m.status, m.reason, r.path || null, r.bytes || null,
-        r.gear || null, r.has_audio === undefined ? null : (r.has_audio ? 1 : 0), r.quality || null,
+        r.gear || null, r.has_audio === undefined ? null : (r.has_audio ? 1 : 0), r.quality || null, r.image_count || null,
         t, t, platform, r.aweme_id);
       touched += res.changes;
     }
@@ -471,7 +473,7 @@ export function requeueSilent(platform = 'douyin') {
 export function cleanable(platform = 'douyin', { limit = 10000 } = {}) {
   return db().prepare(`SELECT * FROM items WHERE platform=? AND transcribed_at IS NOT NULL
     AND text_source='asr' AND text_chars>0 AND media_deleted=0 AND media_path IS NOT NULL
-    AND COALESCE(processing_mode,'speech')='speech' AND COALESCE(needs_ocr,0)=0
+    AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'speech')='speech' AND COALESCE(needs_ocr,0)=0
     ORDER BY transcribed_at LIMIT ?`).all(platform, limit);
 }
 

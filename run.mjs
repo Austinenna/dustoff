@@ -6,12 +6,13 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DUST_HOME, makeCfg } from './scripts/config.mjs';
 import { POLICY, TEMP, PauseError, mediaDecision, localPath, atomicWrite, deadlineMs } from './scripts/policy.mjs';
-import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, ScanError } from './scripts/daily.mjs';
+import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, queueSkippedGalleries, ScanError } from './scripts/daily.mjs';
 import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { transcribeOne, cleanMedia, CONF as ASR_CONF } from './extract.mjs';
 import { noteOne, writeNote, HASH, CONF as NOTES_CONF } from './notes.mjs';
 import { classifyItem, PURPOSES } from './scripts/routing.mjs';
+import { downloadGallery } from './scripts/gallery.mjs';
 import { downloadOne } from './scripts/download.mjs';
 const scripts = join(dirname(fileURLToPath(import.meta.url)), 'scripts');
 const fresh = id => db().prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
@@ -47,13 +48,17 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
   const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', keepRuns: Number(makeCfg()('DUST_KEEP_RUNS',30)), record: !dry });
   const { log } = stage;
   stage.acquireLock();
-  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, review: 0, skipped: 0, failures: [], paused: null, scanWarning: null, cleanup: null, transcriptLayouts: [] };
+  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, galleries: 0, review: 0, skipped: 0, failures: [], paused: null, scanWarning: null, cleanup: null, transcriptLayouts: [] };
   let initializedThisRun = false;
   const tmp = localPath(join(TEMP, `run-${process.pid}`));
   try {
     const old = baseline();
     if (has('--status') && has('--retry')) throw new Error('--status 不能与 --retry 同用');
     if (has('--retry') && !/^\d+$/.test(value('--retry') || '')) throw new Error('--retry 需要作品 ID');
+    if (!dry && !has('--status') && old) {
+      const restored = queueSkippedGalleries();
+      if (restored) log(`恢复 ${restored} 条此前跳过的图集为待办`);
+    }
     if (value('--retry')) {
       if (dry) { log('预览模式不重置失败状态'); return summary; }
       log(`恢复 ${value('--retry')} 到 ${retryItem(value('--retry'))} 阶段`);
@@ -108,6 +113,20 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
         }
         if (!reserveDaily(id)) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; break; }
         summary.processed++;
+        if (row.media_type === 'gallery') {
+          // 图集不调用用途模型、ASR 或笔记模型；旧地址按作品单独刷新。
+          if (row.status === 'pending') {
+            if (!item.fetched_at || Date.now()/1000-item.fetched_at > 1800 || !item.images?.length || item.images.some(image=>!image.urls?.length)) {
+              const meta = await runScript('get_meta.mjs', [`https://www.douyin.com/note/${id}`], {}, log);
+              if (!meta.ok || String(meta.aweme_id) !== id || !meta.is_gallery) throw new Error('刷新图集元数据失败或作品不匹配');
+              item = {...meta,fetched_at:Math.floor(Date.now()/1000)};
+              importScan([item]);
+              db().prepare('UPDATE daily_queue SET metadata=? WHERE id=?').run(JSON.stringify(item),id);
+            }
+            importDownload([await downloadGallery(item)],'douyin',{countFailures:false});
+          }
+          markSaved(id);summary.galleries++;consecutive=0;log(`图集已保存 ${id}`);continue;
+        }
         if (row.status === 'pending') {
           if (!row.processing_mode) {
             const decision = await classifyItem(item);
@@ -180,7 +199,7 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
       if (summary.failures.length || summary.paused) stage.notify('dustoff 需要留意', summary.paused || `${summary.failures.length} 项失败`);
       if (summary.scanWarning) stage.notify('dustoff 扫描未完成', `已继续处理已有待办；${summary.scanWarning}`);
       if (summary.review) stage.notify('dustoff 用途待确认', `${summary.review} 条收藏请在作品详情选择用途`);
-      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || (summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
+      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，保存图集 ${summary.galleries}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || (summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
       if (summary.failures.length) process.exitCode = 1;
       else if (summary.paused && summary.paused !== `当天累计已达 ${POLICY.daily} 条`) process.exitCode = 5;
       else if (summary.scanWarning) process.exitCode = 1;

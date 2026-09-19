@@ -18,7 +18,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requestSignal, localPath } from './policy.mjs';
-import { videoOptions, pickGear, isGallery, expiryOf } from './lib.mjs';
+import { galleryImages, videoOptions, pickGear, isGallery, expiryOf } from './lib.mjs';
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const CHROME = process.env.DUST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -157,7 +157,8 @@ function emit(obj, code = 0, done = null) {
     aweme_id: a.aweme_id,
     aweme_type: a.aweme_type ?? null,
     is_gallery: gallery,
-              video_options: gallery ? null : videoOptions(a),
+    images: gallery ? galleryImages(a) : [],
+    video_options: gallery ? null : videoOptions(a),
     desc: a.desc || '',
     author: (a.author && a.author.nickname) || '',
     create_time: a.create_time || null,

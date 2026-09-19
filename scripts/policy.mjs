@@ -101,7 +101,7 @@ export async function writeMedia(stream, path) {
   finally { closeSync(fd); }
 }
 export function mediaDecision(item) {
-  if (item.is_gallery || item.media_type === 'gallery') return 'gallery';
+  if (item.is_gallery || item.media_type === 'gallery') return null;
   const seconds = Number(item.duration_s);
   if (!Number.isFinite(seconds) || seconds <= 0) return 'unknown_duration';
   return seconds > POLICY.seconds ? 'too_long' : null;

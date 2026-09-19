@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MEDIA, SAVED_MEDIA, POLICY, mediaDecision, storage, writeMedia, requestSignal, deadlineMs, PauseError, localPath, atomicWrite } from './policy.mjs';
 import { isExpired } from './lib.mjs';
+import { downloadGallery } from './gallery.mjs';
 import { PURPOSES } from './routing.mjs';
 const UA = 'Mozilla/5.0';
 function validate(file) {
@@ -27,6 +28,7 @@ export function downloadChoices(item, quality) {
   return [{gear:item.gear,urls:item.play_urls||[]},{gear:'play_addr',urls:item.play_urls_fallback||[]}];
 }
 export async function downloadOne(item, { purpose = 'speech' } = {}) {
+  if(item.is_gallery||item.media_type==='gallery')return downloadGallery(item);
   const profile = PURPOSES[purpose];
   if (!profile?.quality) throw new Error('请先确认作品用途');
   if (!/^\d+$/.test(String(item.aweme_id))) throw new Error('作品 ID 不合法');
