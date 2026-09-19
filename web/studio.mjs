@@ -176,7 +176,6 @@ function videoDeleteButton(item) {
     ?button('删除视频','delete-video',`data-id="${item.id}" data-idle ${busy()?'disabled':''}`,'quiet danger'):'';
 }
 async function deleteVideo(id) {
-  if(!window.confirm('将这个本地视频移入废纸篓？\n\n笔记、文字稿和收藏记录会保留，该条目停止后续自动处理，不会自动重新下载。\n可从 macOS 废纸篓找回视频；不会取消抖音收藏。'))return;
   const epoch=dialogEpoch;
   stopVideo();
   try {await api('video-delete',{id,confirm:true});}
