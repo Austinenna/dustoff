@@ -171,6 +171,20 @@ function openDialog(html,drawer=false) {
 const dialogHead=title=>`<header class="dialog-head"><h2 id="dialog-title">${title}</h2>${button('关闭','close-dialog','','quiet')}</header>`;
 function stopVideo(){clearTimeout(videoTimer);const v=dialog.querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load();}}
 function videoMessage(message){const p=dialog.querySelector('#video-message');if(p)p.textContent=message;}
+const videoAudioKey='dustoff.video-audio';
+let videoAudio={volume:0.2,muted:false};
+try {
+  const saved=JSON.parse(localStorage.getItem(videoAudioKey));
+  if(typeof saved?.volume==='number'&&Number.isFinite(saved.volume)&&saved.volume>=0&&saved.volume<=1)videoAudio.volume=saved.volume;
+  if(typeof saved?.muted==='boolean')videoAudio.muted=saved.muted;
+} catch {} // 存储不可用时仍以低音量播放，并在当前页面内记住调整。
+function restoreVideoAudio(video) {
+  video.volume=videoAudio.volume;video.muted=videoAudio.muted;
+  video.addEventListener('volumechange',()=>{
+    videoAudio={volume:video.volume,muted:video.muted};
+    try {localStorage.setItem(videoAudioKey,JSON.stringify(videoAudio));} catch {}
+  });
+}
 async function preparePlayback(id,epoch) {
   if(epoch!==dialogEpoch||!dialog.open)return;
   const v=dialog.querySelector('video');if(!v||v.dataset.preparing==='true')return;
@@ -196,10 +210,14 @@ async function playVideo(id) {
     if(epoch!==dialogEpoch||!dialog.open)return;
     // 即使已有兼容缓存，也优先尝试原片，避免支持原格式的浏览器默认降画质。
     const compatible=false;
-    dialog.innerHTML=dialogHead('视频 · 页内播放')+`<video class="local-video" controls playsinline autoplay preload="metadata" aria-label="${esc(titleOf(i))}" poster="/api/video-poster?id=${id}" data-compatible="${compatible}" src="/api/video?${query({id,...(compatible?{compatible:1}:{})})}"></video><div class="video-details"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)} · ${esc(mediaLabel(i))}</p><p id="video-message" role="status" aria-live="polite">${compatible?'播放兼容副本 · 原视频保留':'正在载入本地视频…'}</p><div class="row">${i.note_path||i.text_path?button('阅读笔记 / 文字稿','read',`data-id="${id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):''}${button('用外部播放器打开 ↗','open',`data-id="${id}" data-kind="video"`,'quiet')}${button('切换兼容播放','prepare-video',`data-id="${id}"`,'quiet')}</div></div>`;
+    dialog.innerHTML=dialogHead('视频 · 页内播放')+`<video class="local-video" controls playsinline preload="metadata" aria-label="${esc(titleOf(i))}" poster="/api/video-poster?id=${id}" data-compatible="${compatible}"></video><div class="video-details"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)} · ${esc(mediaLabel(i))}</p><p id="video-message" role="status" aria-live="polite">${compatible?'播放兼容副本 · 原视频保留':'正在载入本地视频…'}</p><div class="row">${i.note_path||i.text_path?button('阅读笔记 / 文字稿','read',`data-id="${id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):''}${button('用外部播放器打开 ↗','open',`data-id="${id}" data-kind="video"`,'quiet')}${button('切换兼容播放','prepare-video',`data-id="${id}"`,'quiet')}</div></div>`;
     const v=dialog.querySelector('video');
     v.addEventListener('loadeddata',()=>{if(epoch===dialogEpoch)videoMessage(v.dataset.compatible==='true'?'播放兼容副本 · 原视频保留':'本地原视频 · 无需上传');});
     v.addEventListener('error',()=>{if(epoch!==dialogEpoch||!dialog.open)return;if(v.dataset.compatible==='true')videoMessage('播放失败，可尝试外部播放器，或重新打开此视频。');else void preparePlayback(id,epoch);});
+    // 在设置视频源和开始播放之前恢复音量，避免开头瞬间以满音量出声。
+    restoreVideoAudio(v);
+    v.src='/api/video?'+query({id,...(compatible?{compatible:1}:{})});
+    void v.play().catch(()=>{});
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('视频暂不可播放')+empty(e.message);}
 }
 async function detail(id) {
