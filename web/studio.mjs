@@ -123,13 +123,15 @@ dialog.addEventListener('keydown',event=>{
 function resultsPage() {
   const s=state.results;
   return `${head('笔记','<span id="result-count">读取中</span>',button('笔记目录 ↗','open','data-kind="notes-folder"','quiet'))}<section class="reading" data-reader="${s.reader}">
-    <aside class="reading-list" aria-label="结果列表">${searchField(s.q,'搜索标题、作者','results-search')}${filterButtons([['all','全部'],['notes','笔记'],['text','仅文字稿']],s.status,'result-filter')}<div id="result-list">${empty('正在读取…')}</div></aside>
+    <aside class="reading-list" aria-label="结果列表">${searchField(s.q,'搜索标题、作者','results-search')}${filterButtons([['all','全部'],['notes','笔记'],['text','仅文字稿']],s.status,'result-filter')}<div id="result-list">${empty('正在读取…')}</div><div id="result-pagination"></div></aside>
     <section id="reader" class="reader" aria-label="阅读正文">${empty('选择一份内容开始阅读')}</section></section>`;
 }
 function resultRows() {
   const s=state.results,data=s.data;
   $('#result-count').textContent=`${data.total} 份结果`;
-  $('#result-list').innerHTML=data.items.length?`${data.items.map(i=>`<button type="button" class="note-item ${i.id===s.id?'active':''}" data-action="select-result" data-id="${i.id}" aria-pressed="${i.id===s.id}"><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small><span class="between"><small>${esc(fmt(i.extracted_at||i.transcribed_at))}</small>${tag(i.note_path?'笔记':'文字稿')}</span></button>`).join('')}${pagination(data,'results')}`:empty(s.q?'没有找到匹配的结果':'整理完成的笔记和文字稿会显示在这里');
+  $('#result-list').innerHTML=data.items.length?data.items.map(i=>`<button type="button" class="note-item ${i.id===s.id?'active':''}" data-action="select-result" data-id="${i.id}" aria-pressed="${i.id===s.id}"><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small><span class="between"><small>${esc(fmt(i.extracted_at||i.transcribed_at))}</small>${tag(i.note_path?'笔记':'文字稿')}</span></button>`).join(''):empty(s.q?'没有找到匹配的结果':'整理完成的笔记和文字稿会显示在这里');
+  $('#result-list').scrollTop=0;
+  $('#result-pagination').innerHTML=data.items.length?pagination(data,'results'):'';
 }
 async function loadResults() {
   const epoch=++listEpoch,page=pageEpoch,s=state.results;
@@ -141,13 +143,15 @@ async function loadResults() {
 }
 async function loadDocument() {
   const epoch=++docEpoch,page=pageEpoch,s=state.results,id=s.id,kind=s.kind;
+  // 桌面固定阅读外框；窄屏在加载前定位，避免异步返回再拖动页面。
+  if(s.reader&&matchMedia('(max-width:760px)').matches)$('#reader').scrollIntoView({block:'start',behavior:'instant'});
   if(!id){$('#reader').innerHTML=empty('还没有可阅读的内容');return;}
   const i=s.data.items.find(i=>i.id===id);
   const tools=`<div class="reader-tools"><div class="row">${button('‹ 返回列表','reader-back','','quiet mobile-back')}${filterButtons([...(i.note_path?[['note','知识笔记']]:[]),...(i.text_path?[['text','原始转写']]:[])],kind,'document-kind')}</div><div class="row">${button(kind==='note'?'Obsidian ↗':'打开文字稿 ↗','open',`data-kind="${kind}" data-id="${id}"`,'quiet')}${button('原视频 ↗','open',`data-kind="source" data-id="${id}"`,'quiet')}</div></div>`;
   $('#reader').innerHTML=tools+empty('正在读取正文…');
   try {
     const doc=await api('document?'+query({id,kind}));if(epoch!==docEpoch||page!==pageEpoch)return;
-    $('#reader').innerHTML=tools+`<article class="article"><div class="kicker">${kind==='note'?'知识笔记':'原始文字稿'}</div><h2>${esc(titleOf(doc.item))}</h2><div class="byline">${esc(doc.item.author||'未知作者')} · ${duration(doc.item.duration_s)} · ${esc(fmt(kind==='note'?doc.item.extracted_at:doc.item.transcribed_at))}</div><div class="prose">${kind==='note'?renderMarkdown(doc.content,{headingOffset:1}):`<p class="transcript">${esc(doc.content)}</p>`}</div></article><footer class="reader-footer"><span>${esc(doc.item.category||'未分类')}</span>${button('在文件夹中显示','open',`data-kind="folder" data-file-kind="${kind}" data-id="${id}"`,'quiet')}</footer>`;
+    $('#reader').innerHTML=tools+`<div class="reader-content" tabindex="0" role="region" aria-label="正文阅读区"><article class="article"><div class="kicker">${kind==='note'?'知识笔记':'原始文字稿'}</div><h2>${esc(titleOf(doc.item))}</h2><div class="byline">${esc(doc.item.author||'未知作者')} · ${duration(doc.item.duration_s)} · ${esc(fmt(kind==='note'?doc.item.extracted_at:doc.item.transcribed_at))}</div><div class="prose">${kind==='note'?renderMarkdown(doc.content,{headingOffset:1}):`<p class="transcript">${esc(doc.content)}</p>`}</div></article><footer class="reader-footer"><span>${esc(doc.item.category||'未分类')}</span>${button('在文件夹中显示','open',`data-kind="folder" data-file-kind="${kind}" data-id="${id}"`,'quiet')}</footer></div>`;
   }catch(e){if(epoch===docEpoch&&page===pageEpoch)$('#reader').innerHTML=tools+empty(e.message);}
 }
 function collectionPage() {
@@ -284,6 +288,7 @@ async function loadSession() {
 async function go(route) {
   clearTimeout(searchTimer);if(route!==state.route){window.scrollTo({top:0,behavior:'instant'});$('.workspace').scrollTo({top:0,left:0,behavior:'instant'});}const epoch=++pageEpoch;++listEpoch;++docEpoch;++logEpoch;
   if(dialog.open)dialog.close();state.route=routes[route]?(route==='results'?'notes':route):'overview';route=state.route;
+  root.dataset.page=route;
   document.title=`dustoff · ${routes[route]}`;main.innerHTML=empty('正在读取…');syncChrome();
   try {
     const [o,extra]=await Promise.all([api('overview'),SETTINGS[route]?api('settings'):route==='run'?api('queue'):route==='history'?api('runs'):null]);
@@ -336,9 +341,17 @@ root.addEventListener('click',async event=>{
     else if(a==='retry')await queueMutation('retry',{id});
     else if(a==='review-items'||a==='failed-items'){Object.assign(state.collection,{status:a==='review-items'?'review':'failed',q:'',page:1});navigate('collection');}
     else if(a==='read'){Object.assign(state.results,{id,q:id,page:1,status:b.dataset.kind==='note'?'notes':'all',kind:b.dataset.kind,reader:true});closeDialog();navigate('notes');}
-    else if(a==='select-result'){state.results.id=id;state.results.kind=state.results.data.items.find(i=>i.id===id).note_path?'note':'text';state.results.reader=true;$('.reading').dataset.reader='true';resultRows();await loadDocument();$('#reader')?.scrollIntoView({block:'start',behavior:'instant'});}
+    else if(a==='select-result'){
+      const changed=state.results.id!==id;state.results.reader=true;$('.reading').dataset.reader='true';
+      if(changed){
+        state.results.id=id;state.results.kind=state.results.data.items.find(i=>i.id===id).note_path?'note':'text';
+        // 保留目录节点、键盘焦点和滚动位置，只更新选中状态。
+        root.querySelectorAll('.note-item').forEach(item=>{const active=item.dataset.id===id;item.classList.toggle('active',active);item.setAttribute('aria-pressed',String(active));});
+        await loadDocument();
+      }else if(matchMedia('(max-width:760px)').matches)$('#reader').scrollIntoView({block:'start',behavior:'instant'});
+    }
     else if(a==='reader-back'){state.results.reader=false;$('.reading').dataset.reader='false';$('.reading').scrollIntoView({block:'start'});}
-    else if(a==='document-kind'){state.results.kind=b.dataset.filter;await loadDocument();}
+    else if(a==='document-kind'&&state.results.kind!==b.dataset.filter){state.results.kind=b.dataset.filter;await loadDocument();}
     else if(a==='result-filter'||a==='collection-filter'){
       const kind=a==='result-filter'?'results':'collection';Object.assign(state[kind],{status:b.dataset.filter,page:1});
       if(kind==='results'){main.innerHTML=resultsPage();await loadResults();}else{main.innerHTML=collectionPage();await loadCollection();}

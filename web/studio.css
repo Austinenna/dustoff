@@ -28,7 +28,19 @@ dialog{background:var(--bg);color:var(--ink);border:1px solid var(--line);box-sh
   #dustoff-studio{height:100dvh;min-height:0;overflow:hidden}
   .sidebar{position:static;min-height:0;overflow-y:auto;overscroll-behavior-y:contain}
   .workspace{height:100%;min-height:0;overflow-y:auto;overscroll-behavior-y:contain;scrollbar-gutter:stable}
+  /* 笔记页由两栏分别滚动，外框、搜索、翻页和阅读工具保持原位。 */
+  #dustoff-studio[data-page=notes] .workspace{overflow:hidden}
+  #dustoff-studio[data-page=notes] #main{height:100%;display:flex;flex-direction:column}
+  #dustoff-studio[data-page=notes] .pagehead{flex-shrink:0}
+  .reading{flex:1;min-height:0;grid-template-rows:minmax(0,1fr);align-items:stretch;overflow:hidden}
+  .reading-list{position:static;display:flex;flex-direction:column;min-height:0;max-height:none;overflow:hidden}
+  .reading-list>.search,.reading-list>.filters,#result-pagination{flex-shrink:0}
+  #result-list{flex:1;min-height:0;overflow-y:auto;overscroll-behavior-y:none;scrollbar-gutter:stable;padding:3px}
+  .reader{display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  .reader-tools{flex-shrink:0}
+  .reader-content{flex:1;min-height:0;overflow-y:auto;overscroll-behavior-y:none;scrollbar-gutter:stable}
 }
+.reader-content:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 
 .table-wrap{position:relative}.timeline{margin:24px 0;padding-left:4px}.timeline>div{display:grid;grid-template-columns:65px minmax(0,1fr);gap:14px;position:relative;border-left:1px solid var(--line);padding:0 0 19px 17px;font-size:12px;overflow-wrap:anywhere}.timeline>div:before{content:"";position:absolute;left:-4px;top:7px;width:7px;height:7px;background:var(--accent);border-radius:50%}.timeline time{color:var(--muted);font-size:11px}
 
