@@ -36,7 +36,8 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     } else {
       if(kind==='retry'){const i=store.item(body.id);if(i.status!=='failed')throw new HttpError(400,'只能重试已失败作品');}
       if(kind==='purpose'){if(!store.item(body.id).can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['video','speech','visual','both','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
-      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
+      if(kind==='video-delete'){if(store.item(body.id).media_type==='gallery')throw new HttpError(400,'此操作只支持视频');}
+      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose','video-delete'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
     }
     mkdirSync(actionsDir,{recursive:true,mode:0o700});
     const logfile=join(actionsDir,'latest-action.log');let fd=openSync(logfile,'w',0o600),written=0;
@@ -47,6 +48,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     const operation={kind,pid:child.pid||null,startedAt:Date.now(),child};active=operation;
     log(`控制台启动 ${kind}\n`);
     child.on('message',m=>{
+      if(active===operation&&m?.type==='action-error'){operation.error=String(m.message||'操作失败').slice(0,500);return;}
       if(active!==operation||m?.type!=='session'||operation.cancelling&&m.phase!=='cancelled'&&m.phase!=='error')return;
       const {phase,message,deadline}=m;
       if(!['starting','checking','checked','saving','success','timeout','window','cancelled','error'].includes(phase))return;
@@ -108,6 +110,13 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       } else switch(path){
         case '/api/settings':result=store.saveSettings(data);break;
         case '/api/video-prepare':result=media.prepare(data.id);break;
+        case '/api/video-delete': {
+          if(data.confirm!==true)throw new HttpError(400,'请先确认将视频移入废纸篓');
+          start('video-delete',data);const operation=active;
+          const code=await new Promise(resolve=>operation.child.once('close',resolve));
+          if(code!==0)throw new HttpError(code===3?409:400,operation.error||'删除未完成，请在运行记录的控制台操作日志中查看原因');
+          result={deleted:true};break;
+        }
         case '/api/schedule':
           if(data.action==='save'){if(typeof data.time!=='string'||typeof data.autoStartAfterReboot!=='boolean'||typeof data.intervalHours!=='number')throw new HttpError(400,'定时参数无效');scheduler.update({time:data.time,intervalHours:data.intervalHours,autoStartAfterReboot:data.autoStartAfterReboot});}
           else if(data.action==='start')scheduler.start();else if(data.action==='stop')scheduler.stop();else throw new HttpError(400,'定时操作无效');

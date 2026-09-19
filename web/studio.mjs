@@ -171,6 +171,23 @@ function openDialog(html,drawer=false) {
 const dialogHead=title=>`<header class="dialog-head"><h2 id="dialog-title">${title}</h2>${button('关闭','close-dialog','','quiet')}</header>`;
 function stopVideo(){clearTimeout(videoTimer);const v=dialog.querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load();}}
 function videoMessage(message){const p=dialog.querySelector('#video-message');if(p)p.textContent=message;}
+function videoDeleteButton(item) {
+  return item.media_type!=='gallery'&&item.media_path&&!item.media_deleted
+    ?button('删除视频','delete-video',`data-id="${item.id}" data-idle ${busy()?'disabled':''}`,'quiet danger'):'';
+}
+async function deleteVideo(id) {
+  if(!window.confirm('将这个本地视频移入废纸篓？\n\n笔记、文字稿和收藏记录会保留，该条目停止后续自动处理，不会自动重新下载。\n可从 macOS 废纸篓找回视频；不会取消抖音收藏。'))return;
+  const epoch=dialogEpoch;
+  stopVideo();
+  try {await api('video-delete',{id,confirm:true});}
+  catch(error){if(epoch===dialogEpoch&&dialog.open)await playVideo(id);throw error;}
+  if(epoch===dialogEpoch&&dialog.open)closeDialog();
+  await refreshOverview();
+  if(state.route==='videos')await loadVideos();
+  else if(state.route==='collection')await loadCollection();
+  else if(state.route==='notes')await loadResults();
+  notice('视频已移入废纸篓，笔记、文字稿和收藏记录已保留。');
+}
 const videoAudioKey='dustoff.video-audio';
 let videoAudio={volume:0.2,muted:false};
 try {
@@ -210,7 +227,7 @@ async function playVideo(id) {
     if(epoch!==dialogEpoch||!dialog.open)return;
     // 即使已有兼容缓存，也优先尝试原片，避免支持原格式的浏览器默认降画质。
     const compatible=false;
-    dialog.innerHTML=dialogHead('视频 · 页内播放')+`<video class="local-video" controls playsinline preload="metadata" aria-label="${esc(titleOf(i))}" poster="/api/video-poster?id=${id}" data-compatible="${compatible}"></video><div class="video-details"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)} · ${esc(mediaLabel(i))}</p><p id="video-message" role="status" aria-live="polite">${compatible?'播放兼容副本 · 原视频保留':'正在载入本地视频…'}</p><div class="row">${i.note_path||i.text_path?button('阅读笔记 / 文字稿','read',`data-id="${id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):''}${button('用外部播放器打开 ↗','open',`data-id="${id}" data-kind="video"`,'quiet')}${button('切换兼容播放','prepare-video',`data-id="${id}"`,'quiet')}</div></div>`;
+    dialog.innerHTML=dialogHead('视频 · 页内播放')+`<video class="local-video" controls playsinline preload="metadata" aria-label="${esc(titleOf(i))}" poster="/api/video-poster?id=${id}" data-compatible="${compatible}"></video><div class="video-details"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)} · ${esc(mediaLabel(i))}</p><p id="video-message" role="status" aria-live="polite">${compatible?'播放兼容副本 · 原视频保留':'正在载入本地视频…'}</p><div class="row">${i.note_path||i.text_path?button('阅读笔记 / 文字稿','read',`data-id="${id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):''}${button('用外部播放器打开 ↗','open',`data-id="${id}" data-kind="video"`,'quiet')}${button('切换兼容播放','prepare-video',`data-id="${id}"`,'quiet')}${videoDeleteButton(i)}</div></div>`;
     const v=dialog.querySelector('video');
     v.addEventListener('loadeddata',()=>{if(epoch===dialogEpoch)videoMessage(v.dataset.compatible==='true'?'播放兼容副本 · 原视频保留':'本地原视频 · 无需上传');});
     v.addEventListener('error',()=>{if(epoch!==dialogEpoch||!dialog.open)return;if(v.dataset.compatible==='true')videoMessage('播放失败，可尝试外部播放器，或重新打开此视频。');else void preparePlayback(id,epoch);});
@@ -225,7 +242,7 @@ async function detail(id) {
   openDialog(dialogHead('收藏详情')+empty('正在读取…'),true);
   try {
     const i=await api('item?'+query({id}));if(epoch!==dialogEpoch||!dialog.open)return;
-    dialog.innerHTML=dialogHead('收藏详情')+`<div class="drawer-body"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</p><div class="row">${tag(STATUSES[i.status]||i.status)}${tag(mediaLabel(i))}</div><section><h3>留下的内容</h3><div class="file-actions">${i.note_path?button('阅读知识笔记','read',`data-id="${id}" data-kind="note"`):''}${i.text_path?button('阅读文字稿','read',`data-id="${id}" data-kind="text"`):''}${i.media_path&&!i.media_deleted?button(i.media_type==='gallery'?'查看图集':'播放视频',i.media_type==='gallery'?'view-gallery':'play-video',`data-id="${id}"`):''}${button('查看原作品 ↗','open',`data-id="${id}" data-kind="source"`,'quiet')}</div>${!i.note_path&&!i.text_path?`<p class="muted">${i.media_type==='gallery'?'图集仅保存图片，暂不整理笔记。':'暂未生成文字内容。'}</p>`:''}</section>${i.media_type==='gallery'?'<section><h3>保存图集</h3><p class="muted">按原顺序保存整组图片，每组计一条每日额度。</p></section>':`<section><h3>这条收藏用来做什么</h3><p class="muted">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form method="post" id="purpose-form"><input type="hidden" name="id" value="${id}"><div class="purpose-options">${Object.entries(PURPOSES).map(([key,label])=>`<label><input type="radio" name="purpose" value="${key}" ${i.processing_mode===key?'checked':''} ${!i.can_change_purpose?'disabled':''} required><span>${label}<small>${({video:'保留视频文件',speech:'生成文字稿和知识笔记',visual:'保留素材，等待画面文字提取',both:'保留视频，并整理笔记',review:'暂缓处理，等你确认'})[key]}</small></span></label>`).join('')}</div>${i.can_change_purpose?`<p class="muted">保存后更新用途与待办状态，下一轮运行时处理；已有文件保留。</p><button class="button primary" data-idle ${busy()?'disabled':''}>保存用途</button>`:'<p class="muted">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}${i.last_error?`<section class="error-detail"><h3>上次未完成</h3><p>${esc(i.last_error)}</p>${i.status==='failed'?button('恢复为待办','retry',`data-id="${id}" data-idle ${busy()?'disabled':''}`):''}</section>`:''}<details><summary>作品信息</summary><dl><dt>作品 ID</dt><dd>${id}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd></dl></details></div>`;
+    dialog.innerHTML=dialogHead('收藏详情')+`<div class="drawer-body"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</p><div class="row">${tag(STATUSES[i.status]||i.status)}${tag(mediaLabel(i))}</div><section><h3>留下的内容</h3><div class="file-actions">${i.note_path?button('阅读知识笔记','read',`data-id="${id}" data-kind="note"`):''}${i.text_path?button('阅读文字稿','read',`data-id="${id}" data-kind="text"`):''}${i.media_path&&!i.media_deleted?button(i.media_type==='gallery'?'查看图集':'播放视频',i.media_type==='gallery'?'view-gallery':'play-video',`data-id="${id}"`):''}${button('查看原作品 ↗','open',`data-id="${id}" data-kind="source"`,'quiet')}${videoDeleteButton(i)}</div>${!i.note_path&&!i.text_path?`<p class="muted">${i.media_type==='gallery'?'图集仅保存图片，暂不整理笔记。':'暂未生成文字内容。'}</p>`:''}</section>${i.media_type==='gallery'?'<section><h3>保存图集</h3><p class="muted">按原顺序保存整组图片，每组计一条每日额度。</p></section>':`<section><h3>这条收藏用来做什么</h3><p class="muted">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form method="post" id="purpose-form"><input type="hidden" name="id" value="${id}"><div class="purpose-options">${Object.entries(PURPOSES).map(([key,label])=>`<label><input type="radio" name="purpose" value="${key}" ${i.processing_mode===key?'checked':''} ${!i.can_change_purpose?'disabled':''} required><span>${label}<small>${({video:'保留视频文件',speech:'生成文字稿和知识笔记',visual:'保留素材，等待画面文字提取',both:'保留视频，并整理笔记',review:'暂缓处理，等你确认'})[key]}</small></span></label>`).join('')}</div>${i.can_change_purpose?`<p class="muted">保存后更新用途与待办状态，下一轮运行时处理；已有文件保留。</p><button class="button primary" data-idle ${busy()?'disabled':''}>保存用途</button>`:'<p class="muted">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}${i.last_error?`<section class="error-detail"><h3>上次未完成</h3><p>${esc(i.last_error)}</p>${i.status==='failed'?button('恢复为待办','retry',`data-id="${id}" data-idle ${busy()?'disabled':''}`):''}</section>`:''}<details><summary>作品信息</summary><dl><dt>作品 ID</dt><dd>${id}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd></dl></details></div>`;
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('收藏详情')+empty(e.message);}
 }
 function executionPanel() {
@@ -350,6 +367,7 @@ root.addEventListener('click',async event=>{
     else if(a==='gallery-step'){galleryIndex+=Number(b.dataset.step);renderGallery();}
     else if(a==='gallery-select'){galleryIndex=Number(b.dataset.index);renderGallery();}
     else if(a==='play-video')await playVideo(id);
+    else if(a==='delete-video')await deleteVideo(id);
     else if(a==='prepare-video')await preparePlayback(id,dialogEpoch);
     else if(a==='manual-run')manualRun();
     else if(a==='run-page')navigate('run');

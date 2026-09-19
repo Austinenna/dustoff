@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, renameSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createConsole } from '../console.mjs';
 import { createStore } from '../scripts/console-store.mjs';
 import { renderMarkdown } from '../web/markdown.mjs';
+import { deleteLocalVideo } from '../scripts/delete-video.mjs';
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
 function fixture(){
   const home=realpathSync(mkdtempSync(join(tmpdir(),'dustoff-console-')));
@@ -92,6 +93,68 @@ test('页内视频通过作品ID受控读取，支持HEAD和分段，清理标�
 test('控制台操作互斥且能停止自己启动的进程组',async()=>{const f=fixture();const app=await serve({home:f.home,spawnProcess:(node,args,opts)=>spawn(node,['-e','console.log("fixture running");setInterval(()=>{},1000)'],opts)});try{assert.equal((await app.post('run',{limit:1})).status,200);assert.equal((await app.post('run',{limit:1})).status,409);assert.equal((await app.post('login',{})).status,409);assert.equal((await app.post('stop',{})).status,200);for(let n=0;n<50&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));assert.equal(app.execution().running,false);assert.ok(app.execution().lastAction.finishedAt);}finally{if(app.execution().running)await app.post('stop',{});await app.close();f.cleanup();}});
 
 test('真实 retry 子进程只恢复失败待办，不调用模型也不占额度',async()=>{const f=fixture();const app=await serve({home:f.home});try{assert.equal((await app.post('retry',{id:'1'})).status,400);assert.equal((await app.post('retry',{id:'18'})).status,200);for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));assert.equal(app.execution().lastAction.exitCode,0);assert.equal(app.store.item('18').status,'transcribed');assert.equal(app.store.overview().usedToday,0);assert.equal(app.store.overview().pending,1);}finally{await app.close();f.cleanup();}});
+
+test('删除只移动对应视频，保留文字与恢复记录，停止自动处理并支持重复请求',async()=>{
+  const f=fixture(),store=createStore(f.home),moved=[];
+  try {
+    const db=new DatabaseSync(join(f.home,'index.sqlite'));
+    for(const id of ['1','18']){const file=join(f.home,id+'.mp4');writeFileSync(file,'video '+id);db.prepare("UPDATE items SET media_path=?,media_deleted=0,processing_mode='both',status='downloaded',needs_ocr=1 WHERE id=?").run(file,id);}
+    db.close();
+    const trashFile=async file=>{const to=file+'.trashed';renameSync(file,to);moved.push(to);};
+    for(const id of ['1','18'])assert.equal((await deleteLocalVideo({id,home:f.home,trashFile})).deleted,true);
+    assert.equal(store.overview().videos,0);assert.equal(store.overview().notes,17);assert.equal(store.pendingItems().items.length,0);
+    assert.equal(store.item('1').status,'extracted');assert.equal(store.item('18').status,'skipped');
+    assert.equal(store.item('18').skip_reason,'video_deleted');assert.equal(store.item('18').needs_ocr,0);
+    assert.equal(store.item('1').media_deleted,1);assert.equal(store.overview().usedToday,0);
+    assert.equal(readFileSync(moved[0],'utf8'),'video 1');assert.equal(store.document('1','text').content,'测试原稿。');assert.ok(store.document('1','note').content.includes('核心观点'));
+    assert.equal((await deleteLocalVideo({id:'1',home:f.home,trashFile})).alreadyDeleted,true);assert.equal(moved.length,2);
+    const records=join(f.home,'console','deleted-videos');assert.equal(readdirSync(records).length,2);
+    const record=JSON.parse(readFileSync(join(records,readdirSync(records).find(n=>n.startsWith('1-'))),'utf8'));
+    assert.equal(record.state,'trashed');assert.equal(record.item.status,'downloaded');assert.equal(record.item.media_deleted,0);
+    assert.throws(()=>store.fileFor('1','video'),/视频已清理/);
+  } finally {f.cleanup();}
+});
+
+test('移入废纸篓失败不改账本；拒绝图集、符号链接和被其他收藏引用的视频',async()=>{
+  const f=fixture(),store=createStore(f.home),video=join(f.home,'video.mp4');let calls=0;
+  const trashFile=async()=>{calls++;throw new Error('trash unavailable');};
+  try {
+    writeFileSync(video,'keep me');const db=new DatabaseSync(join(f.home,'index.sqlite'));
+    db.prepare("UPDATE items SET media_path=?,status='saved' WHERE id='1'").run(video);
+    await assert.rejects(deleteLocalVideo({id:'1',home:f.home,trashFile}),/trash unavailable/);
+    assert.equal(store.item('1').media_deleted,0);assert.equal(store.item('1').status,'saved');assert.equal(readFileSync(video,'utf8'),'keep me');
+    db.prepare("UPDATE items SET media_path=? WHERE id='2'").run(video);
+    await assert.rejects(deleteLocalVideo({id:'1',home:f.home,trashFile}),/其他收藏/);
+    db.exec("UPDATE items SET media_type='gallery' WHERE id='1'");
+    await assert.rejects(deleteLocalVideo({id:'1',home:f.home,trashFile}),/只支持视频/);
+    const link=join(f.home,'link.mp4');symlinkSync(video,link);db.prepare("UPDATE items SET media_type='video',media_path=? WHERE id='1'").run(link);db.close();
+    await assert.rejects(deleteLocalVideo({id:'1',home:f.home,trashFile}),/普通文件/);
+    assert.equal(calls,1);assert.equal(readFileSync(video,'utf8'),'keep me');
+  } finally {f.cleanup();}
+});
+
+test('删除接口验证确认与来源、等待子进程结果，运行期间拒绝删除',async()=>{
+  const f=fixture(),video=join(f.home,'18.mp4');let calls=0;
+  writeFileSync(video,'fixture video');const db=new DatabaseSync(join(f.home,'index.sqlite'));
+  db.prepare("UPDATE items SET media_path=?,media_deleted=0,status='saved',processing_mode='video' WHERE id='18'").run(video);db.close();
+  const app=await serve({home:f.home,spawnProcess:(node,args,opts)=>{
+    calls++;assert.deepEqual(args.slice(1),['video-delete','18']);
+    const script=`import {renameSync} from 'node:fs';import {deleteLocalVideo} from ${JSON.stringify(new URL('../scripts/delete-video.mjs',import.meta.url).href)};await deleteLocalVideo({id:'18',home:process.env.DUST_HOME,trashFile:async p=>renameSync(p,p+'.trashed')});`;
+    return spawn(node,['--input-type=module','-e',script],opts);
+  }});
+  try {
+    assert.equal((await app.post('video-delete',{id:'18'})).status,400);
+    assert.equal((await app.post('video-delete',{id:'18',confirm:true},{'X-Dustoff-Token':'wrong'})).status,403);
+    assert.equal((await app.post('video-delete',{id:'18',confirm:true},{Origin:'https://other.invalid'})).status,403);
+    assert.equal((await app.post('video-delete',{id:'../18',confirm:true})).status,400);
+    writeFileSync(join(f.home,'.lock.pipeline'),String(process.pid));
+    assert.equal((await app.post('video-delete',{id:'18',confirm:true})).status,409);rmSync(join(f.home,'.lock.pipeline'));
+    assert.equal(calls,0);
+    const response=await app.post('video-delete',{id:'18',confirm:true});assert.equal(response.status,200);assert.equal((await response.json()).deleted,true);
+    assert.equal(calls,1);assert.equal(app.execution().running,false);assert.equal(app.store.item('18').media_deleted,1);
+    assert.equal((await fetch(app.url+'/api/video?id=18')).status,404);assert.equal(readFileSync(video+'.trashed','utf8'),'fixture video');
+  } finally {await app.close();f.cleanup();}
+});
 
 test('笔记阅读渲染支持常用结构且原始 HTML、脚本链接和图片不会执行',()=>{const html=renderMarkdown('---\nsecret: metadata\n---\n# 标题\n\n**要点**\n\n- 项目\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n<script>alert(1)</script>\n\n[x](javascript:alert)\n\n![图](https://track.invalid/i.png)\n\n```js\n<img onerror=alert(1)>\n```');assert.ok(html.includes('<h1'));assert.ok(html.includes('<strong>要点</strong>'));assert.ok(html.includes('<table>'));assert.ok(!html.includes('<script>'));assert.ok(!html.includes('href="javascript:'));assert.ok(!html.includes('<img'));assert.ok(!html.includes('metadata'));assert.ok(renderMarkdown('# 段落标题',{headingOffset:1}).startsWith('<h2'));});
 

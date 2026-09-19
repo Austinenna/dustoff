@@ -104,3 +104,5 @@ dialog{background:var(--bg);color:var(--ink);border:1px solid var(--line);box-sh
 }
 
 @media(max-width:600px){.overview-metrics{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:20px}.overview-metrics>a:nth-child(3){border-left:0;padding-left:0}}
+
+.button.danger{color:var(--red)}.button.danger:hover:not(:disabled){background:#faebe7;border-color:#e5b9ae}
