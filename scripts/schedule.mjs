@@ -164,7 +164,7 @@ function main(args) {
   const scheduler = createScheduler();
   const state = action === 'interval' ? scheduler.update({intervalHours:Number(value)}) : action === 'time' ? scheduler.setTime(value) : action === 'start' ? scheduler.start(value) : scheduler[action]();
   console.log(JSON.stringify(state,null,2));
-  console.log(`起始 ${state.time}，每 ${state.intervalHours} 小时（${state.timezone}）：${state.loaded ? state.running ? '正在执行' : '已开启，等待触发' : '已关闭'}；${state.autoStartAfterReboot ? '登录后自动启用' : '重启/注销后需手动开启'}。`);
+  console.log(`起始 ${state.time}，每 ${state.intervalHours} 小时（${state.timezone}）：${state.loaded ? state.running ? '正在执行' : '已开启，等待触发' : '已关闭'}；${state.autoStartAfterReboot ? '登录后自动启用' : '重启/注销后打开控制台恢复，也可手动开启'}。`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try { main(process.argv.slice(2)); } catch (error) { console.error(error.message); process.exitCode = 1; }

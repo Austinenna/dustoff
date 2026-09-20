@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, rmSy
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync, spawn } from 'node:child_process';
+import { spawnSync, spawn, execFile } from 'node:child_process';
 import { request } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createConsole } from '../console.mjs';
@@ -40,7 +40,48 @@ test('笔记、视频、图集按处理类型独立展示；旧文字产物不�
     assert.equal(o.recentVideos.length,2);assert.equal(store.listItems({results:'1',q:'1'}).items.some(i=>i.id==='1'),false);
   }finally{f.cleanup();}
 });
-async function serve(options){const app=createConsole({...options,scheduler:fakeScheduler()});const url=await app.listen(0);const html=await (await fetch(url)).text();const token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];return {...app,url,token,post:(path,data,headers={})=>fetch(url+'/api/'+path,{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token,...headers},body:JSON.stringify(data)}),close:()=>new Promise(resolve=>app.server.close(resolve))};}
+async function serve(options){const app=createConsole({...options,scheduler:options.scheduler||fakeScheduler()});const url=await app.listen(0);const html=await (await fetch(url)).text();const token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];return {...app,url,token,post:(path,data,headers={})=>fetch(url+'/api/'+path,{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token,...headers},body:JSON.stringify(data)}),close:()=>new Promise(resolve=>app.server.close(resolve))};}
+
+for(const loaded of [false,true])test(`后台启动${loaded?'沿用已开启定时':'恢复已关闭定时'}，刷新和重复启动器不触碰开关`,async()=>{
+  const f=fixture(),scheduler=fakeScheduler(),calls={status:0,start:0,stop:0};
+  if(loaded)scheduler.start();
+  for(const name of Object.keys(calls)){const original=scheduler[name];scheduler[name]=(...args)=>{calls[name]++;return original(...args);};}
+  const app=await serve({home:f.home,scheduler});
+  const reopen=()=>new Promise((resolve,reject)=>execFile(process.execPath,[join(root,'scripts/open-console.mjs'),'--no-open'],{env:{...process.env,DUST_HOME:f.home,DUST_CONSOLE_PORT:new URL(app.url).port},timeout:15000},(error,stdout)=>error?reject(error):resolve(stdout)));
+  try{
+    assert.deepEqual(calls,{status:1,start:loaded?0:1,stop:0});
+    const before={...calls};
+    for(let n=0;n<3;n++){
+      assert.equal((await fetch(app.url)).status,200);
+      assert.equal((await(await fetch(app.url+'/api/health')).json()).pid,process.pid);
+      assert.match(await reopen(),/控制台已就绪/);
+    }
+    assert.deepEqual(calls,before);
+    // 页面初始化和刷新还会读取 overview；这些既有状态读取只能查询，不能启停。
+    for(let n=0;n<3;n++)assert.equal((await(await fetch(app.url+'/api/overview')).json()).scheduler.loaded,true);
+    assert.deepEqual(calls,{...before,status:before.status+3});
+    assert.equal((await app.post('schedule',{action:'stop'})).status,200);
+    const stopped={...calls};
+    await reopen();await fetch(app.url);
+    assert.deepEqual(calls,stopped);
+    assert.equal((await(await fetch(app.url+'/api/overview')).json()).scheduler.loaded,false);
+  }finally{await app.close();f.cleanup();}
+});
+
+test('自动开启定时失败时控制台可用、展示原因，并允许手动重试',async t=>{
+  const f=fixture(),scheduler=fakeScheduler(),start=scheduler.start;let attempts=0;
+  scheduler.start=()=>{if(++attempts===1)throw new Error('测试加载失败');return start();};
+  const logged=t.mock.method(console,'error',()=>{});
+  const app=await serve({home:f.home,scheduler});
+  try{
+    assert.equal(logged.mock.callCount(),1);
+    const state=(await(await fetch(app.url+'/api/overview')).json()).scheduler;
+    assert.equal(state.loaded,false);assert.equal(state.error,null);assert.match(state.warning,/测试加载失败/);
+    const response=await app.post('schedule',{action:'start'});
+    assert.equal(response.status,200);const retried=await response.json();
+    assert.equal(retried.loaded,true);assert.equal(retried.warning,null);assert.equal(attempts,2);
+  }finally{await app.close();f.cleanup();}
+});
 
 test('紧凑前端默认入口及依赖均可加载，旧入口不参与运行',async()=>{
   const f=fixture(),app=await serve({home:f.home});

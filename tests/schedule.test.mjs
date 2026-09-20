@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createScheduler, parseTime } from '../scripts/schedule.mjs';
+import { createConsole } from '../console.mjs';
 
 test('时刻严格校验，错误输入不得被截断成有效时间', () => {
   assert.deepEqual(parseTime('00:00'), { Hour:0, Minute:0 });
@@ -93,4 +94,26 @@ test('隔离 launchd：登录自动启用、时间同步、关闭清理以及写
     assert.throws(()=>blocked.update({time:first,autoStartAfterReboot:true}));
     assert.equal(scheduler.status().loaded,true);assert.equal(scheduler.status().time,second);
   }finally{spawnSync('/bin/launchctl',['bootout',scheduler.target]);rmSync(home,{recursive:true,force:true});}
+});
+
+test('隔离 launchd：后台启动恢复保存的定时，已有安排不重新加载或提前执行业务', {skip:process.env.DUST_CONSOLE_LAUNCHD!=='1'}, async()=>{
+  const home=mkdtempSync(join(tmpdir(),'dustoff-console-startup-'));
+  const scheduler=createScheduler({home,autoDirectory:join(home,'agents'),label:`com.dustoff.startup-test.${process.pid}`,runArgs:['--dry-run']});
+  const later=new Date(Date.now()+6*3600_000),time=`${String(later.getHours()).padStart(2,'0')}:${String(later.getMinutes()).padStart(2,'0')}`;
+  let app;
+  try{
+    const saved=scheduler.update({time,intervalHours:12,autoStartAfterReboot:false});
+    assert.equal(saved.loaded,false);
+    app=createConsole({home,scheduler});await app.listen(0);
+    const started=scheduler.status(),plist=readFileSync(scheduler.plist,'utf8');
+    assert.equal(started.loaded,true);assert.equal(started.startAt,saved.startAt);assert.equal(started.intervalHours,12);
+    assert.equal(started.autoStartAfterReboot,false);assert.equal(started.runs,0);assert.equal(started.lastRun,null);
+    await new Promise(resolve=>app.server.close(resolve));
+    app=createConsole({home,scheduler});await app.listen(0);
+    assert.equal(readFileSync(scheduler.plist,'utf8'),plist);
+    assert.equal(scheduler.status().startAt,started.startAt);assert.equal(scheduler.status().runs,0);
+  }finally{
+    if(app?.server.listening)await new Promise(resolve=>app.server.close(resolve));
+    spawnSync('/bin/launchctl',['bootout',scheduler.target]);rmSync(home,{recursive:true,force:true});
+  }
 });

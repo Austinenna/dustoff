@@ -51,7 +51,7 @@ test('图集整组保存：坏内容回退、部分失败续跑、独立浏览�
     const row=db().prepare("SELECT * FROM items WHERE id='1'").get();assert.equal(row.status,'saved');assert.equal(row.image_count,2);assert.equal(row.text_path,null);assert.equal(row.processing_mode,'gallery');assert.equal(row.media_bytes,2*content.length);assert.deepEqual(cleanable(),[]);
     const gallery=readGallery(manifest,'1');assert.deepEqual(gallery.images.map(i=>i.file),['001.png','002.png']);assert.ok(!readFileSync(manifest,'utf8').includes(base));
     const before=requests.length;await main(['--no-scan']);assert.equal(requests.length,before);
-    const opened=[];app=createConsole({home:process.env.DUST_HOME,scheduler:{status:()=>({loaded:false})},openFile:async args=>opened.push(args)});const url=await app.listen(0);
+    const opened=[];app=createConsole({home:process.env.DUST_HOME,scheduler:{status:()=>({loaded:true})},openFile:async args=>opened.push(args)});const url=await app.listen(0);
     assert.equal(app.store.overview().galleries,1);assert.equal(app.store.overview().videos,0);assert.equal(app.store.listItems({galleries:'1',q:'两张'}).total,1);assert.equal(app.store.listItems({results:'1'}).total,0);
     assert.equal(app.store.item('1').can_change_purpose,false);
     const data=await(await fetch(url+'/api/gallery?id=1')).json();assert.equal(data.images.length,2);assert.ok(!JSON.stringify(data).includes(base));

@@ -18,10 +18,10 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   const media=createMediaService({store,home});
   scheduler ||= createScheduler({home,root});
   const token=randomBytes(32).toString('hex');
-  let active=null,lastAction=null,origin,auth=null;
+  let active=null,lastAction=null,origin,auth=null,scheduleStartupWarning=null;
   const actionsDir=localPath(join(home,'console'));
   function state(){const lock=liveLock(home);return {running:!!active||lock.running,pid:active?.pid||lock.pid||null,owned:!!active,kind:active?.kind||null,startedAt:active?.startedAt||null,lastAction};}
-  function scheduleState(){try{return {...scheduler.status(),error:null};}catch(e){return {error:e.message,loaded:null,time:null,intervalHours:null,nextRun:null};}}
+  function scheduleState(){try{const current=scheduler.status();return {...current,error:null,warning:current.loaded?null:scheduleStartupWarning};}catch(e){return {error:e.message,loaded:null,time:null,intervalHours:null,nextRun:null};}}
   function start(kind,body={}) {
     if(state().running)throw new HttpError(409,'已有任务正在运行，请等本轮结束');
     let script,args;
@@ -120,7 +120,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/schedule':
           if(data.action==='save'){if(typeof data.time!=='string'||typeof data.autoStartAfterReboot!=='boolean'||typeof data.intervalHours!=='number')throw new HttpError(400,'定时参数无效');scheduler.update({time:data.time,intervalHours:data.intervalHours,autoStartAfterReboot:data.autoStartAfterReboot});}
           else if(data.action==='start')scheduler.start();else if(data.action==='stop')scheduler.stop();else throw new HttpError(400,'定时操作无效');
-          result=scheduleState();break;
+          scheduleStartupWarning=null;result=scheduleState();break;
         case '/api/run':result=start('run',data);break;
         case '/api/purpose':result=start('purpose',data);break;
         case '/api/retry':result=start('retry',data);break;
@@ -151,7 +151,16 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     }catch(e){if(res.headersSent){res.destroy();return;}send(e.status||400,{error:store.redact(e.message||'操作失败')});}
   });
   server.requestTimeout=15000;server.headersTimeout=10000;
-  return {server,store,listen(port=47831){return new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>{origin=`http://127.0.0.1:${server.address().port}`;resolve(origin);});});},execution:state};
+  return {server,store,listen(port=47831){return new Promise((resolve,reject)=>{
+    server.once('error',reject);
+    server.listen(port,'127.0.0.1',()=>{
+      origin=`http://127.0.0.1:${server.address().port}`;
+      // 仅后台服务成功启动时恢复定时；页面请求和重复打开启动器均不会执行这里。
+      try {if(!scheduler.status().loaded)scheduler.start();}
+      catch(error){scheduleStartupWarning=`自动开启定时失败：${error.message}。可在此重新开启。`;console.error(scheduleStartupWarning);}
+      resolve(origin);
+    });
+  });},execution:state};
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   const portArg=process.argv.indexOf('--port'),port=Number(portArg>=0?process.argv[portArg+1]:47831);
