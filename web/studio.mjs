@@ -6,7 +6,7 @@ import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,fmt,bytes,duration,titleOf,mediaL
 const root=document.querySelector('#dustoff-studio'),main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 const token=document.querySelector('meta[name="dustoff-token"]').content;
 const routes={overview:'总览',notes:'笔记',results:'笔记',videos:'视频',galleries:'图集',collection:'收藏记录',pending:'待处理',run:'待处理',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
-const state={route:'overview',overview:null,settings:null,results:{q:'',status:'notes',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},galleries:{q:'',page:1},collection:{q:'',status:'all',page:1},runs:[],runId:null,logKind:'business',runPage:1};
+const state={route:'overview',overview:null,settings:null,results:{q:'',status:'notes',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},galleries:{q:'',page:1},collection:{q:'',status:'all',page:1},review:{page:1,choices:{}},runs:[],runId:null,logKind:'business',runPage:1};
 let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null,videoTimer;
 const $=selector=>root.querySelector(selector);
 const query=values=>new URLSearchParams(values).toString();
@@ -43,7 +43,7 @@ function syncChrome() {
   const group=['schedule','history'].includes(state.route)?'run':SETTINGS[state.route]?'settings':state.route==='results'?'notes':state.route;
   root.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===group)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
   $('#collection-count').textContent=o.total;
-  $('#pending-count').textContent=o.pending;
+  $('#pending-count').textContent=o.pending+o.review;
   $('#notes-count').textContent=o.notes;
   $('#videos-count').textContent=o.videos;
   $('#galleries-count').textContent=o.galleries||0;
@@ -73,7 +73,7 @@ function overviewPage() {
   const next=s.nextRun?new Date(s.nextRun):null;
   const nextTime=next&&!Number.isNaN(next.getTime())?next.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}):'尚未安排';
   return `${head('总览',`最近同步 · ${esc(fmt(o.baseline?.scanned_at))}`,button('刷新','refresh','','quiet'))}
-    <div class="overview-metrics"><a href="#notes"><span>知识笔记</span><div><strong>${o.notes}</strong><small>篇 · 今天 +${o.todayNotes}</small></div></a><a href="#videos"><span>本地视频</span><div><strong>${o.videos}</strong><small>个 · 已保留</small></div></a><a href="#galleries"><span>本地图集</span><div><strong>${o.galleries||0}</strong><small>组 · 已保留</small></div></a><a href="#pending"><span>等待整理</span><div><strong>${o.pending}</strong><small>条</small></div></a></div>
+    <div class="overview-metrics"><a href="#notes"><span>知识笔记</span><div><strong>${o.notes}</strong><small>篇 · 今天 +${o.todayNotes}</small></div></a><a href="#videos"><span>本地视频</span><div><strong>${o.videos}</strong><small>个 · 已保留</small></div></a><a href="#galleries"><span>本地图集</span><div><strong>${o.galleries||0}</strong><small>组 · 已保留</small></div></a><a href="#pending"><span>待处理</span><div><strong>${o.pending+o.review}</strong><small>条</small></div></a></div>
     <div class="overview-columns"><div class="overview-content"><section><div class="section-heading"><h2>最近笔记</h2><a href="#notes">全部笔记 ↗</a></div><div class="recent-notes">${o.recent.length?o.recent.map(i=>`<button class="recent-note" data-action="read" data-id="${i.id}" data-kind="note"><span class="note-symbol" aria-hidden="true">▤</span><span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(i.category||'未分类')} · ${esc(fmt(i.extracted_at))}</small></span><span aria-hidden="true">›</span></button>`).join(''):empty('整理完成的知识笔记会显示在这里')} </div>${o.textOnly?`<button class="button quiet text-only-link" data-action="text-only">还有 ${o.textOnly} 份独立文字稿 →</button>`:''}</section>
     <section><div class="section-heading"><h2>最近保存的视频</h2><a href="#videos">全部视频 ↗</a></div><div class="video-grid">${o.recentVideos.length?videoCards(o.recentVideos):empty('选择「保存视频」或「视频和笔记」后，保留的视频会显示在这里')}</div></section></div>
     <aside class="overview-aside"><section class="overview-schedule"><a class="schedule-state-label" href="#schedule"><span class="dot"></span>${s.error?'自动安排暂不可用':s.loaded?'自动整理已开启':'自动整理已关闭'}</a><p>下一次运行</p><a class="next-time" href="#schedule">${s.loaded?esc(nextTime):'尚未安排'}</a><small>${s.loaded?`${esc(fmt(s.nextRun))} · 每 ${s.intervalHours} 小时一次`:'在自动安排中设置时间'}</small>${button(busy()?'查看本轮进度':'▷ 运行一轮',busy()?'pending-page':'manual-run','','primary')}<dl><dt>今日已处理</dt><dd>${o.usedToday} / ${o.policy.daily} 条</dd><dt>最近一轮</dt><dd><a href="#history">${o.lastRun?esc(summary.label):'暂无记录'}</a></dd><dt>账号连接</dt><dd><a href="#account">${o.session.online==='verified'?'上次验证可用':o.session.online==='login_required'?'需要重新登录':'尚未在线确认'}</a></dd></dl></section>
@@ -250,9 +250,20 @@ function executionPanel() {
   const e=state.overview.execution;
   return `<div class="execution ${e.running?'active':''}"><div><span class="dot"></span><strong>${e.running?'正在执行'+({run:'本轮整理',retry:'恢复待办',purpose:'保存用途',login:'扫码登录','session-check':'登录检查'}[e.kind]||'任务'):'准备好整理下一批收藏'}</strong><small>${e.running?`开始于 ${esc(fmt(e.startedAt))}${e.owned?'':' · 由其他入口启动'}`:'完成后，可在笔记、视频和图集栏目查看成果。'}</small></div><div class="row">${e.running?(e.owned?button('停止本轮','stop'):'')+`<a class="button quiet" href="#history">查看记录 ›</a>`:button('现在运行','manual-run','data-idle','primary')}</div></div>`;
 }
-function pendingPage(queue) {
+function pendingPage() {
+  return `${head('待处理','',button('刷新','refresh','','quiet'))}<div id="pending-content">${empty('正在读取…')}</div>`;
+}
+function reviewRow(i) {
+  const choice=state.review.choices[i.id];
+  return `<article class="review-row"><div class="review-info"><h3><button class="item-title" data-action="detail" data-id="${i.id}">${esc(i.title||i.id)}</button></h3><small>${esc(i.author||'未知作者')} · ${duration(i.duration_s)}</small><p class="muted">${esc(i.routing_reason||'需要你确认这条收藏的用途。')}</p>${button('查看原作品 ↗','open',`data-id="${i.id}" data-kind="source"`,'quiet')}</div><form class="review-form" method="post" aria-label="确认 ${esc(i.title||i.id)} 的用途"><input type="hidden" name="id" value="${i.id}"><fieldset><legend>选择用途</legend>${[['note','知识笔记','语音转写并整理笔记'],['video','视频','保存高清原声视频']].map(([key,label,hint])=>`<label><input type="radio" name="purpose" value="${key}" required ${choice===key?'checked':''}><span>${label}<small>${hint}</small></span></label>`).join('')}</fieldset><button type="submit" class="button primary" data-idle ${busy()?'disabled':''}>确认用途</button></form></article>`;
+}
+async function loadPending() {
+  const epoch=++listEpoch,page=pageEpoch;
+  const [reviews,queue]=await Promise.all([api('items?'+query({status:'review',page:state.review.page,size:10})),api('queue')]);
+  if(epoch!==listEpoch||page!==pageEpoch||state.route!=='pending')return;
+  state.review.page=reviews.page;
   const o=state.overview;
-  return `${head('待处理','',button('刷新','refresh','','quiet'))}<div id="run-status">${executionPanel()}</div><div class="stats"><div><span>待处理</span><strong>${o.pending}<small>条</small></strong></div><div><span>今日额度</span><strong>${o.usedToday}<small>/ ${o.policy.daily} 条</small></strong></div><div><span>今日新笔记</span><strong>${o.todayNotes}<small>篇</small></strong></div></div>${!o.baseline?'<div class="callout">第一次运行只建立历史收藏参照，不下载历史视频。之后处理新收藏。</div>':''}${o.needsLogin||o.session.level==='expired'?'<div class="callout">登录需要更新，新收藏扫描可能受阻。<a href="#account">前往账号连接 ›</a></div>':''}${o.review||o.failed?`<div class="attention">${o.review?button(`${o.review} 条用途待确认 ›`,'review-items','','quiet'):''}${o.failed?button(`${o.failed} 条失败需查看 ›`,'failed-items','','quiet'):''}</div>`:''}<section class="run-section"><div class="between"><h2>接下来处理</h2><small>按真实待办顺序 · 最多显示 10 条</small></div>${queue.items.length?queue.items.map(i=>`<div class="queue-row"><div><button class="item-title" data-action="detail" data-id="${i.id}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small></div><span>${esc(i.media_type==='gallery'?'图集':PURPOSES[i.processing_mode]||'等待判断用途')}</span>${tag(STATUSES[i.status]||i.status)}</div>`).join(''):empty('当前没有待办；运行时会先检查新收藏。')}</section><div class="footnote"><a href="#schedule">设置自动安排 ›</a><a href="#rules">调整处理规则 ›</a></div>`;
+  $('#pending-content').innerHTML=`<section class="review-section" aria-label="待确认用途"><div class="between"><h2>待确认 · ${reviews.total} 条</h2><small>确认后，下轮运行时处理</small></div><p class="muted">知识笔记用于语音转写与整理，视频用于保存高清原声。选择用途后点击确认。</p>${reviews.items.length?reviews.items.map(reviewRow).join('')+pagination(reviews,'review'):empty('没有待确认的收藏。需要你判断用途的内容会显示在这里。')}</section><section class="run-section" aria-label="等待自动处理"><div class="between"><h2>等待自动处理 · ${o.pending} 条</h2><small>按实际处理顺序 · 最多显示 10 条</small></div>${queue.items.length?queue.items.map(i=>`<div class="queue-row"><div><button class="item-title" data-action="detail" data-id="${i.id}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small></div><span>${esc(i.media_type==='gallery'?'图集':PURPOSES[i.processing_mode]||'等待判断用途')}</span>${tag(STATUSES[i.status]||i.status)}</div>`).join(''):empty('当前没有等待自动处理的收藏。')}${!o.baseline?'<div class="callout">第一次运行只建立历史收藏参照，不下载历史视频。之后处理新收藏。</div>':''}${o.needsLogin||o.session.level==='expired'?'<div class="callout">登录需要更新，新收藏扫描可能受阻。<a href="#account">前往账号连接 ›</a></div>':''}<div id="run-status">${executionPanel()}</div><p class="muted">今日已处理 ${o.usedToday} / ${o.policy.daily} 条${o.failed?` · ${button(`${o.failed} 条失败需查看 ›`,'failed-items','','quiet')}`:''}</p></section><div class="footnote"><a href="#schedule">设置自动安排 ›</a><a href="#rules">调整处理规则 ›</a></div>`;
 }
 function manualRun() {
   const o=state.overview;
@@ -327,12 +338,12 @@ async function go(route) {
   root.dataset.page=route;
   document.title=`dustoff · ${routes[route]}`;main.innerHTML=empty('正在读取…');syncChrome();
   try {
-    const [o,extra]=await Promise.all([api('overview'),SETTINGS[route]?api('settings'):route==='pending'?api('queue'):route==='history'?api('runs'):null]);
+    const [o,extra]=await Promise.all([api('overview'),SETTINGS[route]?api('settings'):route==='history'?api('runs'):null]);
     if(epoch!==pageEpoch)return;state.overview=o;syncChrome();
     if(SETTINGS[route])state.settings=extra;
     if(route==='history'){state.runs=extra.runs;state.runId=state.runs.some(r=>r.id===state.runId)?state.runId:state.runs[0]?.id;}
-    main.innerHTML=route==='overview'?overviewPage():route==='videos'?videosPage():route==='galleries'?galleriesPage():route==='notes'?resultsPage():route==='collection'?collectionPage():route==='pending'?pendingPage(extra):route==='schedule'?schedulePage():route==='history'?historyPage():settingsPage();
-    if(route==='notes')await loadResults();if(route==='videos')await loadVideos();if(route==='galleries')await loadGalleries();if(route==='collection')await loadCollection();if(route==='schedule')schedulePreview();if(route==='history'){runRows();await loadLog();}if(route==='account')await loadSession();
+    main.innerHTML=route==='overview'?overviewPage():route==='videos'?videosPage():route==='galleries'?galleriesPage():route==='notes'?resultsPage():route==='collection'?collectionPage():route==='pending'?pendingPage():route==='schedule'?schedulePage():route==='history'?historyPage():settingsPage();
+    if(route==='pending')await loadPending();if(route==='notes')await loadResults();if(route==='videos')await loadVideos();if(route==='galleries')await loadGalleries();if(route==='collection')await loadCollection();if(route==='schedule')schedulePreview();if(route==='history'){runRows();await loadLog();}if(route==='account')await loadSession();
   }catch(e){if(epoch===pageEpoch)main.innerHTML=`${head(routes[route])}${empty(e.message)}${button('重新读取','refresh')}`;}
 }
 function navigate(route) {if(location.hash==='#'+route)void go(route);else location.hash=route;}
@@ -349,7 +360,9 @@ async function queueMutation(path,data) {
     if(current.lastAction?.startedAt===expected){
       if(current.lastAction.exitCode!==0)throw new Error('操作未完成，请在「运行 → 运行记录 → 控制台操作」查看原因。');
       notice(path==='purpose'?'用途已保存，下一轮运行时处理。':'已恢复为待办，下一轮运行时处理。');
+      delete state.review.choices[data.id];
       if(state.route==='collection')await loadCollection();
+      if(state.route==='pending')await loadPending();
       if(dialog.open&&originalDrawer===dialogEpoch&&drawerId===data.id)await detail(data.id);
       return;
     }
@@ -376,7 +389,8 @@ root.addEventListener('click',async event=>{
     else if(a==='open')await mutate('open',{kind:b.dataset.kind,id,fileKind:b.dataset.fileKind},'已在本机打开。');
     else if(a==='stop')await mutate('stop',{},'已发送停止请求，正在完成收尾。');
     else if(a==='retry')await queueMutation('retry',{id});
-    else if(a==='review-items'||a==='failed-items'){Object.assign(state.collection,{status:a==='review-items'?'review':'failed',q:'',page:1});navigate('collection');}
+    else if(a==='review-items'){state.review.page=1;navigate('pending');}
+    else if(a==='failed-items'){Object.assign(state.collection,{status:'failed',q:'',page:1});navigate('collection');}
     else if(a==='read'){Object.assign(state.results,{id,q:id,page:1,status:b.dataset.kind==='note'?'notes':'all',kind:b.dataset.kind,reader:true});closeDialog();navigate('notes');}
     else if(a==='select-result'){
       const changed=state.results.id!==id;state.results.reader=true;$('.reading').dataset.reader='true';
@@ -394,7 +408,7 @@ root.addEventListener('click',async event=>{
       if(kind==='results'){main.innerHTML=resultsPage();await loadResults();}else{main.innerHTML=collectionPage();await loadCollection();}
     }else if(a==='paginate'){
       const kind=b.dataset.kind,step=Number(b.dataset.step);
-      if(kind==='runs'){state.runPage+=step;runRows();}else{state[kind].page+=step;if(kind==='results')await loadResults();else if(kind==='videos')await loadVideos();else if(kind==='galleries')await loadGalleries();else await loadCollection();}
+      if(kind==='runs'){state.runPage+=step;runRows();}else{state[kind].page+=step;if(kind==='results')await loadResults();else if(kind==='videos')await loadVideos();else if(kind==='galleries')await loadGalleries();else if(kind==='review')await loadPending();else await loadCollection();}
     }else if(a==='schedule-toggle'){await mutate('schedule',{action:b.dataset.value},b.dataset.value==='start'?'自动整理已开启。':'自动整理及登录自动启用已关闭。');await go('schedule');}
     else if(a==='log-kind'){state.logKind=b.dataset.filter;main.innerHTML=historyPage();runRows();await loadLog();}
     else if(a==='select-run'){state.runId=id;runRows();await loadLog();}
@@ -404,6 +418,7 @@ root.addEventListener('click',async event=>{
 });
 root.addEventListener('input',event=>{
   const input=event.target;
+  if(input.name==='purpose'&&input.closest('.review-form'))state.review.choices[input.form.elements.id.value]=input.value;
   if(['results-search','collection-search','videos-search','galleries-search'].includes(input.id)){
     const kind=input.id.split('-')[0];state[kind].q=input.value;state[kind].page=1;
     // 立即使旧请求失效，避免请求返回时覆盖正在输入的新查询。
@@ -414,7 +429,7 @@ root.addEventListener('input',event=>{
 root.addEventListener('error',event=>{if(event.target.matches?.('.video-cover img'))event.target.hidden=true;},true);
 root.addEventListener('change',event=>{if(event.target.id==='collection-status'){state.collection.status=event.target.value;state.collection.page=1;main.innerHTML=collectionPage();loadCollection().catch(e=>notice(e.message,true));}});
 root.addEventListener('submit',async event=>{
-  const form=event.target,formId=form.getAttribute('id');if(!['settings-form','schedule-form','purpose-form','run-form'].includes(formId))return;event.preventDefault();
+  const form=event.target,formId=form.getAttribute('id');if(!['settings-form','schedule-form','purpose-form','run-form'].includes(formId)&&!form.matches('.review-form'))return;event.preventDefault();
   const submit=event.submitter||form.querySelector('button:not([type=button])');submit.disabled=true;
   const data=new FormData(form),epoch=pageEpoch;
   try {
@@ -435,7 +450,10 @@ setInterval(async()=>{
   try{
     const wasRunning=busy(),epoch=pageEpoch;await refreshOverview();
     if(state.route==='account')await loadSession();
-    if(wasRunning&&!busy()&&epoch===pageEpoch&&['pending','collection','galleries'].includes(state.route)&&!dialog.open)await go(state.route);
+    if(wasRunning&&!busy()&&epoch===pageEpoch){
+      if(state.route==='pending')await loadPending();
+      else if(['collection','galleries'].includes(state.route)&&!dialog.open)await go(state.route);
+    }
   }catch{/* 短暂轮询失败不覆盖阅读内容或未保存表单；手动刷新会显示具体错误。 */}
   finally{polling=false;}
 },4000);
