@@ -5,7 +5,7 @@ import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,fmt,bytes,duration,titleOf,mediaL
 
 const root=document.querySelector('#dustoff-studio'),main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 const token=document.querySelector('meta[name="dustoff-token"]').content;
-const routes={overview:'总览',notes:'笔记',results:'笔记',videos:'视频',galleries:'图集',collection:'收藏记录',run:'运行',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
+const routes={overview:'总览',notes:'笔记',results:'笔记',videos:'视频',galleries:'图集',collection:'收藏记录',pending:'待处理',run:'待处理',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
 const state={route:'overview',overview:null,settings:null,results:{q:'',status:'notes',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},galleries:{q:'',page:1},collection:{q:'',status:'all',page:1},runs:[],runId:null,logKind:'business',runPage:1};
 let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null,videoTimer;
 const $=selector=>root.querySelector(selector);
@@ -16,6 +16,7 @@ const empty=(text='暂无内容')=>`<div class="empty">${esc(text)}</div>`;
 const busy=()=>!!state.overview?.execution.running;
 const icons={book:'M3 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-3H3zm18 0h-6a3 3 0 0 0-3 3v14a4 4 0 0 1 4-3h5z',layers:'m12 3 10 5-10 5L2 8zm-10 9 10 5 10-5M2 16l10 5 10-5',play:'M9 7v10l8-5z M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',settings:'M4 7h16M4 17h16M8 4v6M16 14v6'};
 icons.overview='M3 3h7v7H3zM14 3h7v11h-7zM3 14h7v7H3zM14 18h7v3h-7z';
+icons.pending='M9 5h12M9 12h12M9 19h12M3 5h.01M3 12h.01M3 19h.01';
 icons.gallery='M3 3h18v18H3zM3 16l5-5 4 4 3-3 6 6M15 7h.01';
 icons.video='M3 5h18v16H3zM3 10h18M7 5l3 5M14 5l3 5m-7 3v5l5-2.5z';
 root.querySelectorAll('[data-icon]').forEach(el=>{el.innerHTML=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="${icons[el.dataset.icon]}"></path></svg>`;});
@@ -34,14 +35,15 @@ function head(title,meta='',actions='') {
   return `<header class="pagehead"><h1>${title}</h1><span class="head-meta">${meta}</span><div class="head-actions">${actions}</div></header>`;
 }
 function tabs(group) {
-  const links=group==='run'?[['run','待处理'],['schedule','自动安排'],['history','运行记录']]:[['account','账号连接'],['models','模型服务'],['storage','文件与空间'],['rules','处理规则']];
+  const links=group==='run'?[['schedule','自动安排'],['history','运行记录']]:[['account','账号连接'],['models','模型服务'],['storage','文件与空间'],['rules','处理规则']];
   return `<nav class="tabs" aria-label="${group==='run'?'运行':'设置'}页面">${links.map(([id,label])=>`<a href="#${id}" ${state.route===id?'aria-current="page"':''}>${label}</a>`).join('')}</nav>`;
 }
 function syncChrome() {
   const o=state.overview;if(!o)return;
-  const group=['run','schedule','history'].includes(state.route)?'run':SETTINGS[state.route]?'settings':state.route==='results'?'notes':state.route;
+  const group=['schedule','history'].includes(state.route)?'run':SETTINGS[state.route]?'settings':state.route==='results'?'notes':state.route;
   root.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===group)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
   $('#collection-count').textContent=o.total;
+  $('#pending-count').textContent=o.pending;
   $('#notes-count').textContent=o.notes;
   $('#videos-count').textContent=o.videos;
   $('#galleries-count').textContent=o.galleries||0;
@@ -71,10 +73,10 @@ function overviewPage() {
   const next=s.nextRun?new Date(s.nextRun):null;
   const nextTime=next&&!Number.isNaN(next.getTime())?next.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}):'尚未安排';
   return `${head('总览',`最近同步 · ${esc(fmt(o.baseline?.scanned_at))}`,button('刷新','refresh','','quiet'))}
-    <div class="overview-metrics"><a href="#notes"><span>知识笔记</span><div><strong>${o.notes}</strong><small>篇 · 今天 +${o.todayNotes}</small></div></a><a href="#videos"><span>本地视频</span><div><strong>${o.videos}</strong><small>个 · 已保留</small></div></a><a href="#galleries"><span>本地图集</span><div><strong>${o.galleries||0}</strong><small>组 · 已保留</small></div></a><a href="#run"><span>等待整理</span><div><strong>${o.pending}</strong><small>条</small></div></a></div>
+    <div class="overview-metrics"><a href="#notes"><span>知识笔记</span><div><strong>${o.notes}</strong><small>篇 · 今天 +${o.todayNotes}</small></div></a><a href="#videos"><span>本地视频</span><div><strong>${o.videos}</strong><small>个 · 已保留</small></div></a><a href="#galleries"><span>本地图集</span><div><strong>${o.galleries||0}</strong><small>组 · 已保留</small></div></a><a href="#pending"><span>等待整理</span><div><strong>${o.pending}</strong><small>条</small></div></a></div>
     <div class="overview-columns"><div class="overview-content"><section><div class="section-heading"><h2>最近笔记</h2><a href="#notes">全部笔记 ↗</a></div><div class="recent-notes">${o.recent.length?o.recent.map(i=>`<button class="recent-note" data-action="read" data-id="${i.id}" data-kind="note"><span class="note-symbol" aria-hidden="true">▤</span><span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(i.category||'未分类')} · ${esc(fmt(i.extracted_at))}</small></span><span aria-hidden="true">›</span></button>`).join(''):empty('整理完成的知识笔记会显示在这里')} </div>${o.textOnly?`<button class="button quiet text-only-link" data-action="text-only">还有 ${o.textOnly} 份独立文字稿 →</button>`:''}</section>
     <section><div class="section-heading"><h2>最近保存的视频</h2><a href="#videos">全部视频 ↗</a></div><div class="video-grid">${o.recentVideos.length?videoCards(o.recentVideos):empty('选择「保存视频」或「视频和笔记」后，保留的视频会显示在这里')}</div></section></div>
-    <aside class="overview-aside"><section class="overview-schedule"><a class="schedule-state-label" href="#schedule"><span class="dot"></span>${s.error?'自动安排暂不可用':s.loaded?'自动整理已开启':'自动整理已关闭'}</a><p>下一次运行</p><a class="next-time" href="#schedule">${s.loaded?esc(nextTime):'尚未安排'}</a><small>${s.loaded?`${esc(fmt(s.nextRun))} · 每 ${s.intervalHours} 小时一次`:'在自动安排中设置时间'}</small>${button(busy()?'查看本轮进度':'▷ 运行一轮',busy()?'run-page':'manual-run','','primary')}<dl><dt>今日已处理</dt><dd>${o.usedToday} / ${o.policy.daily} 条</dd><dt>最近一轮</dt><dd><a href="#history">${o.lastRun?esc(summary.label):'暂无记录'}</a></dd><dt>账号连接</dt><dd><a href="#account">${o.session.online==='verified'?'上次验证可用':o.session.online==='login_required'?'需要重新登录':'尚未在线确认'}</a></dd></dl></section>
+    <aside class="overview-aside"><section class="overview-schedule"><a class="schedule-state-label" href="#schedule"><span class="dot"></span>${s.error?'自动安排暂不可用':s.loaded?'自动整理已开启':'自动整理已关闭'}</a><p>下一次运行</p><a class="next-time" href="#schedule">${s.loaded?esc(nextTime):'尚未安排'}</a><small>${s.loaded?`${esc(fmt(s.nextRun))} · 每 ${s.intervalHours} 小时一次`:'在自动安排中设置时间'}</small>${button(busy()?'查看本轮进度':'▷ 运行一轮',busy()?'pending-page':'manual-run','','primary')}<dl><dt>今日已处理</dt><dd>${o.usedToday} / ${o.policy.daily} 条</dd><dt>最近一轮</dt><dd><a href="#history">${o.lastRun?esc(summary.label):'暂无记录'}</a></dd><dt>账号连接</dt><dd><a href="#account">${o.session.online==='verified'?'上次验证可用':o.session.online==='login_required'?'需要重新登录':'尚未在线确认'}</a></dd></dl></section>
     <section class="overview-attention"><h2>需要你看一下</h2>${o.review?button(`${o.review} 条用途待确认 ›`,'review-items','','attention-link'):''}${o.failed?button(`${o.failed} 条处理失败 ›`,'failed-items','','attention-link'):''}${!o.review&&!o.failed?'<p class="muted">暂时没有需要处理的事项。</p>':''}</section></aside></div><footer class="overview-footer">共 ${o.total} 条收藏 · <a href="#collection">查看收藏记录</a> · 视频保存在本机</footer>`;
 }
 function videosPage() {
@@ -248,14 +250,14 @@ function executionPanel() {
   const e=state.overview.execution;
   return `<div class="execution ${e.running?'active':''}"><div><span class="dot"></span><strong>${e.running?'正在执行'+({run:'本轮整理',retry:'恢复待办',purpose:'保存用途',login:'扫码登录','session-check':'登录检查'}[e.kind]||'任务'):'准备好整理下一批收藏'}</strong><small>${e.running?`开始于 ${esc(fmt(e.startedAt))}${e.owned?'':' · 由其他入口启动'}`:'完成后，可在笔记、视频和图集栏目查看成果。'}</small></div><div class="row">${e.running?(e.owned?button('停止本轮','stop'):'')+`<a class="button quiet" href="#history">查看记录 ›</a>`:button('现在运行','manual-run','data-idle','primary')}</div></div>`;
 }
-function runPage(queue) {
+function pendingPage(queue) {
   const o=state.overview;
-  return `${head('运行')}${tabs('run')}<div id="run-status">${executionPanel()}</div><div class="stats"><div><span>待处理</span><strong>${o.pending}<small>条</small></strong></div><div><span>今日额度</span><strong>${o.usedToday}<small>/ ${o.policy.daily} 条</small></strong></div><div><span>今日新笔记</span><strong>${o.todayNotes}<small>篇</small></strong></div></div>${!o.baseline?'<div class="callout">第一次运行只建立历史收藏参照，不下载历史视频。之后处理新收藏。</div>':''}${o.needsLogin||o.session.level==='expired'?'<div class="callout">登录需要更新，新收藏扫描可能受阻。<a href="#account">前往账号连接 ›</a></div>':''}${o.review||o.failed?`<div class="attention">${o.review?button(`${o.review} 条用途待确认 ›`,'review-items','','quiet'):''}${o.failed?button(`${o.failed} 条失败需查看 ›`,'failed-items','','quiet'):''}</div>`:''}<section class="run-section"><div class="between"><h2>接下来处理</h2><small>按真实待办顺序 · 最多显示 10 条</small></div>${queue.items.length?queue.items.map(i=>`<div class="queue-row"><div><button class="item-title" data-action="detail" data-id="${i.id}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small></div><span>${esc(i.media_type==='gallery'?'图集':PURPOSES[i.processing_mode]||'等待判断用途')}</span>${tag(STATUSES[i.status]||i.status)}</div>`).join(''):empty('当前没有待办；运行时会先检查新收藏。')}</section><div class="footnote"><a href="#schedule">设置自动安排 ›</a><a href="#rules">调整处理规则 ›</a></div>`;
+  return `${head('待处理','',button('刷新','refresh','','quiet'))}<div id="run-status">${executionPanel()}</div><div class="stats"><div><span>待处理</span><strong>${o.pending}<small>条</small></strong></div><div><span>今日额度</span><strong>${o.usedToday}<small>/ ${o.policy.daily} 条</small></strong></div><div><span>今日新笔记</span><strong>${o.todayNotes}<small>篇</small></strong></div></div>${!o.baseline?'<div class="callout">第一次运行只建立历史收藏参照，不下载历史视频。之后处理新收藏。</div>':''}${o.needsLogin||o.session.level==='expired'?'<div class="callout">登录需要更新，新收藏扫描可能受阻。<a href="#account">前往账号连接 ›</a></div>':''}${o.review||o.failed?`<div class="attention">${o.review?button(`${o.review} 条用途待确认 ›`,'review-items','','quiet'):''}${o.failed?button(`${o.failed} 条失败需查看 ›`,'failed-items','','quiet'):''}</div>`:''}<section class="run-section"><div class="between"><h2>接下来处理</h2><small>按真实待办顺序 · 最多显示 10 条</small></div>${queue.items.length?queue.items.map(i=>`<div class="queue-row"><div><button class="item-title" data-action="detail" data-id="${i.id}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small></div><span>${esc(i.media_type==='gallery'?'图集':PURPOSES[i.processing_mode]||'等待判断用途')}</span>${tag(STATUSES[i.status]||i.status)}</div>`).join(''):empty('当前没有待办；运行时会先检查新收藏。')}</section><div class="footnote"><a href="#schedule">设置自动安排 ›</a><a href="#rules">调整处理规则 ›</a></div>`;
 }
 function manualRun() {
   const o=state.overview;
   drawerId=null;++dialogEpoch;
-  openDialog(dialogHead('运行一轮')+`<form method="post" id="run-form" class="modal-body"><p class="muted">${o.baseline?`本地待办 ${o.pending} 条，今日剩余额度 ${Math.max(0,o.policy.daily-o.usedToday)} 条。`:'第一次运行只建立历史参照，不下载视频。'}</p><label class="form-row"><span>本轮最多处理<small>同时受每日额度限制</small></span><input name="limit" aria-label="本轮最多处理" type="number" min="1" max="${o.policy.daily}" value="${Math.max(1,Math.min(10,o.policy.daily-o.usedToday))}" required></label><label class="check-row"><input name="noScan" type="checkbox" ${!o.baseline?'disabled':''}><span>只继续已有待办<small>跳过本次新收藏扫描</small></span></label><p class="muted">可在运行页面停止；已经完成的阶段会保留。</p><div class="savebar"><button class="button primary" data-idle ${busy()?'disabled':''}>开始运行</button>${button('取消','close-dialog')}</div></form>`);
+  openDialog(dialogHead('运行一轮')+`<form method="post" id="run-form" class="modal-body"><p class="muted">${o.baseline?`本地待办 ${o.pending} 条，今日剩余额度 ${Math.max(0,o.policy.daily-o.usedToday)} 条。`:'第一次运行只建立历史参照，不下载视频。'}</p><label class="form-row"><span>本轮最多处理<small>同时受每日额度限制</small></span><input name="limit" aria-label="本轮最多处理" type="number" min="1" max="${o.policy.daily}" value="${Math.max(1,Math.min(10,o.policy.daily-o.usedToday))}" required></label><label class="check-row"><input name="noScan" type="checkbox" ${!o.baseline?'disabled':''}><span>只继续已有待办<small>跳过本次新收藏扫描</small></span></label><p class="muted">可在待处理页面停止；已经完成的阶段会保留。</p><div class="savebar"><button class="button primary" data-idle ${busy()?'disabled':''}>开始运行</button>${button('取消','close-dialog')}</div></form>`);
 }
 function schedulePage() {
   const s=state.overview.scheduler;
@@ -321,15 +323,15 @@ async function loadSession() {
 }
 async function go(route) {
   clearTimeout(searchTimer);if(route!==state.route){window.scrollTo({top:0,behavior:'instant'});$('.workspace').scrollTo({top:0,left:0,behavior:'instant'});}const epoch=++pageEpoch;++listEpoch;++docEpoch;++logEpoch;
-  if(dialog.open)dialog.close();state.route=routes[route]?(route==='results'?'notes':route):'overview';route=state.route;
+  if(dialog.open)dialog.close();state.route=routes[route]?(route==='results'?'notes':route==='run'?'pending':route):'overview';route=state.route;
   root.dataset.page=route;
   document.title=`dustoff · ${routes[route]}`;main.innerHTML=empty('正在读取…');syncChrome();
   try {
-    const [o,extra]=await Promise.all([api('overview'),SETTINGS[route]?api('settings'):route==='run'?api('queue'):route==='history'?api('runs'):null]);
+    const [o,extra]=await Promise.all([api('overview'),SETTINGS[route]?api('settings'):route==='pending'?api('queue'):route==='history'?api('runs'):null]);
     if(epoch!==pageEpoch)return;state.overview=o;syncChrome();
     if(SETTINGS[route])state.settings=extra;
     if(route==='history'){state.runs=extra.runs;state.runId=state.runs.some(r=>r.id===state.runId)?state.runId:state.runs[0]?.id;}
-    main.innerHTML=route==='overview'?overviewPage():route==='videos'?videosPage():route==='galleries'?galleriesPage():route==='notes'?resultsPage():route==='collection'?collectionPage():route==='run'?runPage(extra):route==='schedule'?schedulePage():route==='history'?historyPage():settingsPage();
+    main.innerHTML=route==='overview'?overviewPage():route==='videos'?videosPage():route==='galleries'?galleriesPage():route==='notes'?resultsPage():route==='collection'?collectionPage():route==='pending'?pendingPage(extra):route==='schedule'?schedulePage():route==='history'?historyPage():settingsPage();
     if(route==='notes')await loadResults();if(route==='videos')await loadVideos();if(route==='galleries')await loadGalleries();if(route==='collection')await loadCollection();if(route==='schedule')schedulePreview();if(route==='history'){runRows();await loadLog();}if(route==='account')await loadSession();
   }catch(e){if(epoch===pageEpoch)main.innerHTML=`${head(routes[route])}${empty(e.message)}${button('重新读取','refresh')}`;}
 }
@@ -369,7 +371,7 @@ root.addEventListener('click',async event=>{
     else if(a==='delete-video')await deleteVideo(id);
     else if(a==='prepare-video')await preparePlayback(id,dialogEpoch);
     else if(a==='manual-run')manualRun();
-    else if(a==='run-page')navigate('run');
+    else if(a==='pending-page')navigate('pending');
     else if(a==='text-only'){Object.assign(state.results,{q:'',page:1,status:'text',reader:false});navigate('notes');}
     else if(a==='open')await mutate('open',{kind:b.dataset.kind,id,fileKind:b.dataset.fileKind},'已在本机打开。');
     else if(a==='stop')await mutate('stop',{},'已发送停止请求，正在完成收尾。');
@@ -422,7 +424,7 @@ root.addEventListener('submit',async event=>{
     }else if(formId==='schedule-form'){
       await mutate('schedule',{action:'save',time:data.get('time'),intervalHours:Number(data.get('intervalHours')),autoStartAfterReboot:data.has('autoStartAfterReboot')},'自动安排已保存。');if(epoch===pageEpoch)await go('schedule');
     }else if(formId==='run-form'){
-      await mutate('run',{limit:Number(data.get('limit')),noScan:data.has('noScan')},'本轮整理已启动。');closeDialog();navigate('run');
+      await mutate('run',{limit:Number(data.get('limit')),noScan:data.has('noScan')},'本轮整理已启动。');closeDialog();navigate('pending');
     }else await queueMutation('purpose',{id:data.get('id'),purpose:data.get('purpose')});
   }catch(e){notice(e.message,true);}finally{if(submit.isConnected)submit.disabled=submit.hasAttribute('data-idle')&&busy();}
 });
@@ -433,7 +435,7 @@ setInterval(async()=>{
   try{
     const wasRunning=busy(),epoch=pageEpoch;await refreshOverview();
     if(state.route==='account')await loadSession();
-    if(wasRunning&&!busy()&&epoch===pageEpoch&&['run','collection','galleries'].includes(state.route)&&!dialog.open)await go(state.route);
+    if(wasRunning&&!busy()&&epoch===pageEpoch&&['pending','collection','galleries'].includes(state.route)&&!dialog.open)await go(state.route);
   }catch{/* 短暂轮询失败不覆盖阅读内容或未保存表单；手动刷新会显示具体错误。 */}
   finally{polling=false;}
 },4000);
