@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { DUST_HOME, loadConf, makeCfg, expand } from './config.mjs';
 import { readPreviews, previewFor } from './preview-routing.mjs';
 import { chatEndpoint } from './routing.mjs';
+import { DASHSCOPE_ENDPOINT, readAsrConfig } from './asr-client.mjs';
 import { sessionSummary } from './session-status.mjs';
 import { readGallery } from './gallery.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
@@ -29,12 +30,14 @@ export const FIELDS = {
   DUST_ROUTER_BASE:text('用途判断接口（Base URL）','models','http://127.0.0.1:8317/v1','url'),
   DUST_ROUTER_MODEL:text('用途判断模型','models','glm'),
   DUST_ROUTER_KEY:text('用途判断模型密钥','models','','password'),
+  DUST_ASR_BASE:text('转写模型接口','models',DASHSCOPE_ENDPOINT,'url'),
+  DUST_ASR_KEY:text('转写模型密钥','models','','password'),
   DUST_ASR_MODEL:text('转写模型','models','qwen-audio-3.0-asr-flash'),
   DUST_LLM_MODEL:text('笔记模型','models','glm-5.3-flash'),
   DUST_LLM_BASE:text('笔记模型接口','models','https://open.bigmodel.cn/api/paas/v4/chat/completions','url'),
   DUST_LLM_EFFORT:{...text('笔记思考档位','models','high'),type:'select',options:['low','high','max']},
   DUST_LLM_MAX_TOKENS:number('笔记输出上限（token）','models',8000,1000,64000),
-  DUST_DASHSCOPE_KEY:text('阿里百炼密钥','models','','password'),
+  DUST_DASHSCOPE_KEY:text('百炼直连旧密钥','models','','password'),
   DUST_LLM_KEY:text('笔记模型密钥','models','','password'),
   DUST_NOTES:text('笔记输出目录','paths',join(homedir(),'Documents','抖音收藏'),'path'),
   DUST_SAVED_MEDIA:text('视频与图集收藏目录','paths','','path'),
@@ -77,6 +80,10 @@ export function createStore(home = DUST_HOME) {
     const effective={DUST_DAILY_LIMIT:p.daily,DUST_SCAN_COUNT:p.scan,DUST_MAX_DURATION_MIN:p.seconds/60,DUST_MEDIA_MAX_GB:p.bytes/1024**3,DUST_MIN_FREE_GB:p.free/1024**3};
     const fields=Object.entries(FIELDS).map(([key,f])=>{
       let value=get(key,key==='DUST_TEXT'?join(home,'text'):key==='DUST_SAVED_MEDIA'?join(home,'saved-media'):f.fallback);
+      if (key==='DUST_ASR_KEY') {
+        try { value=readAsrConfig(get).key; }
+        catch { value=get('DUST_ASR_KEY',''); } // 手工配错接口时仍允许打开设置修正。
+      }
       if (key==='DUST_ASR_CONTEXT'&&!value) { const path=localPath(get('DUST_ASR_CONTEXT_FILE',join(home,'asr-context.txt'))); if(existsSync(path))value=readFileSync(path,'utf8').slice(0,8000); }
       const overridden=process.env[key] !== undefined && process.env[key] !== '';
       return {...f,key,value:f.type==='password'?'':effective[key]??value,configured:f.type==='password'?!!value:undefined,overridden,clamped:key in effective && Number(value)!==effective[key]};

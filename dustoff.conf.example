@@ -114,20 +114,17 @@ DUST_MIN_FREE_GB=5
 # 转写（ASR）
 # ─────────────────────────────────────────────────────────────
 
-# 阿里云百炼 API key。这是唯一的凭据项，只存在于本文件里，
-# 不进仓库、不进日志、不进运行记录。
-# DUST_DASHSCOPE_KEY=sk-xxxxxxxx
+# 当前接入本机 AI 网关，使用 DashScope 原生 JSON 转写接口。
+# 这里填写完整接口地址；不是 OpenAI multipart /audio/transcriptions。
+DUST_ASR_BASE=http://127.0.0.1:8317/v1/asr/transcriptions
+DUST_ASR_MODEL=qwen-asr
+# 网关的 Dustoff 项目 Token，只存在于本机配置，不进仓库或日志。
+# DUST_ASR_KEY=填写项目Token
 
-# ASR 模型。选型依据见 docs/ASR选型-2026-09-02.md。
-#
-# 脚本内置了两族同步模型的适配，改这一行即可切换：
-#   qwen-audio-3.0-asr-flash   默认。2026-07 发布，附带逐词时间戳
-#   qwen3-asr-flash            上一代，2025-09。无时间戳
-# 两者同价（¥0.00022/秒，华北2），同为 300 秒上限。
-#
-# 换成 fun-asr / paraformer-v2 不能直接改这里——它们走的是异步端点，
-# 接口形态完全不同（提交 → 轮询 + 文件上传），脚本没实现那套。
-DUST_ASR_MODEL=qwen-audio-3.0-asr-flash
+# 兼容已有百炼直连：未设置 DUST_ASR_BASE 时沿用原官方端点；
+# 模型可用 qwen-audio-3.0-asr-flash / qwen3-asr-flash。
+# 旧 DUST_DASHSCOPE_KEY 仅在原官方端点生效，其他地址必须配置 DUST_ASR_KEY。
+# fun-asr / paraformer-v2 的异步接口不在本客户端支持范围内。
 
 # 识别语种。zh / en / ja / ko 等，也可留空让模型自己判断。
 DUST_ASR_LANG=zh

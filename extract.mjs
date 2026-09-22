@@ -16,6 +16,7 @@ import { claim, markTranscribed, markFailed, markMediaDeleted, cleanable,
          archivable, setMediaPath, db } from './scripts/ledger.mjs';
 import { createStage, freeGB, EXIT } from './scripts/stage.mjs';
 import { pathToFileURL } from 'node:url';
+import { readAsrConfig, asrOnce, PermanentError } from './scripts/asr-client.mjs';
 
 // 直接跑还是被 run.mjs import 进来。被 import 时不建运行记录目录、不自动跑 main()——
 // 那一轮的现场归 run.mjs 记，这里再记一份只会把同一件事拆成两处。
@@ -32,9 +33,8 @@ const ONLY_ID = valOf('--id');
 const LIMIT   = Number(valOf('--limit') || 0);
 
 const cfg = makeCfg();
-const API_KEY     = cfg('DUST_DASHSCOPE_KEY', '');
-const MODEL       = cfg('DUST_ASR_MODEL', 'qwen-audio-3.0-asr-flash');
-const LANG        = cfg('DUST_ASR_LANG', 'zh');
+const ASR_CONFIG = readAsrConfig(cfg);
+const API_KEY = ASR_CONFIG.key;
 const CONCURRENCY = 1; // 共享媒体预算，单机串行
 const MAX_ATTEMPTS = Number(cfg('DUST_MAX_ATTEMPTS', 3));
 const TEXT_DIR = localPath(cfg('DUST_TEXT', join(DUST_HOME, 'text')));
@@ -174,92 +174,12 @@ async function sliceAudio(src, out, start, end) {
 
 // ── ASR ──────────────────────────────────────────────────────────
 
-const ENDPOINT = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
-
-// 同一个端点上的两族模型，请求和返回的形状都不一样。
-// 隔在这里，换模型就只是改配置——paraformer 那次的教训是模型会过时，
-// 下次再出新的不该动业务代码。
-//
-// 两族都走同步端点、都是 300 秒上限、热词都放 system 里，差别只有：
-const DIALECTS = [
-  {
-    // qwen-audio-3.0 系（当前默认）。比 qwen3-asr 新一代，同价，
-    // 且额外返回逐词时间戳——笔记里能标「这句在第几秒」。
-    match: m => m.startsWith('qwen-audio-'),
-    extraParams: { format: 'mp3' },          // 不传这个直接 UNSUPPORTED_FORMAT
-    text: j => j.output?.text,
-    seconds: j => j.usage?.duration ?? 0,
-    words: j => {
-      const s = j.output?.sentence;
-      return (Array.isArray(s) ? s : [s]).flatMap(x => x?.words || []);
-    },
-  },
-  {
-    // qwen3-asr 系。没有时长戳，usage 字段名也不同。
-    match: m => m.startsWith('qwen3-asr'),
-    extraParams: {},
-    text: j => j.output?.choices?.[0]?.message?.content?.[0]?.text,
-    seconds: j => j.usage?.seconds ?? 0,
-    words: () => [],
-  },
-];
-
-const dialect = DIALECTS.find(d => d.match(MODEL)) || DIALECTS[0];
-
-class PermanentError extends Error {}
-
-/** 转写一个切片。返回 { text, seconds }。 */
-async function asrOnce(file) {
-  const b64 = readFileSync(file).toString('base64');
-  const res = await fetch(ENDPOINT, {
-    signal: requestSignal(),
-    method: 'POST',
-    headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: MODEL,
-      input: {
-        messages: [
-          { role: 'system', content: [{ text: CONTEXT }] },
-          { role: 'user', content: [{ audio: `data:audio/mp3;base64,${b64}` }] },
-        ],
-      },
-      parameters: { ...dialect.extraParams, asr_options: { language: LANG, enable_itn: true } },
-    }),
-  });
-
-  const body = await res.json().catch(() => ({}));
-
-  // 「没识别到任何词」不是失败，是一个有效结论：这条没人声。
-  // qwen3-asr 遇到这种情况返回 200 + 空文本，qwen-audio-3.0 却报 400。
-  // 当成错误处理会有三个后果：白重试三次、状态错标成 failed，
-  // 而且这类纯画面视频正是 OCR 增强要挑的目标（见 docs/待办-OCR增强.md），
-  // 标成 failed 就再也进不了候选名单。
-  if (res.status === 400 && /HAVE_NO_WORDS/i.test(`${body.code || ''} ${body.message || ''}`)) {
-    return { text: '', seconds: 0, words: [] };
-  }
-
-  if (!res.ok) {
-    const msg = `HTTP ${res.status} ${body.code || ''} ${body.message || ''}`.trim();
-    // 其余 4xx 是请求本身的问题（参数错、音频超长、key 无效），重试无意义；
-    // 429 例外——那是限流，等一等就好。
-    if (res.status >= 400 && res.status < 500 && res.status !== 429) throw new PermanentError(msg);
-    throw new Error(msg);
-  }
-
-  if (!body.output || typeof dialect.text(body) !== 'string') throw new Error('ASR 响应缺少转写结果');
-  return {
-    text: String(dialect.text(body) ?? '').trim(),
-    seconds: dialect.seconds(body) || 0,
-    words: dialect.words(body) || [],
-  };
-}
-
 /** 带退避重试。限流和 5xx 值得再试，参数错不值得。 */
 async function asr(file, tries = 3) {
   let last;
   for (let i = 0; i < tries; i++) {
     try {
-      return await asrOnce(file);
+      return await asrOnce(file, { ...ASR_CONFIG, context: CONTEXT, signal: requestSignal() });
     } catch (e) {
       if (e instanceof PermanentError || e instanceof PauseError) throw e;
       last = e;
@@ -527,7 +447,7 @@ async function main() {
   if (has('--keep-days') && valOf('--keep-days') !== '0') throw new Error('当前策略固定为批次收尾清理，不再保留多天');
   if (FORCE) throw new Error('当前阶段不支持强制重复 ASR，请按已有进度续跑');
   if (!API_KEY && !DRY_RUN && !CLEAN_ONLY) {
-    die(EXIT.CONFIG, `未配置 DUST_DASHSCOPE_KEY。写进 ${CONF_FILE}：DUST_DASHSCOPE_KEY=sk-xxxx`);
+    die(EXIT.CONFIG, `未配置转写密钥。请在 ${CONF_FILE} 中设置 DUST_ASR_KEY（百炼直连也可沿用 DUST_DASHSCOPE_KEY）`);
   }
   if (!CASUAL) {
     stage.acquireLock();
