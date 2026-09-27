@@ -108,8 +108,9 @@ export function setPurpose(id, purpose) {
   if (!row || row.media_type === 'gallery' || !inScope(id) || ['baseline','gallery','too_long'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
   const now = Math.floor(Date.now()/1000);
   d.prepare(`UPDATE items SET processing_mode=?,routing_reason='用户手动选择',routing_source='manual',routing_model=NULL,routed_at=?,
-    status=?,skip_reason=NULL,needs_ocr=?,attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?`)
-    .run(purpose,now,purpose==='review'?'review':'pending',0,now,id);
+    status=?,skip_reason=NULL,needs_ocr=?,delete_after_note=CASE WHEN ?='note' THEN delete_after_note ELSE 0 END,
+    attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?`)
+    .run(purpose,now,purpose==='review'?'review':'pending',0,purpose,now,id);
   if (purpose !== 'review') retryItem(id);
   return purpose;
 }

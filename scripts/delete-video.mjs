@@ -14,7 +14,7 @@ export async function moveVideoToTrash(path) {
   await execute('/usr/bin/trash',['-s',path],{timeout:10000,maxBuffer:64*1024});
 }
 
-export async function deleteLocalVideo({id,home=DUST_HOME,trashFile=moveVideoToTrash}) {
+export async function deleteLocalVideo({id,home=DUST_HOME,trashFile=moveVideoToTrash,afterNote=false}) {
   id=String(id);
   const store=createStore(home),item=store.item(id);
   if(item.media_type==='gallery')throw new HttpError(400,'此操作只支持视频');
@@ -36,8 +36,8 @@ export async function deleteLocalVideo({id,home=DUST_HOME,trashFile=moveVideoToT
     snapshot={version:1,requestedAt:new Date().toISOString(),source,item:row};
     atomicWrite(record,JSON.stringify({...snapshot,state:'prepared'},null,2)+'\n');
     // 先验证数据库写入，再移动文件；事务提交前失败可回滚。恢复记录保留原始条目。
-    db.prepare("UPDATE items SET media_deleted=1,status=?,skip_reason='video_deleted',needs_ocr=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?")
-      .run(row.status==='removed'?'removed':row.note_path?'extracted':'skipped',Math.floor(Date.now()/1000),id);
+    db.prepare("UPDATE items SET media_deleted=1,status=?,skip_reason=?,needs_ocr=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?")
+      .run(row.status==='removed'?'removed':row.note_path?'extracted':'skipped',afterNote?null:'video_deleted',Math.floor(Date.now()/1000),id);
     await trashFile(source);
     if(existsSync(source))throw new Error('视频仍在原位置，未完成移入废纸篓');
     db.exec('COMMIT');

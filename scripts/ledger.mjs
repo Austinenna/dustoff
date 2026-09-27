@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS items (
   gear          TEXT,               -- 下的哪一档码率
   media_deleted INTEGER DEFAULT 0,  -- mp4 是否已清理。1 表示提取完删掉了
   retain_media  INTEGER DEFAULT 0,  -- 笔记仍有内容缺项时保留素材，不代表另一处理类型
+  delete_after_note INTEGER DEFAULT 0, -- 用户选择本地视频转笔记，成功后清理原视频
   has_audio     INTEGER,            -- 文件有没有音轨。NULL=未检测 0=无 1=有
                                     -- 无音轨的没法做 ASR，需要重下（见 requeueSilent）
 

@@ -14,6 +14,7 @@ import { noteOne, writeNote, HASH, CONF as NOTES_CONF } from './notes.mjs';
 import { classifyItem, PURPOSES } from './scripts/routing.mjs';
 import { downloadGallery } from './scripts/gallery.mjs';
 import { downloadOne } from './scripts/download.mjs';
+import { cleanConvertedVideos } from './scripts/video-to-note.mjs';
 const scripts = join(dirname(fileURLToPath(import.meta.url)), 'scripts');
 const fresh = id => db().prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
 async function script(name, args, env, log) {
@@ -34,7 +35,7 @@ async function script(name, args, env, log) {
     });
   });
 }
-export async function main(args = process.argv.slice(2), { runScript = script } = {}) {
+export async function main(args = process.argv.slice(2), { runScript = script, trashFile } = {}) {
   const has = f => args.includes(f);
   const value = f => { const i = args.indexOf(f); return i < 0 ? null : args[i+1]; };
   const dry = has('--dry-run'), noScan = has('--no-scan'), downloadOnly = has('--download-only'), skipNotes = has('--skip-notes');
@@ -111,6 +112,7 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
       let kind = row.media_type === 'gallery' ? 'gallery' : row.processing_mode || 'routing';
       if (summary.pausedTypes[kind]) continue;
       try {
+        if(row.delete_after_note&&row.status==='pending')throw new Error('本地原视频不可用，转换已暂停；请恢复原文件后重试');
         if (row.status === 'pending') {
           const reason = mediaDecision(item);
           if (reason && reason !== 'unknown_duration') { markSkipped(id, reason); summary.skipped++; continue; }
@@ -209,6 +211,10 @@ export async function main(args = process.argv.slice(2), { runScript = script } 
       if (baseline() && !initializedThisRun) {
         try { summary.cleanup = cleanMedia({ dryRun:false }); }
         catch(e) { summary.failures.push({ error:`收尾清理失败：${e.message}` }); }
+        try {
+          summary.convertedCleanup = await cleanConvertedVideos({trashFile,log});
+          summary.failures.push(...summary.convertedCleanup.failures);
+        } catch(e) { summary.failures.push({ error:`转换视频清理失败：${e.message}` }); }
       }
       summary.pending = pendingQueue().length; summary.usedToday = usage();
       atomicWrite(join(stage.runDir, 'result.json'), JSON.stringify(summary, null, 2));

@@ -37,7 +37,8 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       if(kind==='retry'){const i=store.item(body.id);if(i.status!=='failed')throw new HttpError(400,'只能重试已失败作品');}
       if(kind==='purpose'){if(!store.item(body.id).can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['note','video','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
       if(kind==='video-delete'){if(store.item(body.id).media_type==='gallery')throw new HttpError(400,'此操作只支持视频');}
-      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose','video-delete'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
+      if(kind==='video-to-note'){const i=store.item(body.id);if(!i.can_convert_to_note&&!(i.delete_after_note&&i.processing_mode==='note'&&!i.media_deleted))throw new HttpError(400,'这条作品不支持从本地视频转为笔记');}
+      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose','video-delete','video-to-note'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
     }
     mkdirSync(actionsDir,{recursive:true,mode:0o700});
     const logfile=join(actionsDir,'latest-action.log');let fd=openSync(logfile,'w',0o600),written=0;
@@ -110,6 +111,12 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       } else switch(path){
         case '/api/settings':result=store.saveSettings(data);break;
         case '/api/video-prepare':result=media.prepare(data.id);break;
+        case '/api/video-to-note': {
+          start('video-to-note',data);const operation=active;
+          const code=await new Promise(resolve=>operation.child.once('close',resolve));
+          if(code!==0)throw new HttpError(code===3?409:400,operation.error||'未能加入待办，请查看控制台操作日志');
+          result={queued:true};break;
+        }
         case '/api/video-delete': {
           if(data.confirm!==true)throw new HttpError(400,'请先确认将视频移入废纸篓');
           start('video-delete',data);const operation=active;

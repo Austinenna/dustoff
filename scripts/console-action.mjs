@@ -8,12 +8,17 @@ import { atomicWrite } from './policy.mjs';
 import { createStage } from './stage.mjs';
 import { retryItem, setPurpose } from './daily.mjs';
 import { deleteLocalVideo } from './delete-video.mjs';
+import { queueVideoToNote } from './video-to-note.mjs';
 const [action,id,purpose]=process.argv.slice(2);
 const stage=createStage({name:'console-action',dustHome:DUST_HOME,notify:false});
-if(!['retry','purpose','login','video-delete'].includes(action))throw new Error('不支持的控制台操作');
-if(['retry','purpose','video-delete'].includes(action)&&!/^\d{1,30}$/.test(id||''))throw new Error('作品 ID 无效');
+if(!['retry','purpose','login','video-delete','video-to-note'].includes(action))throw new Error('不支持的控制台操作');
+if(['retry','purpose','video-delete','video-to-note'].includes(action)&&!/^\d{1,30}$/.test(id||''))throw new Error('作品 ID 无效');
 stage.acquireLock();
-if(action==='video-delete') {
+if(action==='video-to-note') {
+  try {queueVideoToNote(id);stage.log(`视频 ${id} 已加入待办，下次运行使用本地视频生成笔记，成功后移入废纸篓`);}
+  catch(e){stage.log(e.message);process.send?.({type:'action-error',message:e.message});process.exitCode=1;}
+  finally{stage.releaseLock();stage.pruneRuns();}
+} else if(action==='video-delete') {
   try {await deleteLocalVideo({id});stage.log(`视频 ${id} 已移入废纸篓，文字与收藏记录保留`);}
   catch(e){stage.log(e.message);process.send?.({type:'action-error',message:e.message});process.exitCode=1;}
   finally{stage.releaseLock();stage.pruneRuns();}

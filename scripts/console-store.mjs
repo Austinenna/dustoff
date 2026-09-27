@@ -13,7 +13,7 @@ import { readGallery } from './gallery.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
-const savedVideoWhere = "COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (processing_mode='video' OR (processing_mode IS NULL AND status='saved'))";
+const savedVideoWhere = conversion => `COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (processing_mode='video' OR (processing_mode IS NULL AND status='saved') OR (${conversion}=1 AND processing_mode='note'))`;
 const number = (label, group, fallback, min, max, step = 1) => ({ label, group, type:'number', fallback, min, max, step });
 const text = (label, group, fallback, type = 'text') => ({ label, group, type, fallback });
 export const FIELDS = {
@@ -127,9 +127,12 @@ export function createStore(home = DUST_HOME) {
     const search=String(params.q||'').slice(0,200),status=params.status||'all';
     return readDb(db=>{
       if(!has(db,'items'))return {items:[],total:0,page:1,pages:1,size};
+      // 旧账本在首次写操作时迁移；只读控制台也能先展示转换按钮。
+      const columns=new Set(db.prepare('PRAGMA table_info(items)').all().map(c=>c.name));
+      const conversion=columns.has('delete_after_note')?'COALESCE(delete_after_note,0)':'0';
       const where=["platform='douyin'"],values=[];
       if(params.galleries==='1')where.push("media_type='gallery' AND status='saved' AND media_path IS NOT NULL AND COALESCE(media_deleted,0)=0");
-      else if(params.videos==='1')where.push(savedVideoWhere);
+      else if(params.videos==='1')where.push(savedVideoWhere(conversion));
       else if(params.results==='1') {where.push("COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
       else if(status==='baseline')where.push("skip_reason='baseline'");
       else if(status!=='all'){if(!['pending','downloaded','transcribed','extracted','saved','review','failed','skipped','removed'].includes(status))throw new HttpError(400,'状态无效');where.push('status=?');values.push(status);}
@@ -137,7 +140,7 @@ export function createStore(home = DUST_HOME) {
       const clause=where.join(' AND '),total=db.prepare(`SELECT count(*) n FROM items WHERE ${clause}`).get(...values).n,pages=Math.max(1,Math.ceil(total/size)),actual=Math.min(page,pages);
       const order=params.videos==='1'||params.galleries==='1'?'COALESCE(updated_at,collected_at,first_seen)':'COALESCE(extracted_at,transcribed_at,collected_at,first_seen)';
       const imageCount=db.prepare('PRAGMA table_info(items)').all().some(c=>c.name==='image_count')?'image_count':'NULL AS image_count';
-      const rows=db.prepare(`SELECT id,title,author,status,media_type,${imageCount},skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
+      const rows=db.prepare(`SELECT id,title,author,status,media_type,${imageCount},${conversion} AS delete_after_note,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr,retain_media FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
       const previews=readPreviews(home);
       return {items:rows.map(r=>({...r,routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
     },{items:[],total:0,page:1,pages:1,size});
@@ -170,7 +173,10 @@ export function createStore(home = DUST_HOME) {
     const row=readDb(db=>has(db,'items')?db.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id):null,null);
     if(!row)throw new HttpError(404,'找不到这条作品');
     const inQueue=readDb(db=>has(db,'daily_queue')&&!!db.prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id),false);
-    return JSON.parse(redact({...row,routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:row.media_type!=='gallery'&&inQueue&&!['baseline','gallery','too_long'].includes(row.skip_reason)&&row.status!=='removed',display_title:displayTitle(row)}));
+    const canChange=row.media_type!=='gallery'&&inQueue&&!['baseline','gallery','too_long'].includes(row.skip_reason)&&row.status!=='removed';
+    const canConvert=canChange&&!!row.media_path&&!row.media_deleted&&row.has_audio!==0&&Number(row.duration_s)>0&&Number(row.duration_s)<=policy().seconds
+      &&(row.processing_mode==='video'||(row.processing_mode==null&&row.status==='saved'));
+    return JSON.parse(redact({...row,routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,display_title:displayTitle(row)}));
   }
   function fileFor(id,kind) {const row=item(id),path=row[kind==='note'?'note_path':kind==='video'?'media_path':'text_path'];if(!['note','text','video'].includes(kind)||!path||(kind==='video'&&row.media_deleted))throw new HttpError(404,'尚未生成这份文件或视频已清理');const p=localPath(path);if(kind==='video'?!['.mp4','.mov','.webm','.m4v'].includes(extname(p)):extname(p)!==(kind==='note'?'.md':'.txt'))throw new HttpError(400,'产物格式不正确');if(!existsSync(p)||!statSync(p).isFile())throw new HttpError(404,'文件已移动或不存在，请核对账本路径');return p;}
   function gallery(id) {

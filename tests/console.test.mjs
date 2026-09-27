@@ -42,6 +42,33 @@ test('笔记、视频、图集按处理类型独立展示；旧文字产物不�
 });
 async function serve(options){const app=createConsole({...options,scheduler:options.scheduler||fakeScheduler()});const url=await app.listen(0);const html=await (await fetch(url)).text();const token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];return {...app,url,token,post:(path,data,headers={})=>fetch(url+'/api/'+path,{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token,...headers},body:JSON.stringify(data)}),close:()=>new Promise(resolve=>app.server.close(resolve))};}
 
+test('转为笔记接口支持旧账本，只入队并保留播放；验证来源、互斥与重复请求',async()=>{
+  const f=fixture(),file=join(f.home,'saved-media','18','video.mp4');let spawned=0;
+  mkdirSync(dirname(file),{recursive:true});writeFileSync(file,'saved local video');
+  const db=new DatabaseSync(join(f.home,'index.sqlite'));
+  db.prepare("UPDATE items SET status='saved',processing_mode='video',duration_s=1,media_path=?,media_deleted=0,has_audio=1,text_path=NULL,transcribed_at=NULL WHERE id='18'").run(file);
+  db.exec('ALTER TABLE items DROP COLUMN delete_after_note');db.close();
+  const app=await serve({home:f.home,spawnProcess:(node,args,opts)=>{
+    spawned++;assert.deepEqual(args.slice(1),['video-to-note','18']);return spawn(node,args,opts);
+  }});
+  try{
+    assert.equal(app.store.overview().videos,1);assert.equal(app.store.item('18').can_convert_to_note,true);
+    assert.equal((await app.post('video-to-note',{id:'18'},{'X-Dustoff-Token':'wrong'})).status,403);
+    assert.equal((await app.post('video-to-note',{id:'18'},{Origin:'https://other.invalid'})).status,403);
+    assert.equal((await app.post('video-to-note',{id:'../18'})).status,400);
+    assert.equal((await app.post('video-to-note',{id:'1'})).status,400);
+    writeFileSync(join(f.home,'.lock.pipeline'),String(process.pid));
+    assert.equal((await app.post('video-to-note',{id:'18'})).status,409);rmSync(join(f.home,'.lock.pipeline'));
+    assert.equal(spawned,0);
+    assert.equal((await app.post('video-to-note',{id:'18'})).status,200);
+    const item=app.store.item('18');assert.equal(item.status,'downloaded');assert.equal(item.delete_after_note,1);assert.equal(item.processing_mode,'note');
+    assert.equal(app.store.overview().pending,1);assert.equal(app.store.overview().usedToday,0);assert.equal(app.store.overview().videos,1);
+    assert.equal(await(await fetch(app.url+'/api/video?id=18')).text(),'saved local video');
+    assert.equal((await app.post('video-to-note',{id:'18'})).status,200);assert.equal(spawned,2);
+    assert.equal(app.store.pendingItems().items.length,1);assert.equal(app.store.item('18').attempts,0);
+  }finally{await app.close();f.cleanup();}
+});
+
 for(const loaded of [false,true])test(`后台启动${loaded?'沿用已开启定时':'恢复已关闭定时'}，刷新和重复启动器不触碰开关`,async()=>{
   const f=fixture(),scheduler=fakeScheduler(),calls={status:0,start:0,stop:0};
   if(loaded)scheduler.start();
