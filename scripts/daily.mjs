@@ -4,6 +4,7 @@ import { PURPOSES } from './routing.mjs';
 import { db, importScan } from './ledger.mjs';
 import { boundaryIndex } from './incremental.mjs';
 import { POLICY, mediaDecision } from './policy.mjs';
+import { processingActions } from './item-actions.mjs';
 function database() {
   const d = db();
   d.exec(`CREATE TABLE IF NOT EXISTS daily_state (name TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -83,6 +84,7 @@ export function retryItem(id) {
   if (!inScope(id)) throw new Error('条目不在本次启用范围内');
   const row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
   if (!row || ['extracted','saved','review'].includes(row.status) || row.skip_reason === 'baseline') throw new Error('已完成或基线条目不能作为失败待办重试');
+  if (['user_discarded','user_deleted'].includes(row.skip_reason)) throw new Error('这条作品已停止处理，请先在收藏详情重新选择用途');
   if (row.skip_reason === 'too_long' || row.skip_reason === 'gallery') throw new Error('本轮不支持恢复主动跳过的内容');
   if (row.media_type === 'gallery') {
     d.prepare("UPDATE items SET status='pending',attempts=0,last_error=NULL WHERE platform='douyin' AND id=?").run(id);
@@ -105,7 +107,7 @@ export function retryItem(id) {
 export function setPurpose(id, purpose) {
   if (!['note','video','review'].includes(purpose)) throw new Error('用途无效');
   const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
-  if (!row || row.media_type === 'gallery' || !inScope(id) || ['baseline','gallery','too_long'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
+  if (!row || row.media_type === 'gallery' || !inScope(id) || ['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
   const now = Math.floor(Date.now()/1000);
   d.prepare(`UPDATE items SET processing_mode=?,routing_reason='用户手动选择',routing_source='manual',routing_model=NULL,routed_at=?,
     status=?,skip_reason=NULL,needs_ocr=?,delete_after_note=CASE WHEN ?='note' THEN delete_after_note ELSE 0 END,
@@ -113,6 +115,32 @@ export function setPurpose(id, purpose) {
     .run(purpose,now,purpose==='review'?'review':'pending',0,purpose,now,id);
   if (purpose !== 'review') retryItem(id);
   return purpose;
+}
+
+/** 调用方须持有流水线锁。保留记录、产物与启用范围，停止自动处理。 */
+export function discardItem(id) {
+  const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+  if (!row) throw new Error('找不到这条作品');
+  if (row.skip_reason === 'user_discarded') return {discarded:true, alreadyDiscarded:true};
+  if (!processingActions(row,inScope(id)).can_discard) throw new Error('只能放弃当前范围内尚未完成的处理任务');
+  const now = Math.floor(Date.now()/1000);
+  d.prepare("UPDATE items SET status='skipped',skip_reason='user_discarded',delete_after_note=0,updated_at=? WHERE platform='douyin' AND id=?").run(now,id);
+  return {discarded:true};
+}
+
+/** 调用方须持有流水线锁。隐藏无产物的记录，保留去重标记，防止重扫后恢复。 */
+export function deleteItem(id) {
+  const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+  if (!row) throw new Error('找不到这条作品');
+  if (row.skip_reason === 'user_deleted') return {deleted:true, alreadyDeleted:true};
+  if (!processingActions(row,inScope(id)).can_delete) throw new Error('只能删除当前范围内没有本地产物的待确认或已放弃记录');
+  d.exec('BEGIN IMMEDIATE');
+  try {
+    d.prepare('DELETE FROM daily_queue WHERE id=?').run(id);
+    d.prepare("UPDATE items SET status='skipped',skip_reason='user_deleted',delete_after_note=0,updated_at=? WHERE platform='douyin' AND id=?").run(Math.floor(Date.now()/1000),id);
+    d.exec('COMMIT');
+  } catch (error) { d.exec('ROLLBACK'); throw error; }
+  return {deleted:true};
 }
 
 /** 调用方持有流水线锁。只恢复未完成的旧混合用途；已有成果、文件、基线与额度保留。 */

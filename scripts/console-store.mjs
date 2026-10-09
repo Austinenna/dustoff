@@ -10,6 +10,7 @@ import { chatEndpoint } from './routing.mjs';
 import { DASHSCOPE_ENDPOINT, readAsrConfig } from './asr-client.mjs';
 import { sessionSummary } from './session-status.mjs';
 import { readGallery } from './gallery.mjs';
+import { processingActions } from './item-actions.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
@@ -130,7 +131,7 @@ export function createStore(home = DUST_HOME) {
       // 旧账本在首次写操作时迁移；只读控制台也能先展示转换按钮。
       const columns=new Set(db.prepare('PRAGMA table_info(items)').all().map(c=>c.name));
       const conversion=columns.has('delete_after_note')?'COALESCE(delete_after_note,0)':'0';
-      const where=["platform='douyin'"],values=[];
+      const where=["platform='douyin'", "COALESCE(skip_reason,'')!='user_deleted'"],values=[];
       if(params.galleries==='1')where.push("media_type='gallery' AND status='saved' AND media_path IS NOT NULL AND COALESCE(media_deleted,0)=0");
       else if(params.videos==='1')where.push(savedVideoWhere(conversion));
       else if(params.results==='1') {where.push("COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
@@ -142,7 +143,8 @@ export function createStore(home = DUST_HOME) {
       const imageCount=db.prepare('PRAGMA table_info(items)').all().some(c=>c.name==='image_count')?'image_count':'NULL AS image_count';
       const rows=db.prepare(`SELECT id,title,author,status,media_type,${imageCount},${conversion} AS delete_after_note,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr,retain_media FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
       const previews=readPreviews(home);
-      return {items:rows.map(r=>({...r,routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
+      const inScope=has(db,'daily_queue')?db.prepare('SELECT 1 FROM daily_queue WHERE id=?'):null;
+      return {items:rows.map(r=>({...r,...processingActions(r,!!inScope?.get(r.id)),routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
     },{items:[],total:0,page:1,pages:1,size});
   }
   function displayTitle(row) {
@@ -173,10 +175,10 @@ export function createStore(home = DUST_HOME) {
     const row=readDb(db=>has(db,'items')?db.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id):null,null);
     if(!row)throw new HttpError(404,'找不到这条作品');
     const inQueue=readDb(db=>has(db,'daily_queue')&&!!db.prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id),false);
-    const canChange=row.media_type!=='gallery'&&inQueue&&!['baseline','gallery','too_long'].includes(row.skip_reason)&&row.status!=='removed';
+    const canChange=row.media_type!=='gallery'&&inQueue&&!['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason)&&row.status!=='removed';
     const canConvert=canChange&&!!row.media_path&&!row.media_deleted&&row.has_audio!==0&&Number(row.duration_s)>0&&Number(row.duration_s)<=policy().seconds
       &&(row.processing_mode==='video'||(row.processing_mode==null&&row.status==='saved'));
-    return JSON.parse(redact({...row,routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,display_title:displayTitle(row)}));
+    return JSON.parse(redact({...row,...processingActions(row,inQueue),routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,display_title:displayTitle(row)}));
   }
   function fileFor(id,kind) {const row=item(id),path=row[kind==='note'?'note_path':kind==='video'?'media_path':'text_path'];if(!['note','text','video'].includes(kind)||!path||(kind==='video'&&row.media_deleted))throw new HttpError(404,'尚未生成这份文件或视频已清理');const p=localPath(path);if(kind==='video'?!['.mp4','.mov','.webm','.m4v'].includes(extname(p)):extname(p)!==(kind==='note'?'.md':'.txt'))throw new HttpError(400,'产物格式不正确');if(!existsSync(p)||!statSync(p).isFile())throw new HttpError(404,'文件已移动或不存在，请核对账本路径');return p;}
   function gallery(id) {
@@ -202,7 +204,7 @@ export function createStore(home = DUST_HOME) {
     const midnight=new Date(date.getFullYear(),date.getMonth(),date.getDate()).getTime()/1000;
     const totals=readDb(db=>{
       const out={total:0,notes:0,todayNotes:0,pending:0,failed:0,usedToday:0,baseline:null,statuses:[]};
-      if(has(db,'items')){out.statuses=db.prepare("SELECT status,count(*) n FROM items WHERE platform='douyin' GROUP BY status").all();out.total=out.statuses.reduce((s,r)=>s+r.n,0);out.notes=out.statuses.find(r=>r.status==='extracted')?.n||0;out.failed=out.statuses.find(r=>r.status==='failed')?.n||0;out.todayNotes=db.prepare("SELECT count(*) n FROM items WHERE platform='douyin' AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND extracted_at>=?").get(midnight).n;}
+      if(has(db,'items')){out.statuses=db.prepare("SELECT status,count(*) n FROM items WHERE platform='douyin' AND COALESCE(skip_reason,'')!='user_deleted' GROUP BY status").all();out.total=out.statuses.reduce((s,r)=>s+r.n,0);out.notes=out.statuses.find(r=>r.status==='extracted')?.n||0;out.failed=out.statuses.find(r=>r.status==='failed')?.n||0;out.todayNotes=db.prepare("SELECT count(*) n FROM items WHERE platform='douyin' AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND extracted_at>=?").get(midnight).n;}
       if(has(db,'daily_queue')&&has(db,'items'))out.pending=db.prepare("SELECT count(*) n FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform='douyin' WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3").get().n;
       if(has(db,'daily_usage'))out.usedToday=db.prepare('SELECT count(*) n FROM daily_usage WHERE day=?').get(day).n;
       if(has(db,'daily_state')){const r=db.prepare("SELECT value FROM daily_state WHERE name='baseline'").get();if(r)out.baseline=JSON.parse(r.value);}

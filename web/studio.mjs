@@ -177,6 +177,33 @@ function videoDeleteButton(item) {
   return item.media_type!=='gallery'&&item.media_path&&!item.media_deleted
     ?button('删除视频','delete-video',`data-id="${item.id}" data-idle ${busy()?'disabled':''}`,'quiet danger'):'';
 }
+function processingButtons(item) {
+  const attrs=`data-id="${item.id}" data-idle ${busy()?'disabled':''}`;
+  return (item.can_discard?button('放弃处理','discard-item',`${attrs} title="停止自动处理，保留收藏记录和本地文件"`,'quiet danger'):'')
+    +(item.can_delete?button('删除记录','delete-item',`${attrs} title="从本机列表移除，不取消抖音收藏"`,'quiet danger'):'');
+}
+function processingPanel(item) {
+  if(!item.can_discard&&!item.can_delete&&item.skip_reason!=='user_discarded')return '';
+  const hint=item.skip_reason==='user_discarded'?'已放弃处理。重新选择用途并保存即可恢复。'
+    :'放弃处理会停止自动处理，保留收藏记录和本地文件。';
+  return `<section><h3>处理操作</h3><p class="muted">${hint}${item.can_delete?' 删除记录会从本机列表移除，不取消抖音收藏。':''}</p><div class="row">${processingButtons(item)}</div></section>`;
+}
+async function stopProcessing(action,id) {
+  if(action==='delete-item'&&!window.confirm('删除这条收藏记录？只会从本机列表移除，不会取消抖音收藏；此操作不可恢复。'))return;
+  if(action==='discard'&&!window.confirm('放弃处理这条收藏？记录和已有本地文件会保留，之后仍可重新选择用途。'))return;
+  const epoch=dialogEpoch;
+  await api(action,{id});
+  delete state.review.choices[id];
+  if(action==='delete-item'&&dialog.open&&epoch===dialogEpoch&&drawerId===id)closeDialog();
+  await refreshOverview();
+  if(state.route==='pending')await loadPending();
+  else if(state.route==='collection'){
+    if(action==='delete-item')await go('collection');
+    else await loadCollection();
+  }
+  if(action==='discard'&&dialog.open&&epoch===dialogEpoch&&drawerId===id)await detail(id);
+  notice(action==='discard'?'已放弃处理，记录和本地文件保留；可在收藏详情重新选择用途恢复。':'记录已从本机列表移除，再次扫描不会重新处理；抖音收藏保持不变。');
+}
 function videoNoteLabel(item) {
   return item.status==='extracted'?(item.retain_media?'内容不足，视频保留':'笔记已生成，待清理视频')
     :['failed','skipped'].includes(item.status)?'转换未完成，视频保留':'待转为笔记';
@@ -281,6 +308,7 @@ async function detail(id) {
   try {
     const i=await api('item?'+query({id}));if(epoch!==dialogEpoch||!dialog.open)return;
     dialog.innerHTML=dialogHead('收藏详情')+`<div class="drawer-body"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</p><div class="row">${tag(STATUSES[i.status]||i.status)}${tag(mediaLabel(i))}</div><section><h3>留下的内容</h3><div class="file-actions">${i.note_path?button('阅读知识笔记','read',`data-id="${id}" data-kind="note"`):''}${i.text_path?button('阅读文字稿','read',`data-id="${id}" data-kind="text"`):''}${i.media_path&&!i.media_deleted?button(i.media_type==='gallery'?'查看图集':'播放视频',i.media_type==='gallery'?'view-gallery':'play-video',`data-id="${id}"`):''}${button('查看原作品 ↗','open',`data-id="${id}" data-kind="source"`,'quiet')}${videoNoteButton(i)}${videoDeleteButton(i)}</div>${videoNoteHint(i)}${!i.note_path&&!i.text_path?`<p class="muted">${i.media_type==='gallery'?'图集仅保存图片，暂不整理笔记。':'暂未生成文字内容。'}</p>`:''}</section>${i.media_type==='gallery'?'<section><h3>保存图集</h3><p class="muted">按原顺序保存整组图片，每组计一条每日额度。</p></section>':`<section><h3>这条收藏用来做什么</h3><p class="muted">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form method="post" id="purpose-form"><input type="hidden" name="id" value="${id}"><div class="purpose-options">${Object.entries(PURPOSES).filter(([key])=>key!=='gallery').map(([key,label])=>`<label><input type="radio" name="purpose" value="${key}" ${i.processing_mode===key?'checked':''} ${!i.can_change_purpose?'disabled':''} required><span>${label}<small>${({note:'语音转写并整理知识笔记',video:'只保存高清原声视频',review:'暂不处理，等你确认'})[key]}</small></span></label>`).join('')}</div>${i.can_change_purpose?`<p class="muted">保存后更新用途与待办状态，下一轮运行时处理；已有文件保留。</p><button class="button primary" data-idle ${busy()?'disabled':''}>保存用途</button>`:'<p class="muted">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}${i.last_error?`<section class="error-detail"><h3>上次未完成</h3><p>${esc(i.last_error)}</p>${i.status==='failed'?button('恢复为待办','retry',`data-id="${id}" data-idle ${busy()?'disabled':''}`):''}</section>`:''}<details><summary>作品信息</summary><dl><dt>作品 ID</dt><dd>${id}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd></dl></details></div>`;
+    if(i.media_type!=='gallery'&&(i.can_discard||i.can_delete||i.skip_reason==='user_discarded'))dialog.querySelector('.drawer-body')?.insertAdjacentHTML('beforeend',processingPanel(i));
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('收藏详情')+empty(e.message);}
 }
 function executionPanel() {
@@ -292,7 +320,7 @@ function pendingPage() {
 }
 function reviewRow(i) {
   const choice=state.review.choices[i.id];
-  return `<article class="review-row"><div class="review-info"><h3><button class="item-title" data-action="detail" data-id="${i.id}">${esc(i.title||i.id)}</button></h3><small>${esc(i.author||'未知作者')} · ${duration(i.duration_s)}</small><p class="muted">${esc(i.routing_reason||'需要你确认这条收藏的用途。')}</p>${button('查看原作品 ↗','open',`data-id="${i.id}" data-kind="source"`,'quiet')}</div><form class="review-form" method="post" aria-label="确认 ${esc(i.title||i.id)} 的用途"><input type="hidden" name="id" value="${i.id}"><fieldset><legend>选择用途</legend>${[['note','知识笔记','语音转写并整理笔记'],['video','视频','保存高清原声视频']].map(([key,label,hint])=>`<label><input type="radio" name="purpose" value="${key}" required ${choice===key?'checked':''}><span>${label}<small>${hint}</small></span></label>`).join('')}</fieldset><button type="submit" class="button primary" data-idle ${busy()?'disabled':''}>确认用途</button></form></article>`;
+  return `<article class="review-row"><div class="review-info"><h3><button class="item-title" data-action="detail" data-id="${i.id}">${esc(i.title||i.id)}</button></h3><small>${esc(i.author||'未知作者')} · ${duration(i.duration_s)}</small><p class="muted">${esc(i.routing_reason||'需要你确认这条收藏的用途。')}</p><div class="row">${button('查看原作品 ↗','open',`data-id="${i.id}" data-kind="source"`,'quiet')}${processingButtons(i)}</div></div><form class="review-form" method="post" aria-label="确认 ${esc(i.title||i.id)} 的用途"><input type="hidden" name="id" value="${i.id}"><fieldset><legend>选择用途</legend>${[['note','知识笔记','语音转写并整理笔记'],['video','视频','保存高清原声视频']].map(([key,label,hint])=>`<label><input type="radio" name="purpose" value="${key}" required ${choice===key?'checked':''}><span>${label}<small>${hint}</small></span></label>`).join('')}</fieldset><button type="submit" class="button primary" data-idle ${busy()?'disabled':''}>确认用途</button></form></article>`;
 }
 async function loadPending() {
   const epoch=++listEpoch,page=pageEpoch;
@@ -300,7 +328,7 @@ async function loadPending() {
   if(epoch!==listEpoch||page!==pageEpoch||state.route!=='pending')return;
   state.review.page=reviews.page;
   const o=state.overview;
-  $('#pending-content').innerHTML=`<section class="review-section" aria-label="待确认用途"><div class="between"><h2>待确认 · ${reviews.total} 条</h2><small>确认后，下轮运行时处理</small></div><p class="muted">知识笔记用于语音转写与整理，视频用于保存高清原声。选择用途后点击确认。</p>${reviews.items.length?reviews.items.map(reviewRow).join('')+pagination(reviews,'review'):empty('没有待确认的收藏。需要你判断用途的内容会显示在这里。')}</section><section class="run-section" aria-label="等待自动处理"><div class="between"><h2>等待自动处理 · ${o.pending} 条</h2><small>按实际处理顺序 · 最多显示 10 条</small></div>${queue.items.length?queue.items.map(i=>`<div class="queue-row"><div><button class="item-title" data-action="detail" data-id="${i.id}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small></div><span>${esc(i.media_type==='gallery'?'图集':PURPOSES[i.processing_mode]||'等待判断用途')}</span>${tag(STATUSES[i.status]||i.status)}</div>`).join(''):empty('当前没有等待自动处理的收藏。')}${!o.baseline?'<div class="callout">第一次运行只建立历史收藏参照，不下载历史视频。之后处理新收藏。</div>':''}${o.needsLogin||o.session.level==='expired'?'<div class="callout">登录需要更新，新收藏扫描可能受阻。<a href="#account">前往账号连接 ›</a></div>':''}<div id="run-status">${executionPanel()}</div><p class="muted">今日已处理 ${o.usedToday} / ${o.policy.daily} 条${o.failed?` · ${button(`${o.failed} 条失败需查看 ›`,'failed-items','','quiet')}`:''}</p></section><div class="footnote"><a href="#schedule">设置自动安排 ›</a><a href="#rules">调整处理规则 ›</a></div>`;
+  $('#pending-content').innerHTML=`<section class="review-section" aria-label="待确认用途"><div class="between"><h2>待确认 · ${reviews.total} 条</h2><small>确认后，下轮运行时处理</small></div><p class="muted">知识笔记用于语音转写与整理，视频用于保存高清原声。选择用途后点击确认；不需要处理的内容可放弃处理或删除记录。</p>${reviews.items.length?reviews.items.map(reviewRow).join('')+pagination(reviews,'review'):empty('没有待确认的收藏。需要你判断用途的内容会显示在这里。')}</section><section class="run-section" aria-label="等待自动处理"><div class="between"><h2>等待自动处理 · ${o.pending} 条</h2><small>按实际处理顺序 · 最多显示 10 条</small></div>${queue.items.length?queue.items.map(i=>`<div class="queue-row"><div><button class="item-title" data-action="detail" data-id="${i.id}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small></div><span>${esc(i.media_type==='gallery'?'图集':PURPOSES[i.processing_mode]||'等待判断用途')}</span>${tag(STATUSES[i.status]||i.status)}</div>`).join(''):empty('当前没有等待自动处理的收藏。')}${!o.baseline?'<div class="callout">第一次运行只建立历史收藏参照，不下载历史视频。之后处理新收藏。</div>':''}${o.needsLogin||o.session.level==='expired'?'<div class="callout">登录需要更新，新收藏扫描可能受阻。<a href="#account">前往账号连接 ›</a></div>':''}<div id="run-status">${executionPanel()}</div><p class="muted">今日已处理 ${o.usedToday} / ${o.policy.daily} 条${o.failed?` · ${button(`${o.failed} 条失败需查看 ›`,'failed-items','','quiet')}`:''}</p></section><div class="footnote"><a href="#schedule">设置自动安排 ›</a><a href="#rules">调整处理规则 ›</a></div>`;
 }
 function manualRun() {
   const o=state.overview;
@@ -327,7 +355,7 @@ function historyPage() {
 }
 function runRows() {
   const pages=Math.max(1,Math.ceil(state.runs.length/8));state.runPage=Math.min(state.runPage,pages);
-  $('#run-list').innerHTML=state.runs.slice((state.runPage-1)*8,state.runPage*8).map(r=>{const summary=runSummary(r);return `<button class="history-item ${r.id===state.runId?'active':''}" data-action="select-run" data-id="${r.id}" aria-pressed="${r.id===state.runId}"><span>${esc(fmt(r.modifiedAt))}</span><small>${esc(summary.label)}</small><small>${r.id.endsWith('-console-action')?'用途 / 恢复操作':r.id.endsWith('-run')?'日常整理':esc(r.id.split('-').at(-1))}</small></button>`;}).join('')+(state.runs.length?pagination({page:state.runPage,pages,total:state.runs.length},'runs'):empty('还没有运行记录'));
+  $('#run-list').innerHTML=state.runs.slice((state.runPage-1)*8,state.runPage*8).map(r=>{const summary=runSummary(r);return `<button class="history-item ${r.id===state.runId?'active':''}" data-action="select-run" data-id="${r.id}" aria-pressed="${r.id===state.runId}"><span>${esc(fmt(r.modifiedAt))}</span><small>${esc(summary.label)}</small><small>${r.id.endsWith('-console-action')?'收藏操作':r.id.endsWith('-run')?'日常整理':esc(r.id.split('-').at(-1))}</small></button>`;}).join('')+(state.runs.length?pagination({page:state.runPage,pages,total:state.runs.length},'runs'):empty('还没有运行记录'));
 }
 async function loadLog() {
   const epoch=++logEpoch,page=pageEpoch;
@@ -340,7 +368,7 @@ async function loadLog() {
   }catch(e){if(epoch===logEpoch&&page===pageEpoch)$('#log-detail').innerHTML=empty(e.message);}
 }
 function runEvents(log='') {
-  const events=log.split('\n').map(line=>line.match(/^\[([^\]]+)\]\s*(.+)$/)).filter(match=>match&&/扫描|新增|完成|失败|结束|暂停|保存|基线|恢复|用途/.test(match[2])).slice(-6);
+  const events=log.split('\n').map(line=>line.match(/^\[([^\]]+)\]\s*(.+)$/)).filter(match=>match&&/扫描|新增|完成|失败|结束|暂停|保存|基线|恢复|用途|放弃|删除/.test(match[2])).slice(-6);
   return events.length?`<div class="timeline" aria-label="最近执行节点">${events.map(([,time,message])=>`<div><time>${esc(time.match(/\d{2}:\d{2}(?::\d{2})?/)?.[0]||time)}</time><span>${esc(message.slice(0,300))}</span></div>`).join('')}</div>`:'';
 }
 function field(key) {
@@ -419,6 +447,7 @@ root.addEventListener('click',async event=>{
     else if(a==='gallery-select'){galleryIndex=Number(b.dataset.index);renderGallery();}
     else if(a==='play-video')await playVideo(id);
     else if(a==='delete-video')await deleteVideo(id);
+    else if(a==='discard-item'||a==='delete-item')await stopProcessing(a==='discard-item'?'discard':'delete-item',id);
     else if(a==='video-to-note')await queueVideoNote(id);
     else if(a==='prepare-video')await preparePlayback(id,dialogEpoch);
     else if(a==='manual-run')manualRun();

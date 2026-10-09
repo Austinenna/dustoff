@@ -162,6 +162,34 @@ test('控制台操作互斥且能停止自己启动的进程组',async()=>{const
 
 test('真实 retry 子进程只恢复失败待办，不调用模型也不占额度',async()=>{const f=fixture();const app=await serve({home:f.home});try{assert.equal((await app.post('retry',{id:'1'})).status,400);assert.equal((await app.post('retry',{id:'18'})).status,200);for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));assert.equal(app.execution().lastAction.exitCode,0);assert.equal(app.store.item('18').status,'transcribed');assert.equal(app.store.overview().usedToday,0);assert.equal(app.store.overview().pending,1);}finally{await app.close();f.cleanup();}});
 
+test('待确认条目支持放弃处理和删除记录；已有产物时拒绝删除',async()=>{
+  const f=fixture(),app=await serve({home:f.home});
+  try {
+    const db=new DatabaseSync(join(f.home,'index.sqlite'));
+    db.prepare("UPDATE items SET status='review',processing_mode='review',skip_reason=NULL,routing_reason='信息不足',media_path=NULL,media_deleted=0,note_path=NULL,text_path=NULL,text_chars=NULL WHERE id='18'").run();
+    db.prepare('INSERT INTO daily_queue VALUES(?,?,?)').run('17',JSON.stringify({aweme_id:'17'}),Date.now());
+    db.prepare("UPDATE items SET status='review',processing_mode='review',skip_reason=NULL WHERE id='17'").run();
+    db.close();
+    assert.equal(app.store.item('18').can_discard,true);assert.equal(app.store.item('18').can_delete,true);
+    assert.equal((await app.post('discard',{id:'18'})).status,200);
+    for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));
+    assert.equal(app.store.item('18').status,'skipped');assert.equal(app.store.item('18').skip_reason,'user_discarded');
+    assert.equal(app.store.overview().review,1);assert.equal(app.store.pendingItems().items.some(i=>i.id==='18'),false);
+    // 重复请求幂等，避免网络重试把用户操作显示为失败。
+    assert.equal((await app.post('discard',{id:'18'})).status,200);
+    for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));
+    assert.equal((await app.post('delete-item',{id:'18'})).status,200);
+    for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,20));
+    assert.equal(app.store.item('18').skip_reason,'user_deleted');
+    assert.equal(app.store.listItems({status:'review'}).items.some(i=>i.id==='18'),false);
+    assert.equal(app.store.listItems({status:'all'}).items.some(i=>i.id==='18'),false);
+    // 有文字或笔记的记录只能放弃处理，不能用“删除记录”隐藏已有成果。
+    assert.equal(app.store.item('17').can_delete,false);
+    assert.equal((await app.post('delete-item',{id:'17'})).status,400);
+    assert.equal(app.store.item('17').status,'review');
+  } finally {await app.close();f.cleanup();}
+});
+
 test('删除只移动对应视频，保留文字与恢复记录，停止自动处理并支持重复请求',async()=>{
   const f=fixture(),store=createStore(f.home),moved=[];
   try {

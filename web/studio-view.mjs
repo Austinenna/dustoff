@@ -3,7 +3,7 @@ import {escapeHtml} from './markdown.mjs';
 export const esc = escapeHtml;
 export const PURPOSES = {note:'知识笔记',video:'视频',gallery:'图集',review:'待确认'};
 export const STATUSES = {pending:'待处理',downloaded:'已下载',transcribed:'已转写',extracted:'已整理',saved:'已保存',review:'待确认',failed:'失败',skipped:'已跳过',removed:'已取消收藏'};
-export const REASONS = {video_deleted:'已手动删除视频',baseline:'历史基线，不自动处理',gallery:'图集将在下次运行恢复处理',too_long:'超过时长限制',insufficient_text:'文字材料不足，原稿和素材保留',need_ocr:'旧记录：文字材料不足',no_url:'缺少下载地址'};
+export const REASONS = {video_deleted:'已手动删除视频',user_discarded:'已放弃处理',user_deleted:'已删除记录',baseline:'历史基线，不自动处理',gallery:'图集将在下次运行恢复处理',too_long:'超过时长限制',insufficient_text:'文字材料不足，原稿和素材保留',need_ocr:'旧记录：文字材料不足',no_url:'缺少下载地址'};
 export const SETTINGS = {
   account:['DUST_WARN_DAYS'],
   models:['DUST_ROUTER_BASE','DUST_ROUTER_MODEL','DUST_ROUTER_KEY','DUST_ASR_BASE','DUST_ASR_MODEL','DUST_ASR_KEY','DUST_LLM_BASE','DUST_LLM_MODEL','DUST_LLM_KEY','DUST_LLM_EFFORT','DUST_LLM_MAX_TOKENS','DUST_ASR_CONTEXT','DUST_REQUEST_TIMEOUT_S','DUST_DASHSCOPE_KEY'],
@@ -25,6 +25,7 @@ export function mediaLabel(item) {
   return '未保存视频';
 }
 export function resultLabel(item) {
+  if(item.skip_reason==='user_discarded')return '已放弃处理';
   if(item.media_type==='gallery'&&item.status==='saved')return '图集已保存';
   return [item.note_path&&'知识笔记',item.text_path&&'文字稿'].filter(Boolean).join(' · ')||STATUSES[item.status]||item.status||'暂无结果';
 }

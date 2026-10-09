@@ -38,7 +38,9 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       if(kind==='purpose'){if(!store.item(body.id).can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['note','video','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
       if(kind==='video-delete'){if(store.item(body.id).media_type==='gallery')throw new HttpError(400,'此操作只支持视频');}
       if(kind==='video-to-note'){const i=store.item(body.id);if(!i.can_convert_to_note&&!(i.delete_after_note&&i.processing_mode==='note'&&!i.media_deleted))throw new HttpError(400,'这条作品不支持从本地视频转为笔记');}
-      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose','video-delete','video-to-note'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
+      if(kind==='discard'){const i=store.item(body.id);if(!i.can_discard&&i.skip_reason!=='user_discarded')throw new HttpError(400,'只能放弃当前范围内尚未完成的处理任务');}
+      if(kind==='delete-item'){const i=store.item(body.id);if(!i.can_delete&&i.skip_reason!=='user_deleted')throw new HttpError(400,'只能删除当前范围内没有本地产物的待确认或已放弃记录');}
+      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose','video-delete','video-to-note','discard','delete-item'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
     }
     mkdirSync(actionsDir,{recursive:true,mode:0o700});
     const logfile=join(actionsDir,'latest-action.log');let fd=openSync(logfile,'w',0o600),written=0;
@@ -131,6 +133,13 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/run':result=start('run',data);break;
         case '/api/purpose':result=start('purpose',data);break;
         case '/api/retry':result=start('retry',data);break;
+        case '/api/discard':case '/api/delete-item': {
+          const kind=path.slice('/api/'.length);
+          start(kind,data);const operation=active;
+          const code=await new Promise(resolve=>operation.child.once('close',resolve));
+          if(code!==0)throw new HttpError(code===3?409:400,operation.error||'操作未完成，请查看控制台操作日志');
+          result=kind==='discard'?{discarded:true}:{deleted:true};break;
+        }
         case '/api/login':result=start('login');break;
         case '/api/session-check':result=start('session-check');break;
         case '/api/login-control':{
