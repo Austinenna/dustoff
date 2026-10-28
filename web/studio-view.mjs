@@ -18,6 +18,14 @@ export const fmt = value => {
 export const bytes = value => value===null||value===undefined?'未知':value>=1024**3?`${(value/1024**3).toFixed(1)} GiB`:`${(value/1024**2).toFixed(1)} MiB`;
 export const duration = value => Number(value)>0?`${Math.floor(value/60)}:${String(Math.floor(value%60)).padStart(2,'0')}`:'时长未知';
 export const titleOf = item => item.display_title||item.title||item.id;
+// 只拆出程序生成的转写附录；原始 TXT 和保存的 Markdown 都不改写。
+export function splitNoteContent(source) {
+  const content=String(source);
+  const start=[...content.matchAll(/\r?\n\r?\n---\r?\n## 完整转写稿\r?\n\r?\n/g)].at(-1);
+  const end=/\r?\n\r?\n---\r?\n\[完整转写稿\]\(#完整转写稿\)[^\r\n]*(?:\r?\n)?$/.exec(content);
+  if(!start||!end||end.index<start.index+start[0].length)return {note:content,formatted:null};
+  return {note:content.slice(0,start.index),formatted:content.slice(start.index+start[0].length,end.index)};
+}
 export function mediaLabel(item) {
   if(item.media_type==='gallery')return item.media_path&&!item.media_deleted?`已保存图集${item.image_count?' · '+item.image_count+' 张':''}`:'图片尚未保存';
   if(item.media_deleted)return item.skip_reason==='video_deleted'?'视频已删除':'视频已清理';
