@@ -9,8 +9,8 @@ const serverMode=document.querySelector('meta[name="dustoff-server"]')?.content=
 if(serverMode)document.querySelector('.local-label').textContent='服务器工作空间';
 if(document.querySelector('meta[name="dustoff-access"]')?.content==='1'){const form=document.createElement('form');form.method='post';form.action='auth/logout';form.innerHTML='<button class="button quiet">退出登录</button>';document.querySelector('.sidebar-bottom').append(form);}
 const routes={overview:'总览',notes:'笔记',results:'笔记',videos:'视频',galleries:'图集',collection:'收藏记录',pending:'待处理',run:'待处理',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
-const state={route:'overview',overview:null,settings:null,results:{q:'',status:'notes',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},galleries:{q:'',page:1},collection:{q:'',status:'all',page:1},review:{page:1,choices:{}},runs:[],runId:null,logKind:'business',runPage:1};
-let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null,videoTimer;
+const state={route:'overview',overview:null,settings:null,results:{q:'',status:'notes',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1,size:null},galleries:{q:'',page:1},collection:{q:'',status:'all',page:1},review:{page:1,choices:{}},runs:[],runId:null,logKind:'business',runPage:1};
+let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null,videoTimer,videoResizeTimer;
 const $=selector=>root.querySelector(selector);
 const query=values=>new URLSearchParams(values).toString();
 const tag=(value,tone='')=>`<span class="tag ${tone}">${esc(value)}</span>`;
@@ -84,11 +84,23 @@ function overviewPage() {
     <section class="overview-attention"><h2>需要你看一下</h2>${o.review?button(`${o.review} 条用途待确认 ›`,'review-items','','attention-link'):''}${o.failed?button(`${o.failed} 条处理失败 ›`,'failed-items','','attention-link'):''}${!o.review&&!o.failed?'<p class="muted">暂时没有需要处理的事项。</p>':''}</section></aside></div><footer class="overview-footer">共 ${o.total} 条收藏 · <a href="#collection">查看收藏记录</a> · 视频保存在${serverMode?'服务器':'本机'}</footer>`;
 }
 function videosPage() {
-  return `${head('视频','<span id="video-count">读取中</span>')}<div class="toolbar"><span class="muted">已保留的视频，与笔记独立浏览</span>${searchField(state.videos.q,'搜索标题、作者','videos-search')}</div><div id="video-list">${empty('正在读取…')}</div>`;
+  return `${head('视频','<span id="video-count">读取中</span>')}<div class="toolbar"><span class="muted">已保留的视频，与笔记独立浏览 · 每页按窗口宽度排满 3 行</span>${searchField(state.videos.q,'搜索标题、作者','videos-search')}</div><div id="video-list">${empty('正在读取…')}</div>`;
+}
+const VIDEO_PAGE_ROWS=3,VIDEO_CARD_MIN=210,VIDEO_GRID_GAP=16;
+function videoPageSize() {
+  const list=$('#video-list');
+  if(!list)return 12;
+  const width=list.clientWidth;
+  if(!width)return 12;
+  // 与 CSS 的 auto-fill/minmax(210px, 1fr) 保持同一列数；手机断点明确使用单列。
+  const columns=matchMedia('(max-width:480px)').matches?1:Math.max(1,Math.floor((width+VIDEO_GRID_GAP)/(VIDEO_CARD_MIN+VIDEO_GRID_GAP)));
+  return columns*VIDEO_PAGE_ROWS;
 }
 async function loadVideos() {
-  const epoch=++listEpoch,page=pageEpoch,s=state.videos;
-  const data=await api('items?'+query({videos:1,size:12,q:s.q,page:s.page}));
+  const epoch=++listEpoch,page=pageEpoch,s=state.videos,nextSize=videoPageSize();
+  if(s.size&&s.size!==nextSize)s.page=Math.floor(((s.page-1)*s.size)/nextSize)+1;
+  s.size=nextSize;
+  const data=await api('items?'+query({videos:1,size:nextSize,q:s.q,page:s.page}));
   if(epoch!==listEpoch||page!==pageEpoch)return;s.data=data;s.page=data.page;
   $('#video-count').textContent=`${data.total} 个视频`;
   $('#video-list').innerHTML=data.items.length?`<div class="video-grid video-library">${videoCards(data.items)}</div>${pagination(data,'videos')}`:empty(s.q?'没有找到匹配的视频':'还没有保留的视频，可在收藏记录中选择视频用途');
@@ -517,6 +529,11 @@ root.addEventListener('submit',async event=>{
   }catch(e){notice(e.message,true);}finally{if(submit.isConnected)submit.disabled=submit.hasAttribute('data-idle')&&busy();}
 });
 window.addEventListener('hashchange',()=>{notice('');void go(location.hash.slice(1));});
+window.addEventListener('resize',()=>{
+  if(state.route!=='videos')return;
+  clearTimeout(videoResizeTimer);
+  videoResizeTimer=setTimeout(()=>{loadVideos().catch(e=>notice(e.message,true));},180);
+});
 void go(location.hash.slice(1)||'overview');
 setInterval(async()=>{
   if(polling||document.hidden)return;polling=true;
