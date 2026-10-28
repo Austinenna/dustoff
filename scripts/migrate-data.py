@@ -75,6 +75,7 @@ def migrate(source_home, source_notes, old_home, old_notes, destination, profile
         return []
 
     shutil.copytree(source_home, destination, symlinks=True, ignore=ignore)
+    os.chmod(destination, 0o700)
     shutil.copytree(source_notes, destination / 'notes', symlinks=True)
     if profile is not None:
         shutil.copytree(profile, destination / 'chrome-profile', symlinks=True)
