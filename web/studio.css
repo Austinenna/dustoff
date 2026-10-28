@@ -114,3 +114,6 @@ dialog{background:var(--bg);color:var(--ink);border:1px solid var(--line);box-sh
 @media(max-width:1050px){.review-row{grid-template-columns:1fr;gap:14px}.review-form{justify-content:space-between}}
 @media(max-width:760px){.review-form{flex-wrap:wrap;gap:14px}.review-form fieldset{flex-wrap:wrap;gap:14px}.review-section>.between{align-items:start}.review-row{padding:18px 0}}
 .review-info>.row{gap:12px}.review-info>.row>.button{padding:3px 0;font-size:11px}
+
+/* 待确认条目直接点击用途按钮即可提交，省去二次确认。 */
+.review-choice-label{font-size:11px;color:var(--muted);white-space:nowrap}.quick-purpose-buttons{display:flex;gap:9px}.quick-purpose-buttons .purpose-choice{display:flex;flex-direction:column;align-items:flex-start;min-width:132px;text-align:left}.quick-purpose-buttons .purpose-choice small{display:block;font-size:10px;margin-top:3px;color:inherit;opacity:.78}@media(max-width:760px){.quick-purpose-buttons{flex-wrap:wrap}.quick-purpose-buttons .purpose-choice{min-width:120px}}
