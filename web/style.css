@@ -9,34 +9,40 @@
 @media(max-width:650px){#dustoff-studio .top,#dustoff-studio[data-design=noir] .top{padding:18px 22px}#dustoff-studio aside,#dustoff-studio[data-design=noir] aside{padding:0 22px;gap:18px}#dustoff-studio main,#dustoff-studio[data-design=noir] main{padding:22px}#dustoff-studio[data-design=studio] .shell{grid-template-columns:1fr}#dustoff-studio[data-design=studio] aside{flex-direction:row;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--d-line);gap:5px}#dustoff-studio[data-design=studio] .side-foot{display:none}#dustoff-studio[data-design=studio] .nav{padding:8px 9px}#dustoff-studio .split,#dustoff-studio .noir-hero,#dustoff-studio .noir-grid{grid-template-columns:1fr}#dustoff-studio .noir-summary{border-left:0;border-top:1px solid var(--d-line);padding:20px 0 0}#dustoff-studio .stories{grid-template-columns:1fr}#dustoff-studio .story{min-height:0}#dustoff-studio .story h3{margin:16px 0 4px}#dustoff-studio .air-stat{padding:0 12px}#dustoff-studio .air-stat .big{font-size:32px}#dustoff-studio .hero-air{padding-top:15px}#dustoff-studio .hero-air h1{letter-spacing:-1.4px}#dustoff-studio .article{padding:25px}}
 @media(max-width:420px){#dustoff-designs .design-picker{width:100%;justify-content:space-between}#dustoff-designs .design-picker button{padding:10px 12px}#dustoff-studio .bento,#dustoff-studio .fields,#dustoff-studio .metrics{grid-template-columns:1fr}#dustoff-studio .bento .focus-tile{grid-row:auto;min-height:260px}#dustoff-studio .air-stats{padding:20px 0}#dustoff-studio .air-stat{padding:0 6px}#dustoff-studio .air-stat .big{font-size:27px}#dustoff-studio .air-stat small{font-size:11px}#dustoff-studio .hero-air p{font-size:14px}#dustoff-studio .kv{flex-wrap:wrap}#dustoff-studio input,#dustoff-studio select,#dustoff-studio textarea{font-size:16px}#dustoff-studio .nav{padding:12px 0}#dustoff-studio .top .small-status{display:none}}
 @media(prefers-reduced-motion:reduce){#dustoff-studio button{transition:none}}
-#dustoff-studio .library-layout{display:grid;grid-template-columns:255px minmax(0,1fr);gap:24px;align-items:start}
-#dustoff-studio .library-list{min-width:0;padding-right:22px;border-right:1px solid var(--d-line)}
-#dustoff-studio .library-search{width:100%;border-radius:12px;margin-bottom:12px;background:var(--d-panel)}
-#dustoff-studio .library-filters{display:flex;gap:5px;margin-bottom:17px;flex-wrap:wrap}
+/* Results: page-scrolling document with a sticky directory and reading toolbar. */
+#dustoff-studio .library-layout{display:grid;grid-template-columns:290px minmax(0,1fr);gap:0;align-items:stretch;background:var(--d-panel);border:1px solid var(--d-line);border-radius:18px;overflow:visible}
+#dustoff-studio .library-list{display:flex;flex-direction:column;min-width:0;min-height:0;padding:20px 14px 0;border-right:1px solid var(--d-line);background:light-dark(#fafafa,#202023)}
+#dustoff-studio .library-search{width:100%;border-radius:10px;margin-bottom:12px;background:var(--d-panel);flex-shrink:0}
+#dustoff-studio .library-filters{display:flex;gap:5px;margin-bottom:14px;flex-wrap:wrap;flex-shrink:0}
 #dustoff-studio .library-filters button{border:0;background:transparent;color:var(--d-muted);font-size:12px;padding:6px 10px}
 #dustoff-studio .library-filters button.active{background:var(--d-ink);color:var(--d-panel)}
-#dustoff-studio .library-count{display:block;margin-bottom:12px}
-#dustoff-studio .result-entry{display:block;text-align:left;border:0;border-radius:14px;padding:15px 14px;width:100%;margin-bottom:5px;background:transparent}
-#dustoff-studio .result-entry.active{background:var(--d-panel);box-shadow:0 2px 9px light-dark(#00000006,#00000022)}
+#dustoff-studio .library-count{display:block;margin:0 10px 10px;flex-shrink:0}
+#dustoff-studio #library-rows{flex:1;min-height:0;overflow-y:auto;overscroll-behavior-y:contain;scrollbar-gutter:stable;padding:2px}
+#dustoff-studio .result-entry{display:block;text-align:left;border:0;border-radius:10px;padding:14px 12px;width:100%;margin-bottom:6px;background:transparent}
+#dustoff-studio .result-entry.active{background:var(--d-soft);box-shadow:inset 3px 0 var(--d-accent);outline:0}
 #dustoff-studio .result-entry .entry-title{display:block;font-size:14px;line-height:1.5;font-weight:500;margin-bottom:8px}
 #dustoff-studio .result-entry .entry-meta{display:flex;justify-content:space-between;gap:7px;font-size:11px;color:var(--d-muted)}
 #dustoff-studio .result-entry .entry-date{display:block;color:var(--d-muted);font-size:11px;margin-top:6px}
 #dustoff-studio .library-pagination{display:flex;justify-content:space-between;align-items:center;gap:5px;border-top:1px solid var(--d-line);padding-top:16px;margin-top:16px}
 #dustoff-studio .library-pagination button{padding:7px 10px;font-size:12px}
-#dustoff-studio .reader{min-width:0}
-#dustoff-studio .reader-tools{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+#dustoff-studio #library-pager{flex-shrink:0;min-height:58px;margin:0;padding:10px 2px}
+#dustoff-studio .reader{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:visible}
+#dustoff-studio .reader-tools{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;flex-shrink:0;padding:16px 24px;border-bottom:1px solid var(--d-line)}
 #dustoff-studio .reader-tools .tabs{margin:0;gap:5px}
 #dustoff-studio .reader-tools button{font-size:12px;padding:7px 11px}
-#dustoff-studio .reader .article{padding:32px;max-width:none;margin-bottom:15px}
+#dustoff-studio .reader .article{width:100%;padding:28px 36px;max-width:none;margin:0;border-radius:0;overflow:visible}
 #dustoff-studio .reader .article h2{font-size:28px;letter-spacing:-.7px;line-height:1.35}
-#dustoff-studio .reader-back{display:none;margin-bottom:14px}
-#dustoff-studio .reader-foot{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;padding:0 4px}
-@media(max-width:800px){#dustoff-studio .library-layout{grid-template-columns:210px minmax(0,1fr);gap:18px}#dustoff-studio .library-list{padding-right:16px}#dustoff-studio .reader .article{padding:23px}#dustoff-studio .reader .article h2{font-size:24px}}
-@media(max-width:650px){#dustoff-studio .library-layout{grid-template-columns:1fr}#dustoff-studio .library-list{border:0;padding:0}#dustoff-studio .library-layout[data-reader=false] .reader{display:none}#dustoff-studio .library-layout[data-reader=true] .library-list{display:none}#dustoff-studio .reader-back{display:inline-flex}#dustoff-studio .result-entry{padding:17px}#dustoff-studio .library-search{font-size:16px}}
+#dustoff-studio .reader-back{display:none}
+#dustoff-studio .reader-foot{display:flex;align-items:center;gap:18px;flex-wrap:wrap;flex-shrink:0;min-height:58px;font-size:12px;padding:12px 24px;border-top:1px solid var(--d-line)}
+#dustoff-studio .reader>.empty{margin:0;border-radius:0}
+#dustoff-studio .reader .article:focus-visible{outline:2px solid var(--d-accent);outline-offset:-3px}
+@media(max-width:900px){#dustoff-studio .library-layout{grid-template-columns:240px minmax(0,1fr)}#dustoff-studio .reader .article{padding:24px}#dustoff-studio .reader-tools,#dustoff-studio .reader-foot{padding-left:20px;padding-right:20px}}
+@media(max-width:650px){#dustoff-studio .library-layout{grid-template-columns:1fr;border-radius:14px}#dustoff-studio .library-list{border:0;padding:16px 14px 0}#dustoff-studio .library-layout[data-reader=false] .reader{display:none}#dustoff-studio .library-layout[data-reader=true] .library-list{display:none}#dustoff-studio .reader-back{display:inline-flex;flex-shrink:0;align-self:flex-start;margin:12px 20px 0}#dustoff-studio .reader .article{padding:22px}#dustoff-studio .reader-tools{padding-top:12px;padding-bottom:12px}#dustoff-studio .reader-foot{gap:12px}#dustoff-studio .library-search{font-size:16px}}
 
 
-:root{color-scheme:light dark}body{margin:0;background:light-dark(#f5f5f7,#18181a);padding:22px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}#dustoff-studio{max-width:1280px;margin:0 auto;min-height:calc(100vh - 44px)}#dustoff-studio .shell{min-height:650px}#dustoff-studio #notice{position:sticky;top:0;z-index:5;background:var(--d-soft);color:var(--d-accent);padding:13px 30px;border-bottom:1px solid var(--d-line);display:flex;justify-content:space-between;gap:15px;align-items:center}#dustoff-studio #notice:empty{display:none}#dustoff-studio #notice.error{background:var(--d-warn-bg);color:var(--d-warn)}#dustoff-studio #notice button{padding:3px 10px;background:transparent;font-size:12px}#dustoff-studio .status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:light-dark(#248548,#78cea3);margin-right:6px}#dustoff-studio .settings-note{font-size:12px;color:var(--d-muted);margin-bottom:18px}#dustoff-studio .log-text{max-height:520px;overflow:auto;font-size:12px}#dustoff-studio .inline-stats{display:flex;gap:25px;flex-wrap:wrap;margin:20px 0}#dustoff-studio .inline-stats strong{font-weight:500;font-size:25px;display:block}#dustoff-studio .reader .article{overflow-wrap:anywhere}#dustoff-studio .reader .article pre{overflow-x:auto;white-space:pre;font-size:12px}#dustoff-studio .reader .article blockquote{border-left:3px solid var(--d-line);padding-left:15px;margin-left:0;color:var(--d-muted)}#dustoff-studio a{color:var(--d-accent);text-decoration:none}#dustoff-studio a:hover{text-decoration:underline}#dustoff-studio .result-entry.active{outline:1px solid var(--d-line)}#dustoff-studio .state-line{margin-top:16px;color:var(--d-muted);font-size:12px}#dustoff-studio input[readonly]{background:var(--d-bg);color:var(--d-muted)}#dustoff-studio .original-text{white-space:pre-wrap;line-height:1.9;font-family:inherit;background:transparent;padding:0;margin:0}#dustoff-studio .library-list{position:sticky;top:20px}#dustoff-studio .library-layout{grid-template-columns:275px minmax(0,1fr)}#dustoff-studio .article table{display:block;overflow:auto}#dustoff-studio .schema-value{max-width:65%;white-space:pre-wrap}#dustoff-studio .busy-label{font-size:12px;color:var(--d-muted)}#dustoff-studio .hero-air .eyebrow{letter-spacing:1px}#dustoff-studio .article h1{font-size:30px}#dustoff-studio .article code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--d-bg);padding:2px 4px;border-radius:4px}#dustoff-studio .article pre code{background:none;padding:0}#dustoff-studio .article h4{font-size:14px;margin-top:20px}#dustoff-studio .article li{margin-bottom:6px}
-@media(max-width:800px){body{padding:12px}#dustoff-studio .library-layout{grid-template-columns:210px minmax(0,1fr)}}@media(max-width:650px){body{padding:0}#dustoff-studio{border-radius:0;border:0;min-height:100vh}#dustoff-studio .library-layout{grid-template-columns:1fr}#dustoff-studio .library-list{position:static}#dustoff-studio main{padding:20px}#dustoff-studio #notice{padding:12px 20px}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+
+:root{color-scheme:light dark}body{margin:0;background:light-dark(#f5f5f7,#18181a);padding:22px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}#dustoff-studio{box-sizing:border-box;max-width:1280px;margin:0 auto;min-height:calc(100vh - 44px)}#dustoff-studio .shell{min-height:650px}#dustoff-studio #notice{position:sticky;top:0;z-index:5;background:var(--d-soft);color:var(--d-accent);padding:13px 30px;border-bottom:1px solid var(--d-line);display:flex;justify-content:space-between;gap:15px;align-items:center}#dustoff-studio #notice:empty{display:none}#dustoff-studio #notice.error{background:var(--d-warn-bg);color:var(--d-warn)}#dustoff-studio #notice button{padding:3px 10px;background:transparent;font-size:12px}#dustoff-studio .status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:light-dark(#248548,#78cea3);margin-right:6px}#dustoff-studio .settings-note{font-size:12px;color:var(--d-muted);margin-bottom:18px}#dustoff-studio .log-text{max-height:520px;overflow:auto;font-size:12px}#dustoff-studio .inline-stats{display:flex;gap:25px;flex-wrap:wrap;margin:20px 0}#dustoff-studio .inline-stats strong{font-weight:500;font-size:25px;display:block}#dustoff-studio .reader .article{overflow-wrap:anywhere}#dustoff-studio .reader .article pre{overflow-x:auto;white-space:pre;font-size:12px}#dustoff-studio .reader .article blockquote{border-left:3px solid var(--d-line);padding-left:15px;margin-left:0;color:var(--d-muted)}#dustoff-studio a{color:var(--d-accent);text-decoration:none}#dustoff-studio a:hover{text-decoration:underline}#dustoff-studio .state-line{margin-top:16px;color:var(--d-muted);font-size:12px}#dustoff-studio input[readonly]{background:var(--d-bg);color:var(--d-muted)}#dustoff-studio .original-text{white-space:pre-wrap;line-height:1.9;font-family:inherit;background:transparent;padding:0;margin:0}#dustoff-studio .article table{display:block;overflow:auto}#dustoff-studio .schema-value{max-width:65%;white-space:pre-wrap}#dustoff-studio .busy-label{font-size:12px;color:var(--d-muted)}#dustoff-studio .hero-air .eyebrow{letter-spacing:1px}#dustoff-studio .article h1{font-size:30px}#dustoff-studio .article code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--d-bg);padding:2px 4px;border-radius:4px}#dustoff-studio .article pre code{background:none;padding:0}#dustoff-studio .article h4{font-size:14px;margin-top:20px}#dustoff-studio .article li{margin-bottom:6px}
+@media(max-width:800px){body{padding:12px}}@media(max-width:650px){body{padding:0}#dustoff-studio{border-radius:0;border:0;min-height:100vh}#dustoff-studio .library-layout{grid-template-columns:1fr}#dustoff-studio .library-list{position:static}#dustoff-studio main{padding:20px}#dustoff-studio #notice{padding:12px 20px}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
 
 #dustoff-studio .story h3,#dustoff-studio .result-entry .entry-title{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;overflow-wrap:anywhere}
 #dustoff-studio .result-entry .entry-title{-webkit-line-clamp:2}
@@ -48,6 +54,40 @@
 @media(max-width:650px){#dustoff-studio .note-heading h1{font-size:25px}}
 
 #dustoff-studio .session-remaining{margin-top:8px;font-size:26px}#dustoff-studio .session-warning{color:var(--d-warn)}#dustoff-studio .session-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px;margin:26px 0 20px}#dustoff-studio .session-facts p{font-size:14px;margin-top:8px;line-height:1.7}#dustoff-studio .login-notice{padding:0 8px 20px;line-height:1.7}#dustoff-studio .login-notice button{margin-top:10px}#dustoff-studio .session-overview{margin-bottom:20px}@media(max-width:650px){#dustoff-studio .session-facts{grid-template-columns:1fr;gap:14px}#dustoff-studio .session-remaining{font-size:22px}}
+
+/* Shared compact navigation: bold active label with a short underline. */
+body{padding:16px}
+#dustoff-studio{min-height:calc(100dvh - 32px);border-radius:18px}
+#dustoff-studio .top{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:20px;align-items:center;padding:0 24px;background:var(--d-panel);border:0;box-shadow:inset 0 -1px var(--d-line)}
+#dustoff-studio .brand{font-size:20px;line-height:1;font-weight:600;letter-spacing:-.7px}
+#dustoff-studio #main-navigation{display:flex;align-items:stretch;min-width:0;height:56px;gap:3px;padding-top:0;overflow-x:auto;scrollbar-width:none}
+#dustoff-studio #main-navigation::-webkit-scrollbar{display:none}
+#dustoff-studio #main-navigation .nav{position:relative;flex-shrink:0;padding:0 13px;border:0;border-radius:0;background:transparent;color:var(--d-muted);font-size:13px;font-weight:500;line-height:1;white-space:nowrap;box-shadow:none;transform:none}
+#dustoff-studio #main-navigation .nav:hover{background:transparent;color:var(--d-ink)}
+#dustoff-studio #main-navigation .nav.active{background:transparent;color:var(--d-ink);font-weight:700}
+#dustoff-studio #main-navigation .nav.active::after{content:"";position:absolute;bottom:0;left:13px;right:13px;height:2px;background:var(--d-ink)}
+#dustoff-studio #main-navigation .nav:focus-visible{outline:2px solid var(--d-accent);outline-offset:-4px}
+#dustoff-studio #connection{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
+#dustoff-studio .shell{display:block;min-height:0}
+#dustoff-studio main{padding:20px;min-width:0}
+#dustoff-studio .overview-actions{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:20px}
+#dustoff-studio .overview-actions p{font-size:16px;font-weight:500;margin-bottom:4px}
+#dustoff-studio .overview-actions .row{gap:16px}
+@media(max-width:1000px){#dustoff-studio .top{gap:12px;padding:0 18px}#dustoff-studio #main-navigation .nav{padding:0 10px}#dustoff-studio #connection{max-width:100px}}
+@media(max-width:700px){body{padding:0}#dustoff-studio{border:0;border-radius:0;min-height:100dvh}#dustoff-studio .top{grid-template-columns:1fr auto;gap:0;padding:0 14px}#dustoff-studio .brand{height:38px;align-items:center;font-size:18px}#dustoff-studio #connection{grid-column:2;grid-row:1;max-width:180px}#dustoff-studio #main-navigation{grid-column:1/-1;height:44px;padding-top:0}#dustoff-studio #main-navigation .nav{padding:0 13px}#dustoff-studio main{padding:12px}}
+
+/* The document owns vertical scrolling on every page. */
+#dustoff-studio{overflow:visible;--navigation-height:56px;--notice-height:0px;--reading-top:calc(var(--navigation-height) + var(--notice-height))}
+#dustoff-studio .top{position:sticky;top:0;z-index:20;border-radius:18px 18px 0 0}
+#dustoff-studio #notice{top:var(--navigation-height);z-index:19}
+#dustoff-studio .library-layout{scroll-margin-top:calc(var(--reading-top) + 12px)}
+#dustoff-studio .library-list{position:sticky;top:calc(var(--reading-top) + 12px);align-self:start;max-height:calc(100dvh - var(--reading-top) - 56px);border-radius:18px 0 0 18px}
+#dustoff-studio .reader{scroll-margin-top:calc(var(--reading-top) + 12px)}
+#dustoff-studio .reader-tools{position:sticky;top:var(--reading-top);z-index:10;background:var(--d-panel);border-radius:0 18px 0 0}
+#dustoff-studio .reader .article{scroll-margin-top:calc(var(--reading-top) + 80px)}
+#dustoff-studio .reader-foot{border-radius:0 0 18px 0;background:var(--d-panel)}
+@media(max-width:700px){#dustoff-studio{--navigation-height:82px}#dustoff-studio .top{border-radius:0}}
+@media(max-width:650px){#dustoff-studio .library-list{position:static;max-height:none;border-radius:14px}#dustoff-studio #library-rows{overflow:visible;scrollbar-gutter:auto}#dustoff-studio .reader-tools{border-radius:14px 14px 0 0}#dustoff-studio .reader-back{margin:0;flex-basis:100%}#dustoff-studio .reader-foot{border-radius:0 0 14px 14px}}
 
 /* 账本直接展示用途、处理方式与媒体现状。 */
 #dustoff-studio .routing-intro{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}
