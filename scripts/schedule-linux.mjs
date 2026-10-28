@@ -33,7 +33,7 @@ export function createLinuxScheduler({home=DUST_HOME,directory=join(home,'schedu
     const plan=makePlan(typeof value==='string'?{time:value}:value);
     const calendar=calendarSlots(plan.time,plan.intervalHours).map(s=>`OnCalendar=*-*-* ${String(s.Hour).padStart(2,'0')}:${String(s.Minute).padStart(2,'0')}:00`).join('\n');
     return {
-      service:`[Unit]\nDescription=Dustoff scheduled collection\n\n[Service]\nType=oneshot\nWorkingDirectory=${quote(root)}\nExecStart=${[node,join(root,'scripts/scheduled-run.mjs'),directory,...runArgs].map(quote).join(' ')}\nEnvironment=${quote('DUST_HOME='+resolve(home))}\nEnvironment=${quote('DUST_SCHEDULE_PLAN='+planFile)}\nEnvironment=${quote('DUST_CHROME=/usr/bin/google-chrome')}\nEnvironment=${quote('PATH='+dirname(node)+':/usr/local/bin:/usr/bin:/bin')}\nEnvironment=TZ=Asia/Shanghai\nUMask=0077\nKillMode=control-group\nTimeoutStartSec=infinity\nTimeoutStopSec=30\nNice=10\n\n`,
+      service:`[Unit]\nDescription=Dustoff scheduled collection\n\n[Service]\nType=oneshot\nWorkingDirectory=${root.replace(/%/g,'%%')}\nExecStart=${[node,join(root,'scripts/scheduled-run.mjs'),directory,...runArgs].map(quote).join(' ')}\nEnvironment=${quote('DUST_HOME='+resolve(home))}\nEnvironment=${quote('DUST_SCHEDULE_PLAN='+planFile)}\nEnvironment=${quote('DUST_CHROME=/usr/bin/google-chrome')}\nEnvironment=${quote('PATH='+dirname(node)+':/usr/local/bin:/usr/bin:/bin')}\nEnvironment=TZ=Asia/Shanghai\nUMask=0077\nKillMode=control-group\nTimeoutStartSec=infinity\nTimeoutStopSec=30\nNice=10\n\n`,
       timer:`[Unit]\nDescription=Dustoff collection schedule\n\n[Timer]\n${calendar}\nUnit=${serviceName}\nPersistent=false\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n`,
     };
   }
