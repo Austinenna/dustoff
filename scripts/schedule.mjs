@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { DUST_HOME } from './config.mjs';
 import { atomicWrite, localPath } from './policy.mjs';
+import { createLinuxScheduler } from './schedule-linux.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 export const LABEL = 'com.dustoff.daily';
@@ -19,7 +20,10 @@ function command(program, args, { optional = false } = {}) {
   if (result.status !== 0 && !optional) throw new Error(`${program} ${args[0]} 失败：${result.stderr.trim() || result.stdout.trim()}`);
   return result;
 }
-export function createScheduler({ home = DUST_HOME, directory = join(home, 'scheduler'), label = LABEL, root = ROOT, node = process.execPath, runArgs = [], autoDirectory = join(homedir(),'Library','LaunchAgents') } = {}) {
+export function createScheduler(options={}) {
+  return (options.platform||process.platform)==='linux'?createLinuxScheduler(options):createMacScheduler(options);
+}
+function createMacScheduler({ home = DUST_HOME, directory = join(home, 'scheduler'), label = LABEL, root = ROOT, node = process.execPath, runArgs = [], autoDirectory = join(homedir(),'Library','LaunchAgents') } = {}) {
   directory = localPath(directory);
   const plist = join(directory, 'daily.plist');
   const autoPlist = localPath(join(autoDirectory, `${label}.plist`));
@@ -156,7 +160,7 @@ function main(args) {
     console.log('间隔定时（默认仅当前登录会话，可显式启用登录自动加载）\n  node scripts/schedule.mjs start [HH:MM]  开启定时，默认/保留 22:00\n  node scripts/schedule.mjs time HH:MM     改时间；已开启则立即更新，已关闭则只保存\n  node scripts/schedule.mjs interval HOURS  设置重复间隔（1–720 整数小时）\n  node scripts/schedule.mjs status         查看真实加载状态\n  node scripts/schedule.mjs stop           关闭定时及登录自动加载，保留时间\n  node scripts/schedule.mjs autostart on|off  登录后自动启用\n\n立即处理一轮：node run.mjs');
     return;
   }
-  if (process.platform !== 'darwin') throw new Error('这个定时入口使用 macOS launchd');
+  if (!['darwin','linux'].includes(process.platform)) throw new Error('定时入口支持 macOS 与 Linux');
   const [action, value, extra] = args;
   if(action==='autostart' && ['on','off'].includes(value) && !extra) { console.log(JSON.stringify(createScheduler().update({autoStartAfterReboot:value==='on'}),null,2)); return; }
   if (!['start','time','interval','status','stop'].includes(action) || extra !== undefined || (['status','stop'].includes(action) && value !== undefined)) throw new Error('参数不正确，使用 --help 查看用法');

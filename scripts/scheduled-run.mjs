@@ -15,8 +15,8 @@ const resultfile = join(directory,'last-run.json');
 // launchd 只负责日历唤起；日期起点、跨日间隔和去重在这里判断。
 // 未到本轮时刻时直接退出，不改业务日志、不启动流水线。
 let scheduledFor=null,key=null;
-if(process.env.DUST_SCHEDULE_START_AT||process.env.DUST_SCHEDULE_INTERVAL_HOURS){
-  const plan=makePlan({time:process.env.DUST_SCHEDULE_TIME,intervalHours:Number(process.env.DUST_SCHEDULE_INTERVAL_HOURS),startAt:process.env.DUST_SCHEDULE_START_AT});
+if(process.env.DUST_SCHEDULE_PLAN||process.env.DUST_SCHEDULE_START_AT||process.env.DUST_SCHEDULE_INTERVAL_HOURS){
+  const plan=makePlan(process.env.DUST_SCHEDULE_PLAN?JSON.parse(readFileSync(localPath(process.env.DUST_SCHEDULE_PLAN),'utf8')):{time:process.env.DUST_SCHEDULE_TIME,intervalHours:Number(process.env.DUST_SCHEDULE_INTERVAL_HOURS),startAt:process.env.DUST_SCHEDULE_START_AT});
   let previous=null;try{previous=JSON.parse(readFileSync(resultfile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
   scheduledFor=dueOccurrence(plan,previous);if(!scheduledFor)process.exit(0);
   key=scheduleKey(plan);

@@ -13,7 +13,7 @@ test('时刻严格校验，错误输入不得被截断成有效时间', () => {
   for (const value of ['24:00','22:60','9:00','22:00extra','',undefined]) assert.throws(() => parseTime(value));
 });
 
-test('plist 为每天一次、无立即启动、无常驻；路径转义后仍可正确解析', () => {
+test('plist 为每天一次、无立即启动、无常驻；路径转义后仍可正确解析', {skip:process.platform!=='darwin'}, () => {
   const directory = mkdtempSync(join(tmpdir(),'dustoff-schedule-xml-'));
   try {
     const scheduler = createScheduler({ directory, root:'/tmp/space & 中文 "dir"', home:'/tmp/a & b' });
