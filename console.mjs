@@ -12,9 +12,14 @@ import { createScheduler } from './scripts/schedule.mjs';
 import { localPath, atomicWrite } from './scripts/policy.mjs';
 import { createMediaService, streamMedia } from './scripts/console-media.mjs';
 import { validateLoginInput } from './scripts/remote-login.mjs';
+import { createConsoleAccess } from './scripts/console-auth.mjs';
 const ROOT=dirname(fileURLToPath(import.meta.url));
 const encode=value=>JSON.stringify(value,(_,v)=>typeof v==='bigint'?Number(v):v);
-export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
+export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,publicUrl=process.env.DUST_PUBLIC_URL||'',serverMode=process.env.DUST_SERVER_MODE==='1',openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
+  const external=publicUrl?new URL(publicUrl):null;
+  if(external&&(external.protocol!=='https:'||external.username||external.password||external.search||external.hash||!/^\/[a-zA-Z0-9/_-]*$/.test(external.pathname)))throw new Error('公网地址必须为不含凭据、查询参数的 HTTPS 地址');
+  const basePath=external?external.pathname.replace(/\/+$/,''):'';
+  const access=createConsoleAccess({home,enabled:!!external});
   const store=createStore(home);
   const media=createMediaService({store,home});
   scheduler ||= createScheduler({home,root});
@@ -87,12 +92,14 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
     const send=(code,value,type='application/json; charset=utf-8')=>{res.writeHead(code,{...headers,'Content-Type':type});res.end(type.startsWith('application/json')?encode(value):value);};
     try {
-      if(req.headers.host!==new URL(origin).host)throw new HttpError(403,'请使用控制台的本机地址');
+      if(req.headers.host!==new URL(origin).host)throw new HttpError(403,'请使用配置的控制台地址');
       if(req.headers['sec-fetch-site']==='cross-site')throw new HttpError(403,'不接受跨站请求');
-      const url=new URL(req.url,origin),path=url.pathname;
+      const url=new URL(req.url,origin);let path=url.pathname;
+      if(basePath){if(path===basePath){res.setHeader('Location',basePath+'/');send(308,'','text/plain');return;}if(!path.startsWith(basePath+'/'))throw new HttpError(404,'页面不存在');path=path.slice(basePath.length);}
+      if(await access.handle(req,res,path,{origin,basePath,send}))return;
       if(req.method==='GET'&&['/','/studio.mjs','/studio.css','/studio-view.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs','/remote-login.mjs','/remote-login.css'].includes(path)) {
         const name=path==='/'?'studio.html':path.slice(1),types={html:'text/html; charset=utf-8',js:'text/javascript; charset=utf-8',mjs:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8'};
-        let content=readFileSync(join(root,name==='schedule-plan.mjs'?'scripts':'web',name),'utf8');if(path==='/')content=content.replace('__CSRF_TOKEN__',token);
+        let content=readFileSync(join(root,name==='schedule-plan.mjs'?'scripts':'web',name),'utf8');if(path==='/')content=content.replace('__CSRF_TOKEN__',token).replace('__SERVER_MODE__',serverMode?'1':'0').replace('__ACCESS_CONTROL__',external?'1':'0');
         send(200,content,types[name.split('.').pop()]);return;
       }
       if(!path.startsWith('/api/'))throw new HttpError(404,'页面不存在');
@@ -137,12 +144,14 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/settings':result=store.saveSettings(data);break;
         case '/api/video-prepare':result=media.prepare(data.id);break;
         case '/api/video-to-note': {
+          if(serverMode)throw new HttpError(409,'服务器模式暂不提供本地视频文件操作');
           start('video-to-note',data);const operation=active;
           const code=await new Promise(resolve=>operation.child.once('close',resolve));
           if(code!==0)throw new HttpError(code===3?409:400,operation.error||'未能加入待办，请查看控制台操作日志');
           result={queued:true};break;
         }
         case '/api/video-delete': {
+          if(serverMode)throw new HttpError(409,'服务器模式暂不提供本地视频文件操作');
           if(data.confirm!==true)throw new HttpError(400,'请先确认将视频移入废纸篓');
           start('video-delete',data);const operation=active;
           const code=await new Promise(resolve=>operation.child.once('close',resolve));
@@ -180,6 +189,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           try{process.kill(-active.pid,'SIGTERM');}catch(e){if(e.code!=='ESRCH')throw e;}
           result={stopping:true};break;
         case '/api/open': {
+          if(serverMode)throw new HttpError(409,'请直接在网页中阅读或播放');
           if(!['note','text','video','gallery-folder','folder','source','notes-folder','runs-folder'].includes(data.kind))throw new HttpError(400,'打开目标无效');
           let args;
           if(data.kind==='source'){const row=store.item(data.id);args=[`https://www.douyin.com/${row.media_type==='gallery'?'note':'video'}/${data.id}`];}
@@ -197,11 +207,11 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   return {server,store,listen(port=47831){return new Promise((resolve,reject)=>{
     server.once('error',reject);
     server.listen(port,'127.0.0.1',()=>{
-      origin=`http://127.0.0.1:${server.address().port}`;
+      origin=external?.origin||`http://127.0.0.1:${server.address().port}`;
       // 仅后台服务成功启动时恢复定时；页面请求和重复打开启动器均不会执行这里。
       try {if(process.env.DUST_AUTO_SCHEDULE!=='0'&&!scheduler.status().loaded)scheduler.start();}
       catch(error){scheduleStartupWarning=`自动开启定时失败：${error.message}。可在此重新开启。`;console.error(scheduleStartupWarning);}
-      resolve(origin);
+      resolve(origin+basePath);
     });
   });},execution:state};
 }

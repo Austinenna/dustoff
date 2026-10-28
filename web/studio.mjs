@@ -5,6 +5,7 @@ import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,fmt,bytes,duration,titleOf,mediaL
 
 const root=document.querySelector('#dustoff-studio'),main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 const token=document.querySelector('meta[name="dustoff-token"]').content;
+if(document.querySelector('meta[name="dustoff-access"]')?.content==='1'){const form=document.createElement('form');form.method='post';form.action='auth/logout';form.innerHTML='<button class="button quiet">退出登录</button>';document.querySelector('.sidebar-bottom').append(form);}
 const routes={overview:'总览',notes:'笔记',results:'笔记',videos:'视频',galleries:'图集',collection:'收藏记录',pending:'待处理',run:'待处理',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
 const state={route:'overview',overview:null,settings:null,results:{q:'',status:'notes',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},galleries:{q:'',page:1},collection:{q:'',status:'all',page:1},review:{page:1,choices:{}},runs:[],runId:null,logKind:'business',runPage:1};
 let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null,videoTimer;
@@ -22,7 +23,8 @@ icons.video='M3 5h18v16H3zM3 10h18M7 5l3 5M14 5l3 5m-7 3v5l5-2.5z';
 root.querySelectorAll('[data-icon]').forEach(el=>{el.innerHTML=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="${icons[el.dataset.icon]}"></path></svg>`;});
 
 async function api(path,data) {
-  const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-Dustoff-Token':token},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(20000)});
+  const response=await fetch('api/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-Dustoff-Token':token},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(20000)});
+  if(response.status===401){location.href='./';throw new Error('请重新登录控制台');}
   const value=await response.json();if(!response.ok)throw new Error(value.error||'请求失败');return value;
 }
 function notice(message,error=false) {
@@ -66,7 +68,7 @@ function pagination(data,kind) {
 }
 
 function videoCards(items) {
-  return items.map(i=>`<button class="video-card" data-action="play-video" data-id="${i.id}"><span class="video-cover"><img src="/api/video-poster?id=${i.id}" alt="" loading="lazy"><small class="video-duration">${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small></span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(mediaLabel(i))}</small>${i.delete_after_note?`<span class="video-note-label">${esc(videoNoteLabel(i))}</span>`:i.note_path?'<span class="video-note-label">也有知识笔记</span>':''}</button>`).join('');
+  return items.map(i=>`<button class="video-card" data-action="play-video" data-id="${i.id}"><span class="video-cover"><img src="api/video-poster?id=${i.id}" alt="" loading="lazy"><small class="video-duration">${i.media_type==='gallery'?'图集':duration(i.duration_s)}</small></span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(mediaLabel(i))}</small>${i.delete_after_note?`<span class="video-note-label">${esc(videoNoteLabel(i))}</span>`:i.note_path?'<span class="video-note-label">也有知识笔记</span>':''}</button>`).join('');
 }
 function overviewPage() {
   const o=state.overview,s=o.scheduler,summary=runSummary(o.lastRun);
@@ -97,7 +99,7 @@ async function loadGalleries() {
   const data=await api('items?'+query({galleries:1,size:12,q:s.q,page:s.page}));
   if(epoch!==listEpoch||page!==pageEpoch)return;s.data=data;s.page=data.page;
   $('#gallery-count').textContent=`${data.total} 组图集`;
-  $('#gallery-list').innerHTML=data.items.length?`<div class="gallery-grid">${data.items.map(i=>`<button class="gallery-card" data-action="view-gallery" data-id="${i.id}"><span class="gallery-cover"><img src="/api/gallery-image?id=${i.id}&index=0" alt="" loading="lazy"><small>${i.image_count||'多'} 张</small></span><strong>${esc(titleOf(i))}</strong><span>${esc(i.author||'未知作者')} · 已保存到本机</span></button>`).join('')}</div>${pagination(data,'galleries')}`:empty(s.q?'没有找到匹配的图集':'还没有保存的图集。运行后会处理新收藏及此前因不支持图集而跳过的作品，历史基线保持不变。');
+  $('#gallery-list').innerHTML=data.items.length?`<div class="gallery-grid">${data.items.map(i=>`<button class="gallery-card" data-action="view-gallery" data-id="${i.id}"><span class="gallery-cover"><img src="api/gallery-image?id=${i.id}&index=0" alt="" loading="lazy"><small>${i.image_count||'多'} 张</small></span><strong>${esc(titleOf(i))}</strong><span>${esc(i.author||'未知作者')} · 已保存到本机</span></button>`).join('')}</div>${pagination(data,'galleries')}`:empty(s.q?'没有找到匹配的图集':'还没有保存的图集。运行后会处理新收藏及此前因不支持图集而跳过的作品，历史基线保持不变。');
 }
 let galleryData=null,galleryIndex=0;
 async function viewGallery(id) {
@@ -113,8 +115,8 @@ function renderGallery() {
   if(!galleryData)return;
   const {item,images}=galleryData,id=item.id;
   galleryIndex=Math.max(0,Math.min(images.length-1,galleryIndex));
-  const src='/api/gallery-image?'+query({id,index:galleryIndex});
-  dialog.innerHTML=dialogHead(esc(titleOf(item)))+`<div class="gallery-viewer"><div class="gallery-stage"><a href="${src}" target="_blank" rel="noopener" aria-label="打开第 ${galleryIndex+1} 张原图"><img src="${src}" alt="第 ${galleryIndex+1} 张图片"></a></div><div class="gallery-controls">${button('← 上一张','gallery-step',`data-step="-1" ${galleryIndex===0?'disabled':''}`,'quiet')}<span aria-live="polite">${galleryIndex+1} / ${images.length}</span>${button('下一张 →','gallery-step',`data-step="1" ${galleryIndex===images.length-1?'disabled':''}`,'quiet')}</div><div class="gallery-thumbnails" aria-label="选择图片">${images.map((image,index)=>`<button data-action="gallery-select" data-index="${index}" aria-label="第 ${index+1} 张" aria-pressed="${index===galleryIndex}"><img loading="lazy" src="/api/gallery-image?id=${id}&index=${index}" alt=""></button>`).join('')}</div><footer><small>${esc(item.author||'未知作者')} · ${images.length} 张 · ${bytes(item.media_bytes)}</small><div class="row"><a class="button quiet" href="${src}" target="_blank" rel="noopener">查看原图 ↗</a>${button('打开本地文件夹','open',`data-kind="gallery-folder" data-id="${id}"`,'quiet')}${button('原图集 ↗','open',`data-kind="source" data-id="${id}"`,'quiet')}</div></footer></div>`;
+  const src='api/gallery-image?'+query({id,index:galleryIndex});
+  dialog.innerHTML=dialogHead(esc(titleOf(item)))+`<div class="gallery-viewer"><div class="gallery-stage"><a href="${src}" target="_blank" rel="noopener" aria-label="打开第 ${galleryIndex+1} 张原图"><img src="${src}" alt="第 ${galleryIndex+1} 张图片"></a></div><div class="gallery-controls">${button('← 上一张','gallery-step',`data-step="-1" ${galleryIndex===0?'disabled':''}`,'quiet')}<span aria-live="polite">${galleryIndex+1} / ${images.length}</span>${button('下一张 →','gallery-step',`data-step="1" ${galleryIndex===images.length-1?'disabled':''}`,'quiet')}</div><div class="gallery-thumbnails" aria-label="选择图片">${images.map((image,index)=>`<button data-action="gallery-select" data-index="${index}" aria-label="第 ${index+1} 张" aria-pressed="${index===galleryIndex}"><img loading="lazy" src="api/gallery-image?id=${id}&index=${index}" alt=""></button>`).join('')}</div><footer><small>${esc(item.author||'未知作者')} · ${images.length} 张 · ${bytes(item.media_bytes)}</small><div class="row"><a class="button quiet" href="${src}" target="_blank" rel="noopener">查看原图 ↗</a>${button('打开本地文件夹','open',`data-kind="gallery-folder" data-id="${id}"`,'quiet')}${button('原图集 ↗','open',`data-kind="source" data-id="${id}"`,'quiet')}</div></footer></div>`;
   const selected=dialog.querySelector('.gallery-thumbnails [aria-pressed=true]');
   selected?.focus({preventScroll:true});selected?.scrollIntoView({block:'nearest',inline:'nearest'});
 }
@@ -276,7 +278,7 @@ async function preparePlayback(id,epoch) {
     const check=async()=>{
       if(epoch!==dialogEpoch||!dialog.open)return;
       if(status.state==='ready'){
-        v.dataset.compatible='true';v.dataset.preparing='false';v.src='/api/video?'+query({id,compatible:1});v.load();void v.play().catch(()=>{});videoMessage('播放兼容副本 · 原视频保留');return;
+        v.dataset.compatible='true';v.dataset.preparing='false';v.src='api/video?'+query({id,compatible:1});v.load();void v.play().catch(()=>{});videoMessage('播放兼容副本 · 原视频保留');return;
       }
       if(status.state==='failed')throw new Error(status.error);
       videoTimer=setTimeout(async()=>{try{status=await api('video-status?'+query({id}));await check();}catch(e){if(epoch===dialogEpoch){v.dataset.preparing='false';videoMessage(e.message);}}},1200);
@@ -292,13 +294,13 @@ async function playVideo(id) {
     if(epoch!==dialogEpoch||!dialog.open)return;
     // 即使已有兼容缓存，也优先尝试原片，避免支持原格式的浏览器默认降画质。
     const compatible=false;
-    dialog.innerHTML=dialogHead('视频 · 页内播放')+`<video class="local-video" controls playsinline preload="metadata" aria-label="${esc(titleOf(i))}" poster="/api/video-poster?id=${id}" data-compatible="${compatible}"></video><div class="video-details"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)} · ${esc(mediaLabel(i))}</p><p id="video-message" role="status" aria-live="polite">${compatible?'播放兼容副本 · 原视频保留':'正在载入本地视频…'}</p><div class="row">${i.note_path||i.text_path?button('阅读笔记 / 文字稿','read',`data-id="${id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):''}${button('用外部播放器打开 ↗','open',`data-id="${id}" data-kind="video"`,'quiet')}${button('切换兼容播放','prepare-video',`data-id="${id}"`,'quiet')}${videoNoteButton(i)}${videoDeleteButton(i)}</div>${videoNoteHint(i)}</div>`;
+    dialog.innerHTML=dialogHead('视频 · 页内播放')+`<video class="local-video" controls playsinline preload="metadata" aria-label="${esc(titleOf(i))}" poster="api/video-poster?id=${id}" data-compatible="${compatible}"></video><div class="video-details"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)} · ${esc(mediaLabel(i))}</p><p id="video-message" role="status" aria-live="polite">${compatible?'播放兼容副本 · 原视频保留':'正在载入本地视频…'}</p><div class="row">${i.note_path||i.text_path?button('阅读笔记 / 文字稿','read',`data-id="${id}" data-kind="${i.note_path?'note':'text'}"`,'quiet'):''}${button('用外部播放器打开 ↗','open',`data-id="${id}" data-kind="video"`,'quiet')}${button('切换兼容播放','prepare-video',`data-id="${id}"`,'quiet')}${videoNoteButton(i)}${videoDeleteButton(i)}</div>${videoNoteHint(i)}</div>`;
     const v=dialog.querySelector('video');
     v.addEventListener('loadeddata',()=>{if(epoch===dialogEpoch)videoMessage(v.dataset.compatible==='true'?'播放兼容副本 · 原视频保留':'本地原视频 · 无需上传');});
     v.addEventListener('error',()=>{if(epoch!==dialogEpoch||!dialog.open)return;if(v.dataset.compatible==='true')videoMessage('播放失败，可尝试外部播放器，或重新打开此视频。');else void preparePlayback(id,epoch);});
     // 在设置视频源和开始播放之前恢复音量，避免开头瞬间以满音量出声。
     restoreVideoAudio(v);
-    v.src='/api/video?'+query({id,...(compatible?{compatible:1}:{})});
+    v.src='api/video?'+query({id,...(compatible?{compatible:1}:{})});
     void v.play().catch(()=>{});
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('视频暂不可播放')+empty(e.message);}
 }
