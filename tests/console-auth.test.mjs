@@ -18,9 +18,10 @@ test('公网入口强制认证，覆盖媒体和登录画面，支持子路径�
     const call=(path,{method='GET',cookie,body='',origin='https://dustoff.invalid',headers={}}={})=>new Promise((resolve,reject)=>{
       const req=request({host:'127.0.0.1',port,path,method,headers:{Host:'dustoff.invalid',Origin:origin,...(cookie?{Cookie:cookie}:{}),...(method==='POST'?{'Content-Type':'application/x-www-form-urlencoded'}:{}),...headers}},res=>{let body='';res.on('data',v=>body+=v);res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,body}));});req.on('error',reject);req.end(body);
     });
-    const page=await call('/dustoff/');assert.equal(page.status,200);assert.ok(page.body.includes('type="password"'));assert.ok(!page.body.includes('dustoff-token'));
+    const page=await call('/dustoff/');assert.equal(page.status,200);assert.equal(page.headers['referrer-policy'],'same-origin');assert.ok(page.body.includes('type="password"'));assert.ok(!page.body.includes('dustoff-token'));
     for(const path of ['/api/overview','/api/settings','/api/video?id=1','/api/gallery-image?id=1','/api/login-frame','/studio.mjs'])assert.equal((await call('/dustoff'+path)).status,401,path);
     assert.equal((await call('/dustoff/auth/login',{method:'POST',body:'password='+password,origin:'https://other.invalid'})).status,403);
+    assert.equal((await call('/dustoff/auth/login',{method:'POST',body:'password=wrong',origin:'null'})).status,403);
     assert.equal((await call('/dustoff/auth/login',{method:'POST',body:'password=wrong'})).status,401);
     const login=await call('/dustoff/auth/login',{method:'POST',body:'password='+password});assert.equal(login.status,303);assert.equal(login.headers.location,'/dustoff/');
     const setCookie=login.headers['set-cookie'][0];for(const flag of ['HttpOnly','Secure','SameSite=Strict','Path=/dustoff'])assert.ok(setCookie.includes(flag));const cookie=setCookie.split(';')[0];
