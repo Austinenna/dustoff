@@ -1,4 +1,4 @@
-// 使用已保存的真实转写和项目现成文本；不伪造 ASR 或模型响应。
+// 使用虚构固定样本与公开源码验证文本完整性；不读取生产资料、不调用模型。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, readdirSync, existsSync, renameSync, mkdirSync } from 'node:fs';
@@ -9,11 +9,11 @@ import { prepareTranscript, numberedTranscript, formatTranscript, verifyTranscri
 import { atomicWrite } from '../scripts/policy.mjs';
 import { writeNote } from '../notes.mjs';
 
-const real = readFileSync(new URL('../docs/验证结果-2026-09-14/真实样本转写.txt', import.meta.url));
+const real = readFileSync(new URL('./fixtures/transcript.txt', import.meta.url));
 const source = prepareTranscript(real);
 const document = block => `# 笔记\n\n## 完整转写稿\n\n${block}\n\n---\n[完整转写稿](#完整转写稿)\n`;
 
-test('真实原稿每一个可选分段位置，都能逐字节还原完整原文', () => {
+test('固定原稿每一个可选分段位置，都能逐字节还原完整原文', () => {
   const numbered = JSON.parse(numberedTranscript(source));
   assert.equal(numbered.map(s => s.text).join(''), source.text);
   for (const { id } of source.segments) {
@@ -29,7 +29,7 @@ test('真实原稿每一个可选分段位置，都能逐字节还原完整原�
 });
 
 test('现成 Markdown 和源码中的空白、转义、HTML、表情与代码符号保持原样', () => {
-  for (const path of ['../docs/第三段-笔记规格.md', '../README.md', '../scripts/transcript.mjs']) {
+  for (const path of ['./fixtures/note.md', '../README.md', '../scripts/transcript.mjs']) {
     const bytes = readFileSync(new URL(path, import.meta.url));
     const raw = prepareTranscript(bytes);
     const result = formatTranscript(raw, { paragraph_starts: raw.segments.map(s => s.id) });
@@ -37,7 +37,7 @@ test('现成 Markdown 和源码中的空白、转义、HTML、表情与代码符
   }
 });
 
-test('对真实原稿进行无效分段指令故障注入，全部回退且不损失原稿', () => {
+test('对固定原稿进行无效分段指令故障注入，全部回退且不损失原稿', () => {
   const [a, b] = source.segments;
   const bad = [undefined, null, [], {}, { paragraph_starts: '全部' },
     { paragraph_starts: ['不存在的编号'] }, { paragraph_starts: [a.id, a.id] },
@@ -80,12 +80,12 @@ test('已落盘临时笔记校验失败时保留旧文件，并清除本次临�
 });
 
 test('实际笔记与独立校验文件保留新旧版本，失败时两者均不被破坏', () => {
-  const model = JSON.parse(readFileSync(new URL('../docs/验证结果-转写排版-2026-09-14/模型返回.json', import.meta.url), 'utf8'));
-  const originalPath = new URL('../docs/验证结果-2026-09-14/真实样本转写.txt', import.meta.url);
+  const model = JSON.parse(readFileSync(new URL('./fixtures/model.json', import.meta.url), 'utf8'));
+  const originalPath = new URL('./fixtures/transcript.txt', import.meta.url);
   const dir = mkdtempSync(join(tmpdir(), 'dustoff-note-metadata-'));
   const metadataDir = mkdtempSync(join(tmpdir(), 'dustoff-internal-metadata-'));
   try {
-    const item = { id: '7681214929046686986', title: model.标题, text_path: fileURLToPath(originalPath), note_path: join(dir, 'note.md') };
+    const item = { id: '1234567890123456789', title: model.标题, text_path: fileURLToPath(originalPath), note_path: join(dir, 'note.md') };
     const render = starts => writeNote(item, { ...model, 转写排版: { paragraph_starts: starts } }, { dir, metadataDir });
     const a = render(model.转写排版.paragraph_starts);
     const oldDocument = readFileSync(a.file);
@@ -110,11 +110,11 @@ test('实际笔记与独立校验文件保留新旧版本，失败时两者均�
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(metadataDir, { recursive:true, force:true }); }
 });
 
-test('真实旧校验文件迁移、重复迁移和笔记改名均保持校验能力，损坏目标不删除旧副本', () => {
+test('固定旧校验文件迁移、重复迁移和笔记改名均保持校验能力，损坏目标不删除旧副本', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dustoff-migrate-metadata-'));
   try {
     const note = join(dir,'旧笔记.md'), original = join(dir,'original.txt'), directory = join(dir,'internal');
-    const fixture = new URL('../docs/验证结果-转写排版-2026-09-14/真实样本笔记.md', import.meta.url);
+    const fixture = new URL('./fixtures/note.md', import.meta.url);
     const bytes = readFileSync(fixture);
     const metadata = readFileSync(new URL(fixture.href + '.transcript.json'));
     writeFileSync(note,bytes); writeFileSync(original,real); writeFileSync(`${note}.transcript.json`,metadata);

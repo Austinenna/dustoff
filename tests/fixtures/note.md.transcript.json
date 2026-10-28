@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "layouts": {
+    "41c87082698199e367f27161ea3f1e083e098803dd64a280b47b194ac5463804": {
+      "version": 2,
+      "sha256": "a19017dd3972249b7bf209ff64a8bbd0bf3a1555b32102ea141ce9436eab5f05",
+      "bytes": 336,
+      "mode": "model",
+      "reason": null,
+      "paragraphs": 7,
+      "paragraph_bytes": [
+        42,
+        42,
+        50,
+        54,
+        57,
+        36,
+        62
+      ],
+      "block_sha256": "41c87082698199e367f27161ea3f1e083e098803dd64a280b47b194ac5463804"
+    }
+  }
+}

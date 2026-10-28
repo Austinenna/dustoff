@@ -6,8 +6,8 @@ import {renderMarkdown} from '../web/markdown.mjs';
 
 const appendix=(note,text)=>`${note}\n\n---\n## 完整转写稿\n\n${text}\n\n---\n[完整转写稿](#完整转写稿) · [原视频](https://example.com/video)\n`;
 
-test('真实笔记按原分段拆出全文，笔记不再重复全文或留下失效页脚',()=>{
-  const document=readFileSync(new URL('../docs/验证结果-转写排版-2026-09-14/真实样本笔记.md',import.meta.url),'utf8');
+test('固定笔记按原分段拆出全文，笔记不再重复全文或留下失效页脚',()=>{
+  const document=readFileSync(new URL('./fixtures/note.md',import.meta.url),'utf8');
   const {note,formatted}=splitNoteContent(document);
   const start=document.indexOf('\n\n---\n## 完整转写稿\n\n');
   assert.equal(note,document.slice(0,start));
