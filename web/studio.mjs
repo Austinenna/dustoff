@@ -5,6 +5,8 @@ import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,fmt,bytes,duration,titleOf,mediaL
 
 const root=document.querySelector('#dustoff-studio'),main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 const token=document.querySelector('meta[name="dustoff-token"]').content;
+const serverMode=document.querySelector('meta[name="dustoff-server"]')?.content==='1';
+if(serverMode)document.querySelector('.local-label').textContent='服务器工作空间';
 if(document.querySelector('meta[name="dustoff-access"]')?.content==='1'){const form=document.createElement('form');form.method='post';form.action='auth/logout';form.innerHTML='<button class="button quiet">退出登录</button>';document.querySelector('.sidebar-bottom').append(form);}
 const routes={overview:'总览',notes:'笔记',results:'笔记',videos:'视频',galleries:'图集',collection:'收藏记录',pending:'待处理',run:'待处理',schedule:'运行',history:'运行',account:'设置',models:'设置',storage:'设置',rules:'设置'};
 const state={route:'overview',overview:null,settings:null,results:{q:'',status:'notes',page:1,id:null,kind:'note',reader:false},videos:{q:'',page:1},galleries:{q:'',page:1},collection:{q:'',status:'all',page:1},review:{page:1,choices:{}},runs:[],runId:null,logKind:'business',runPage:1};
@@ -12,7 +14,7 @@ let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,poll
 const $=selector=>root.querySelector(selector);
 const query=values=>new URLSearchParams(values).toString();
 const tag=(value,tone='')=>`<span class="tag ${tone}">${esc(value)}</span>`;
-const button=(label,action,attrs='',style='')=>`<button type="button" class="button ${style}" data-action="${action}" ${attrs}>${label}</button>`;
+const button=(label,action,attrs='',style='')=>serverMode&&['open','delete-video','video-to-note'].includes(action)?'':`<button type="button" class="button ${style}" data-action="${action}" ${attrs}>${label}</button>`;
 const empty=(text='暂无内容')=>`<div class="empty">${esc(text)}</div>`;
 const busy=()=>!!state.overview?.execution.running;
 const icons={book:'M3 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-3H3zm18 0h-6a3 3 0 0 0-3 3v14a4 4 0 0 1 4-3h5z',layers:'m12 3 10 5-10 5L2 8zm-10 9 10 5 10-5M2 16l10 5 10-5',play:'M9 7v10l8-5z M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',settings:'M4 7h16M4 17h16M8 4v6M16 14v6'};
@@ -79,7 +81,7 @@ function overviewPage() {
     <div class="overview-columns"><div class="overview-content"><section><div class="section-heading"><h2>最近笔记</h2><a href="#notes">全部笔记 ↗</a></div><div class="recent-notes">${o.recent.length?o.recent.map(i=>`<button class="recent-note" data-action="read" data-id="${i.id}" data-kind="note"><span class="note-symbol" aria-hidden="true">▤</span><span><strong>${esc(titleOf(i))}</strong><small>${esc(i.author||'未知作者')} · ${esc(i.category||'未分类')} · ${esc(fmt(i.extracted_at))}</small></span><span aria-hidden="true">›</span></button>`).join(''):empty('整理完成的知识笔记会显示在这里')} </div>${o.textOnly?`<button class="button quiet text-only-link" data-action="text-only">还有 ${o.textOnly} 份独立文字稿 →</button>`:''}</section>
     <section><div class="section-heading"><h2>最近保存的视频</h2><a href="#videos">全部视频 ↗</a></div><div class="video-grid">${o.recentVideos.length?videoCards(o.recentVideos):empty('选择「保存视频」或「视频和笔记」后，保留的视频会显示在这里')}</div></section></div>
     <aside class="overview-aside"><section class="overview-schedule"><a class="schedule-state-label" href="#schedule"><span class="dot"></span>${s.error?'自动安排暂不可用':s.loaded?'自动整理已开启':'自动整理已关闭'}</a><p>下一次运行</p><a class="next-time" href="#schedule">${s.loaded?esc(nextTime):'尚未安排'}</a><small>${s.loaded?`${esc(fmt(s.nextRun))} · 每 ${s.intervalHours} 小时一次`:'在自动安排中设置时间'}</small>${button(busy()?'查看本轮进度':'▷ 运行一轮',busy()?'pending-page':'manual-run','','primary')}<dl><dt>今日已处理</dt><dd>${o.usedToday} / ${o.policy.daily} 条</dd><dt>最近一轮</dt><dd><a href="#history">${o.lastRun?esc(summary.label):'暂无记录'}</a></dd><dt>账号连接</dt><dd><a href="#account">${o.session.online==='verified'?'上次验证可用':o.session.online==='login_required'?'需要重新登录':'尚未在线确认'}</a></dd></dl></section>
-    <section class="overview-attention"><h2>需要你看一下</h2>${o.review?button(`${o.review} 条用途待确认 ›`,'review-items','','attention-link'):''}${o.failed?button(`${o.failed} 条处理失败 ›`,'failed-items','','attention-link'):''}${!o.review&&!o.failed?'<p class="muted">暂时没有需要处理的事项。</p>':''}</section></aside></div><footer class="overview-footer">共 ${o.total} 条收藏 · <a href="#collection">查看收藏记录</a> · 视频保存在本机</footer>`;
+    <section class="overview-attention"><h2>需要你看一下</h2>${o.review?button(`${o.review} 条用途待确认 ›`,'review-items','','attention-link'):''}${o.failed?button(`${o.failed} 条处理失败 ›`,'failed-items','','attention-link'):''}${!o.review&&!o.failed?'<p class="muted">暂时没有需要处理的事项。</p>':''}</section></aside></div><footer class="overview-footer">共 ${o.total} 条收藏 · <a href="#collection">查看收藏记录</a> · 视频保存在${serverMode?'服务器':'本机'}</footer>`;
 }
 function videosPage() {
   return `${head('视频','<span id="video-count">读取中</span>')}<div class="toolbar"><span class="muted">已保留的视频，与笔记独立浏览</span>${searchField(state.videos.q,'搜索标题、作者','videos-search')}</div><div id="video-list">${empty('正在读取…')}</div>`;
@@ -92,14 +94,14 @@ async function loadVideos() {
   $('#video-list').innerHTML=data.items.length?`<div class="video-grid video-library">${videoCards(data.items)}</div>${pagination(data,'videos')}`:empty(s.q?'没有找到匹配的视频':'还没有保留的视频，可在收藏记录中选择视频用途');
 }
 function galleriesPage() {
-  return `${head('图集','<span id="gallery-count">读取中</span>',button('刷新','refresh','','quiet'))}<div class="toolbar"><span class="muted">整组图片保存在本机，按原顺序浏览 · 暂不整理笔记</span>${searchField(state.galleries.q,'搜索标题、作者','galleries-search')}</div><div id="gallery-list">${empty('正在读取…')}</div>`;
+  return `${head('图集','<span id="gallery-count">读取中</span>',button('刷新','refresh','','quiet'))}<div class="toolbar"><span class="muted">整组图片保存在${serverMode?'服务器':'本机'}，按原顺序浏览 · 暂不整理笔记</span>${searchField(state.galleries.q,'搜索标题、作者','galleries-search')}</div><div id="gallery-list">${empty('正在读取…')}</div>`;
 }
 async function loadGalleries() {
   const epoch=++listEpoch,page=pageEpoch,s=state.galleries;
   const data=await api('items?'+query({galleries:1,size:12,q:s.q,page:s.page}));
   if(epoch!==listEpoch||page!==pageEpoch)return;s.data=data;s.page=data.page;
   $('#gallery-count').textContent=`${data.total} 组图集`;
-  $('#gallery-list').innerHTML=data.items.length?`<div class="gallery-grid">${data.items.map(i=>`<button class="gallery-card" data-action="view-gallery" data-id="${i.id}"><span class="gallery-cover"><img src="api/gallery-image?id=${i.id}&index=0" alt="" loading="lazy"><small>${i.image_count||'多'} 张</small></span><strong>${esc(titleOf(i))}</strong><span>${esc(i.author||'未知作者')} · 已保存到本机</span></button>`).join('')}</div>${pagination(data,'galleries')}`:empty(s.q?'没有找到匹配的图集':'还没有保存的图集。运行后会处理新收藏及此前因不支持图集而跳过的作品，历史基线保持不变。');
+  $('#gallery-list').innerHTML=data.items.length?`<div class="gallery-grid">${data.items.map(i=>`<button class="gallery-card" data-action="view-gallery" data-id="${i.id}"><span class="gallery-cover"><img src="api/gallery-image?id=${i.id}&index=0" alt="" loading="lazy"><small>${i.image_count||'多'} 张</small></span><strong>${esc(titleOf(i))}</strong><span>${esc(i.author||'未知作者')} · 已保存到${serverMode?'服务器':'本机'}</span></button>`).join('')}</div>${pagination(data,'galleries')}`:empty(s.q?'没有找到匹配的图集':'还没有保存的图集。运行后会处理新收藏及此前因不支持图集而跳过的作品，历史基线保持不变。');
 }
 let galleryData=null,galleryIndex=0;
 async function viewGallery(id) {
@@ -216,6 +218,7 @@ function videoNoteButton(item) {
   return item.can_convert_to_note?`<span data-video-note-button>${button('转为笔记','video-to-note',`data-id="${item.id}" data-idle ${busy()?'disabled':''}`,'quiet')}</span>`:'';
 }
 function videoNoteHint(item) {
+  if(serverMode)return '';
   if(item.media_deleted||(!item.can_convert_to_note&&!item.delete_after_note))return '';
   let text='使用本地视频整理笔记，成功后原视频自动移入废纸篓。';
   if(item.delete_after_note) {
@@ -340,7 +343,7 @@ function manualRun() {
 function schedulePage() {
   const s=state.overview.scheduler;
   if(s.error)return `${head('运行')}${tabs('run')}<div class="callout">${esc(s.error)}</div>${button('重试','refresh')}`;
-  return `${head('运行')}${tabs('run')}${s.warning?`<div class="callout">${esc(s.warning)}</div>`:''}<div class="two-col"><form method="post" id="schedule-form"><h2>自动安排</h2><p class="muted">后台启动时自动开启；刷新或重新打开网页不会改变开关状态。</p><label class="form-row"><span>起始时间<small>按本机时区 ${esc(s.timezone||'')}</small></span><input name="time" type="time" value="${esc(s.time)}" required></label><label class="form-row"><span>重复间隔<small>从起始时间起，每隔这些小时运行</small></span><span class="input-unit"><input name="intervalHours" aria-label="重复间隔小时" type="number" min="1" max="720" value="${s.intervalHours}" required>小时</span></label><label class="form-row"><span>登录电脑后自动启用<small>关机或注销后，在下次登录时加载安排</small></span><input class="toggle" name="autoStartAfterReboot" type="checkbox" ${s.autoStartAfterReboot?'checked':''}></label><div class="savebar"><button class="button primary">保存安排</button><small>已开启时保存立即更新；关闭时只保存配置。</small></div></form><aside><div class="schedule-state">${tag(s.loaded?'自动整理已开启':'自动整理已关闭',s.loaded?'green':'')}<h2>${s.loaded?esc(fmt(s.nextRun)):'等待开启'}</h2><p class="muted">${s.loaded?'下一次安排':'保存好时间后，开启自动整理。'}</p>${button(s.loaded?'关闭自动整理':'开启自动整理','schedule-toggle',`data-value="${s.loaded?'stop':'start'}" ${s.running?'disabled':''}`)}</div><h3>接下来三次</h3><div id="schedule-preview"></div><p class="muted">预览以当前表单为准。电脑需要处于登录状态；睡眠期间由系统恢复后触发。</p></aside></div>`;
+  return `${head('运行')}${tabs('run')}${s.warning?`<div class="callout">${esc(s.warning)}</div>`:''}<div class="two-col"><form method="post" id="schedule-form"><h2>自动安排</h2><p class="muted">后台启动时自动开启；刷新或重新打开网页不会改变开关状态。</p><label class="form-row"><span>起始时间<small>按${serverMode?'服务器':'本机'}时区 ${esc(s.timezone||'')}</small></span><input name="time" type="time" value="${esc(s.time)}" required></label><label class="form-row"><span>重复间隔<small>从起始时间起，每隔这些小时运行</small></span><span class="input-unit"><input name="intervalHours" aria-label="重复间隔小时" type="number" min="1" max="720" value="${s.intervalHours}" required>小时</span></label><label class="form-row"><span>${serverMode?'服务器重启后自动启用':'登录电脑后自动启用'}<small>${serverMode?'无需保持浏览器或 Mac 开机':'关机或注销后，在下次登录时加载安排'}</small></span><input class="toggle" name="autoStartAfterReboot" type="checkbox" ${s.autoStartAfterReboot?'checked':''}></label><div class="savebar"><button class="button primary">保存安排</button><small>已开启时保存立即更新；关闭时只保存配置。</small></div></form><aside><div class="schedule-state">${tag(s.loaded?'自动整理已开启':'自动整理已关闭',s.loaded?'green':'')}<h2>${s.loaded?esc(fmt(s.nextRun)):'等待开启'}</h2><p class="muted">${s.loaded?'下一次安排':'保存好时间后，开启自动整理。'}</p>${button(s.loaded?'关闭自动整理':'开启自动整理','schedule-toggle',`data-value="${s.loaded?'stop':'start'}" ${s.running?'disabled':''}`)}</div><h3>接下来三次</h3><div id="schedule-preview"></div><p class="muted">预览以当前表单为准。${serverMode?'任务在服务器运行，关闭网页不影响自动整理。':'电脑需要处于登录状态；睡眠期间由系统恢复后触发。'}</p></aside></div>`;
 }
 function schedulePreview() {
   const form=$('#schedule-form');if(!form)return;
