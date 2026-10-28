@@ -11,6 +11,7 @@ import { createStore, liveLock, HttpError } from './scripts/console-store.mjs';
 import { createScheduler } from './scripts/schedule.mjs';
 import { localPath, atomicWrite } from './scripts/policy.mjs';
 import { createMediaService, streamMedia } from './scripts/console-media.mjs';
+import { validateLoginInput } from './scripts/remote-login.mjs';
 const ROOT=dirname(fileURLToPath(import.meta.url));
 const encode=value=>JSON.stringify(value,(_,v)=>typeof v==='bigint'?Number(v):v);
 export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
@@ -20,6 +21,18 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   const token=randomBytes(32).toString('hex');
   let active=null,lastAction=null,origin,auth=null,scheduleStartupWarning=null;
   const actionsDir=localPath(join(home,'console'));
+  let nextBrowserRequest=0;
+  function browserRequest(input) {
+    const operation=active;
+    if(!operation||operation.cancelling||!['login','login-window'].includes(operation.kind)||!auth?.remote||auth.phase!=='window')throw new HttpError(409,'当前没有可操作的登录页面');
+    operation.requests ||= new Map();
+    if(operation.requests.size>=4)throw new HttpError(429,'操作正在处理中，请稍后重试');
+    return new Promise((resolve,reject)=>{
+      const requestId=++nextBrowserRequest,timer=setTimeout(()=>{operation.requests.delete(requestId);reject(new HttpError(504,'登录页面响应超时'));},12000);
+      operation.requests.set(requestId,{resolve,reject,timer});
+      operation.child.send({type:'browser-request',requestId,input},error=>{if(error){clearTimeout(timer);operation.requests.delete(requestId);reject(new HttpError(409,'登录任务已结束'));}});
+    });
+  }
   function state(){const lock=liveLock(home);return {running:!!active||lock.running,pid:active?.pid||lock.pid||null,owned:!!active,kind:active?.kind||null,startedAt:active?.startedAt||null,lastAction};}
   function scheduleState(){try{const current=scheduler.status();return {...current,error:null,warning:current.loaded?null:scheduleStartupWarning};}catch(e){return {error:e.message,loaded:null,time:null,intervalHours:null,nextRun:null};}}
   function start(kind,body={}) {
@@ -51,31 +64,41 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     const operation={kind,pid:child.pid||null,startedAt:Date.now(),child};active=operation;
     log(`控制台启动 ${kind}\n`);
     child.on('message',m=>{
+      if(m?.type==='browser-response') {
+        const pending=operation.requests?.get(m.requestId);if(!pending)return;
+        clearTimeout(pending.timer);operation.requests.delete(m.requestId);
+        if(active!==operation||operation.cancelling||m.error)pending.reject(new HttpError(409,'登录页面暂不可用'));
+        else pending.resolve(m.data);return;
+      }
       if(active===operation&&m?.type==='action-error'){operation.error=String(m.message||'操作失败').slice(0,500);return;}
       if(active!==operation||m?.type!=='session'||operation.cancelling&&m.phase!=='cancelled'&&m.phase!=='error')return;
       const {phase,message,deadline}=m;
       if(!['starting','checking','checked','saving','success','timeout','window','cancelled','error'].includes(phase))return;
-      auth={phase,message:String(message||'').slice(0,300),deadline};
+      auth={phase,message:String(message||'').slice(0,300),deadline,remote:m.remote===true};
     });
     child.stdout.on('data',log);child.stderr.on('data',log);
+    child.once('close',()=>{for(const pending of operation.requests?.values()||[]){clearTimeout(pending.timer);pending.reject(new HttpError(409,'登录任务已结束'));}operation.requests?.clear();});
     child.once('error',e=>log(`启动失败：${e.message}\n`));
     child.once('close',(code,signal)=>{lastAction={kind,pid:operation.pid,startedAt:operation.startedAt,finishedAt:Date.now(),exitCode:code??1,signal};log(`结束：退出码 ${lastAction.exitCode}\n`);if(fd!==null){closeSync(fd);fd=null;}atomicWrite(join(actionsDir,'last-action.json'),encode(lastAction));if(active===operation){active=null;if(['login','session-check','login-window'].includes(kind)){if(!['checked','success','cancelled','timeout','error'].includes(auth?.phase))auth={phase:'error',message:'登录任务已结束，请重新开始'};}}});
     return state();
   }
   async function body(req){let size=0,parts=[];for await(const data of req){size+=data.length;if(size>32*1024)throw new HttpError(413,'请求内容过大');parts.push(data);}try{return JSON.parse(Buffer.concat(parts).toString('utf8')||'{}');}catch{throw new HttpError(400,'请求不是有效 JSON');}}
   const server=createServer(async(req,res)=>{
-    const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
+    const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
     const send=(code,value,type='application/json; charset=utf-8')=>{res.writeHead(code,{...headers,'Content-Type':type});res.end(type.startsWith('application/json')?encode(value):value);};
     try {
       if(req.headers.host!==new URL(origin).host)throw new HttpError(403,'请使用控制台的本机地址');
       if(req.headers['sec-fetch-site']==='cross-site')throw new HttpError(403,'不接受跨站请求');
       const url=new URL(req.url,origin),path=url.pathname;
-      if(req.method==='GET'&&['/','/studio.mjs','/studio.css','/studio-view.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs'].includes(path)) {
+      if(req.method==='GET'&&['/','/studio.mjs','/studio.css','/studio-view.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs','/remote-login.mjs','/remote-login.css'].includes(path)) {
         const name=path==='/'?'studio.html':path.slice(1),types={html:'text/html; charset=utf-8',js:'text/javascript; charset=utf-8',mjs:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8'};
         let content=readFileSync(join(root,name==='schedule-plan.mjs'?'scripts':'web',name),'utf8');if(path==='/')content=content.replace('__CSRF_TOKEN__',token);
         send(200,content,types[name.split('.').pop()]);return;
       }
       if(!path.startsWith('/api/'))throw new HttpError(404,'页面不存在');
+      if(req.method==='GET'&&path==='/api/login-frame'){
+        const frame=await browserRequest({action:'frame'});send(200,Buffer.from(frame.image,'base64'),'image/jpeg');return;
+      }
       if(['GET','HEAD'].includes(req.method)&&path==='/api/video'){
         const file=media.video(url.searchParams.get('id'),url.searchParams.get('compatible')==='1');
         await streamMedia(req,res,file,headers);return;
@@ -141,6 +164,10 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           result=kind==='discard'?{discarded:true}:{deleted:true};break;
         }
         case '/api/login':result=start('login');break;
+        case '/api/login-input':{
+          let input;try{input=validateLoginInput(data);}catch(e){throw new HttpError(400,e.message);}
+          result=await browserRequest(input);break;
+        }
         case '/api/session-check':result=start('session-check');break;
         case '/api/login-control':{
           if(data.action!=='cancel')throw new HttpError(400,'登录操作无效');

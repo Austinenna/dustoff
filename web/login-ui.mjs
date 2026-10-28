@@ -14,5 +14,5 @@ export function loginFlow(data){
   const a=data?.auth,active=data?.active;
   if(!a||a.phase==='cancelled')return '';
   const scan=active&&data.kind!=='session-check';
-  return `<div class="login-notice"><p role="status">${esc(a.message)}</p>${scan?'<p class="settings-note">使用手机抖音扫描 Chrome 官方页面中的二维码，并在手机上确认登录。二维码过期或需要额外验证时，直接在官方页面操作。</p>':''}${active?'<button type="button" data-action="cancel-login" class="link">取消本次操作</button>':''}</div>`;
+  return `<div class="login-notice"><p role="status">${esc(a.message)}</p>${scan?'<p class="settings-note">使用手机抖音扫描官方页面中的二维码，并在手机上确认登录。二维码过期或需要额外验证时，直接在官方页面操作。</p>':''}${scan&&a.remote?'<div class="remote-login" data-remote-login><p class="remote-status" role="status">正在连接登录画面…</p><img class="remote-screen" alt="服务器上的抖音官方登录页面" tabindex="0" draggable="false"><div class="remote-input"><input type="text" autocomplete="off" aria-label="输入到官方页面" placeholder="先点击画面中的输入框，再在这里输入"><button type="button" data-remote-send>输入到页面</button><button type="button" data-remote-backspace>退格</button><button type="button" data-remote-reload>刷新官方页面</button></div><p class="settings-note">点击画面操作；拖动可完成滑块验证。输入内容直接发送到当前官方输入框，不保存到日志。</p></div>':''}${active?'<button type="button" data-action="cancel-login" class="link">取消本次操作</button>':''}</div>`;
 }

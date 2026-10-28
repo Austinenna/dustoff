@@ -40,6 +40,7 @@ export function launchLoginBrowser({profile,visible=false,spawnProcess=spawn}={}
     const command=(method,params)=>send(method,params,sessionId);
     await command('Page.enable');await command('Network.enable');
     await command('Emulation.setDeviceMetricsOverride',{width:1100,height:850,deviceScaleFactor:1,mobile:false});
+    await command('Page.bringToFront');
     await command('Page.navigate',{url});
     return {targetId,command,evaluate:async expression=>{const r=await command('Runtime.evaluate',{expression,returnByValue:true});if(r.exceptionDetails)throw new Error('读取官方登录页面失败');return r.result.value;}};
   }
@@ -51,10 +52,10 @@ export function launchLoginBrowser({profile,visible=false,spawnProcess=spawn}={}
 }
 
 export const OPEN_LOGIN = `(() => {
-  if(!document.body)return;
-  if(document.querySelector('img[aria-label="二维码"],img[alt="二维码"]')||document.body.innerText.includes('扫码登录'))return;
+  if(!document.body)return false;
+  if(document.querySelector('img[aria-label="二维码"],img[alt="二维码"]')||/扫码登录|身份验证|接收短信验证码/.test(document.body.innerText))return true;
   const e=Array.from(document.querySelectorAll('button,span,div')).find(e=>e.children.length===0&&e.textContent.trim()==='登录'&&e.getBoundingClientRect().width>0);
-  if(e)e.click();
+  if(e){e.click();return true;}return false;
 })()`;
 export const ONLINE_STATUS = `(() => {
   if(location.hostname!=='www.douyin.com')return 'unknown';
