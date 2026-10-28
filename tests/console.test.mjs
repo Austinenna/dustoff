@@ -42,6 +42,17 @@ test('笔记、视频、图集按处理类型独立展示；旧文字产物不�
 });
 async function serve(options){const app=createConsole({...options,scheduler:options.scheduler||fakeScheduler()});const url=await app.listen(0);const html=await (await fetch(url)).text();const token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];return {...app,url,token,post:(path,data,headers={})=>fetch(url+'/api/'+path,{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token,...headers},body:JSON.stringify(data)}),close:()=>new Promise(resolve=>app.server.close(resolve))};}
 
+test('开发配置关闭启动时自动定时，但仍允许手动开启',async()=>{
+  const f=fixture(),scheduler=fakeScheduler();
+  writeFileSync(join(f.home,'dustoff.conf'),readFileSync(join(f.home,'dustoff.conf'),'utf8')+'\nDUST_AUTO_SCHEDULE=0\n');
+  const app=await serve({home:f.home,scheduler});
+  try{
+    assert.equal(scheduler.status().loaded,false);
+    scheduler.start();
+    assert.equal(scheduler.status().loaded,true);
+  }finally{await app.close();f.cleanup();}
+});
+
 test('转为笔记接口支持旧账本，只入队并保留播放；验证来源、互斥与重复请求',async()=>{
   const f=fixture(),file=join(f.home,'saved-media','18','video.mp4');let spawned=0;
   mkdirSync(dirname(file),{recursive:true});writeFileSync(file,'saved local video');

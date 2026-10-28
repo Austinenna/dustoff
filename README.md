@@ -6,7 +6,7 @@
 
 - **Linux 服务器：生产环境。** 正式账本、媒体、笔记、账号连接与自动整理在服务器运行，通过 HTTPS 密码认证的网页访问。
 - **本机：开发环境。** 修改代码、运行隔离测试、维护文档和提交。提交或推送不自动部署生产。
-- 本机历史资料目录中的 `server.json` 是生产网页入口和防重复运行标记。原 `打开控制台.command` 是生产网页快捷入口，不是开发服务启动器。
+- 本机沿用 `~/.dustoff` 中的开发样例。`打开控制台.command` 启动本地控制台；生产地址保存在私有运维文档中。
 
 ## 核心流程
 
@@ -24,26 +24,23 @@
 
 ## 本机开发
 
-使用独立开发目录，所有输出都放在其中；不要复制生产凭据或真实数据库作为默认测试环境：
+沿用 `~/.dustoff`，从笔记、视频、图集各 10 条样例开始，后续可自行下载和修改，不限制数量，不再初始化新的开发目录。真实样例不加入源码仓库。
+
+双击 `打开控制台.command`，或在终端运行：
 
 ```sh
-DUST_HOME="$HOME/.dustoff-dev" \
-DUST_MEDIA="$HOME/.dustoff-dev/media" \
-DUST_SAVED_MEDIA="$HOME/.dustoff-dev/saved-media" \
-DUST_TEXT="$HOME/.dustoff-dev/text" \
-DUST_NOTES="$HOME/.dustoff-dev/notes" \
-DUST_PROFILE="$HOME/.dustoff-dev/chrome-profile" \
+DUST_HOME="$HOME/.dustoff" \
 DUST_PUBLIC_URL= DUST_SERVER_MODE=0 DUST_REMOTE_LOGIN=0 \
 DUST_AUTO_SCHEDULE=0 DUST_NOTIFY=0 \
 node console.mjs --port 47832
 ```
 
-访问 `http://127.0.0.1:47832/`。需要开发配置时使用独立目录中的 `dustoff.conf`，不要修改停用的历史生产资料。接入真实账号和模型属于独立联调工作，先明确范围。
+访问 `http://127.0.0.1:47832/`。本机配置 `dustoff.conf` 中持久设置 `DUST_AUTO_SCHEDULE=0` 和 `DUST_CONSOLE_PORT=47832`，普通启动不会自动开启定时，手动处理仍可使用。笔记存放于数据目录内的 `notes/`，开发与生产各自独立。
 
 ## 验证
 
 ```sh
-DUST_HOME="$HOME/.dustoff-dev" DUST_NOTIFY=0 node --test tests/*.test.mjs
+DUST_AUTO_SCHEDULE=0 DUST_NOTIFY=0 node --test tests/*.test.mjs
 python3 tests/migrate-data.test.py
 git diff --check
 ```

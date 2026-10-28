@@ -209,7 +209,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     server.listen(port,'127.0.0.1',()=>{
       origin=external?.origin||`http://127.0.0.1:${server.address().port}`;
       // 仅后台服务成功启动时恢复定时；页面请求和重复打开启动器均不会执行这里。
-      try {if(process.env.DUST_AUTO_SCHEDULE!=='0'&&!scheduler.status().loaded)scheduler.start();}
+      try {if(store.cfg()('DUST_AUTO_SCHEDULE','1')!=='0'&&!scheduler.status().loaded)scheduler.start();}
       catch(error){scheduleStartupWarning=`自动开启定时失败：${error.message}。可在此重新开启。`;console.error(scheduleStartupWarning);}
       resolve(origin+basePath);
     });
