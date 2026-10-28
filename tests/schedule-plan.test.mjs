@@ -24,7 +24,7 @@ test('错过多个时刻只补最新一轮，同一时刻去重；上一轮跨�
   assert.equal(dueOccurrence(plan,{scheduleKey:scheduleKey(plan),scheduledFor:anchor,finishedAt:'2026-09-17T02:30:00Z'},now),null);
   assert.equal(dueOccurrence(plan,{scheduleKey:'old',scheduledFor:due},now),due);
 });
-test('12 小时计划生成 22 点与 10 点的 launchd 定义，携带固定日期起点',()=>{
+test('12 小时计划生成 22 点与 10 点的 launchd 定义，携带固定日期起点',{skip:process.platform!=='darwin'},()=>{
   const home=mkdtempSync(join(tmpdir(),'dustoff-interval-plist-'));
   try{
     const scheduler=createScheduler({home});
