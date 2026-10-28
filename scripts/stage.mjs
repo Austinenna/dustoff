@@ -71,6 +71,7 @@ export function createStage({
 
   /** 抢锁。锁里存 pid，进程没了就接管——否则一次崩溃会把后续所有定时执行堵死。 */
   function acquireLock() {
+    if(existsSync(join(dustHome,'server.json')))throw new Error('这份本机资料已迁移到服务器，请打开远程控制台；本机处理已停用');
     if (existsSync(LOCK)) {
       const pid = Number(readFileSync(LOCK, 'utf8').trim());
       let alive = false;
