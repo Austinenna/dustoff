@@ -29,6 +29,7 @@
 //   node ledger.mjs requeue-silent           把无音轨的打回重下（ASR 需要音轨）
 
 import { localPath } from './policy.mjs';
+import { platformOfId, validItemId } from './platforms.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS items (
   created_at    INTEGER,            -- 发布时间 unix 秒。注意不是收藏时间
   duration_s    INTEGER,            -- 时长秒。图集为 NULL
   media_type    TEXT,               -- video / gallery
+  folders       TEXT,               -- B 站：所在收藏夹标题的 JSON 数组；抖音为 NULL
 
   -- ── 采集状态 ─────────────────────────────────────
   collected_at  INTEGER,            -- 真·收藏时刻。来源是 listcollection 顶层的 cursor
@@ -201,14 +203,15 @@ export function importScan(items, platform = 'douyin') {
   const d = db(), t = now();
   const ins = d.prepare(`
     INSERT INTO items (id, platform, title, author, created_at, duration_s, media_type,
-                       collected_at, first_seen, last_seen, status, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                       collected_at, first_seen, last_seen, status, updated_at, folders)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(platform, id) DO UPDATE SET
       last_seen  = excluded.last_seen,
       title      = COALESCE(excluded.title, items.title),
       author     = COALESCE(excluded.author, items.author),
       duration_s = COALESCE(excluded.duration_s, items.duration_s),
       media_type = excluded.media_type,
+      folders    = COALESCE(excluded.folders, items.folders),
       -- 只认第一次算出来的值：页边界每次扫描落点不同，插值结果会有一两小时的抖动，
       -- 每天覆盖一遍等于让收藏时刻天天变，文件名也就跟着变
       collected_at = COALESCE(items.collected_at, excluded.collected_at),
@@ -218,10 +221,12 @@ export function importScan(items, platform = 'douyin') {
   d.exec('SAVEPOINT import_scan');
   try {
     for (const it of items) {
+      // aweme_id 是沿用的字段名，各平台都放平台内作品 ID。
       ins.run(it.aweme_id, platform, it.desc || null, it.author || null,
         it.create_time || null, it.duration_s || null,
         it.is_gallery ? 'gallery' : 'video',
-        it.collected_at || null, t, t, STATUS.PENDING, t);
+        it.collected_at || null, t, t, STATUS.PENDING, t,
+        Array.isArray(it.folders) && it.folders.length ? JSON.stringify(it.folders) : null);
     }
     d.exec('RELEASE import_scan');
   } catch (e) { d.exec('ROLLBACK TO import_scan'); d.exec('RELEASE import_scan'); throw e; }
@@ -342,17 +347,18 @@ export function reconcile(scannedIds, opts = {}) {
  *
  * 所以刻意保持它是个纯查询。
  */
-export function claim(status, limit = 50, platform = 'douyin', maxAttempts = 3) {
+export function claim(status, limit = 50, platform = null, maxAttempts = 3) {
+  // platform 为 null 时跨平台查询；单独运行的转写、笔记入口按全部平台续跑。
   return db().prepare(`
     SELECT * FROM items
-    WHERE platform = ? AND status = ? AND attempts < ?
+    WHERE (? IS NULL OR platform = ?) AND status = ? AND attempts < ?
     ORDER BY first_seen DESC
     LIMIT ?
-  `).all(platform, status, maxAttempts, limit);
+  `).all(platform, platform, status, maxAttempts, limit);
 }
 
 /** 记录一次转写成功。mp4 保持不动——提炼笔记之后才轮到清理。 */
-export function markTranscribed(id, fields, platform = 'douyin') {
+export function markTranscribed(id, fields, platform = platformOfId(id)) {
   return db().prepare(`
     UPDATE items SET status = 'transcribed', text_source = ?, text_chars = ?,
                      text_path = ?, audio_seconds = ?, attempts = 0, last_error = NULL,
@@ -364,7 +370,7 @@ export function markTranscribed(id, fields, platform = 'douyin') {
 }
 
 /** 记录一次提炼成功。 */
-export function markExtracted(id, fields, platform = 'douyin') {
+export function markExtracted(id, fields, platform = platformOfId(id)) {
   return db().prepare(`
     UPDATE items SET status = 'extracted', text_source = ?, text_chars = ?, keyframes = ?,
                      note_path = ?, category = ?, decay = ?, needs_ocr = ?, retain_media = ?,
@@ -392,7 +398,7 @@ export function archivable(prefix, { platform = 'douyin', limit = 10000 } = {}) 
 }
 
 /** 媒体文件搬了家，更新账本里的位置。 */
-export function setMediaPath(id, path, platform = 'douyin') {
+export function setMediaPath(id, path, platform = platformOfId(id)) {
   return db().prepare('UPDATE items SET media_path = ?, updated_at = ? WHERE platform = ? AND id = ?')
     .run(path, now(), platform, id);
 }
@@ -401,13 +407,13 @@ export function setMediaPath(id, path, platform = 'douyin') {
  * 捞出「笔记是旧版 prompt 写的」那些条目。
  * 改完提炼指令跑 `notes.mjs --stale`，只重跑真正过期的，不用整批重来。
  */
-export function staleNotes(hash, { platform = 'douyin', limit = 10000 } = {}) {
+export function staleNotes(hash, { platform = null, limit = 10000 } = {}) {
   return db().prepare(`
     SELECT * FROM items
-    WHERE platform = ? AND status = 'extracted'
+    WHERE (? IS NULL OR platform = ?) AND status = 'extracted'
       AND (prompt_hash IS NULL OR prompt_hash <> ?)
     ORDER BY extracted_at LIMIT ?
-  `).all(platform, hash, limit);
+  `).all(platform, platform, hash, limit);
 }
 
 /**
@@ -417,7 +423,7 @@ export function staleNotes(hash, { platform = 'douyin', limit = 10000 } = {}) {
  * 那不是失败，是材料不够。配合 needs_ocr=1，等 OCR 补完画面文字后
  * 把它退回 transcribed 重走一遍提炼即可。
  */
-export function markSkipped(id, reason, { needsOcr = false, platform = 'douyin' } = {}) {
+export function markSkipped(id, reason, { needsOcr = false, platform = platformOfId(id) } = {}) {
   return db().prepare(`
     UPDATE items SET status = 'skipped', skip_reason = ?, needs_ocr = ?,
                      attempts = 0, last_error = NULL, updated_at = ?
@@ -426,7 +432,7 @@ export function markSkipped(id, reason, { needsOcr = false, platform = 'douyin' 
 }
 
 /** 记录一次失败。超过上限则转 failed，避免无限重试烧 API 额度。 */
-export function markFailed(id, error, platform = 'douyin', maxAttempts = 3) {
+export function markFailed(id, error, platform = platformOfId(id), maxAttempts = 3) {
   const d = db();
   d.prepare(`UPDATE items SET attempts = attempts + 1, last_error = ?, updated_at = ?
              WHERE platform = ? AND id = ?`).run(String(error).slice(0, 300), now(), platform, id);
@@ -472,13 +478,13 @@ export function requeueSilent(platform = 'douyin') {
  *
  * @param {number} keepDays 转写完成后保留多少天。0 表示转完即可删。
  */
-export function cleanable(platform = 'douyin', { limit = 10000 } = {}) {
-  return db().prepare(`SELECT * FROM items WHERE platform=? AND transcribed_at IS NOT NULL
+export function cleanable(platform = null, { limit = 10000 } = {}) {
+  return db().prepare(`SELECT * FROM items WHERE (? IS NULL OR platform=?) AND transcribed_at IS NOT NULL
     AND text_source='asr' AND text_chars>0 AND media_deleted=0 AND media_path IS NOT NULL
     AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND COALESCE(needs_ocr,0)=0
     AND status='extracted' AND note_path IS NOT NULL
     AND COALESCE(retain_media,0)=0
-    ORDER BY transcribed_at LIMIT ?`).all(platform, limit);
+    ORDER BY transcribed_at LIMIT ?`).all(platform, platform, limit);
 }
 
 /** 某个 id 是否已知——扫描层增量判断「撞到已知就停」用。 */
@@ -571,7 +577,7 @@ if (isMain) {
       console.log(`  计费音频 ${hh ? hh + ' 小时 ' : ''}${mm} 分（${secs.toLocaleString()} 秒）`);
     }
   } else if (cmd === 'list') {
-    const rows = claim(a1 || 'pending', Number(a2) || 20, 'douyin', 99);
+    const rows = claim(a1 || 'pending', Number(a2) || 20, null, 99);
     console.log(`${a1 || 'pending'} 状态共列出 ${rows.length} 条:\n`);
     for (const r of rows) {
       console.log(`  ${r.id}  ${String(r.duration_s ?? '图集').padStart(5)}s  @${(r.author || '').slice(0, 10).padEnd(10)} ${(r.title || '').slice(0, 34)}`);
@@ -599,7 +605,7 @@ if (isMain) {
   } else if (cmd === 'requeue-silent') {
     console.log('  ', JSON.stringify(requeueSilent()));
   } else if (cmd === 'requeue') {
-    if (!a1 || !/^\d+$/.test(a1)) { console.error('请指定一个启用范围内的作品 ID，不再支持批量重置状态'); process.exitCode=2; }
+    if (!a1 || !validItemId(a1)) { console.error('请指定一个启用范围内的作品 ID，不再支持批量重置状态'); process.exitCode=2; }
     else {
       const { retryItem } = await import('./daily.mjs');
       const { createStage } = await import('./stage.mjs');
@@ -615,11 +621,11 @@ if (isMain) {
 
 export function markRouting(id, decision) {
   if (!['note','video','gallery','review'].includes(decision.purpose)) throw new Error('用途无效');
-  return db().prepare(`UPDATE items SET processing_mode=?,routing_reason=?,routing_source='model',routing_model=?,routed_at=?,
-    status=CASE WHEN ?='review' THEN 'review' ELSE status END, needs_ocr=?,updated_at=? WHERE platform='douyin' AND id=?`)
-    .run(decision.purpose,decision.reason,decision.model??null,now(),decision.purpose,0,now(),id);
+  return db().prepare(`UPDATE items SET processing_mode=?,routing_reason=?,routing_source=?,routing_model=?,routed_at=?,
+    status=CASE WHEN ?='review' THEN 'review' ELSE status END, needs_ocr=?,updated_at=? WHERE platform=? AND id=?`)
+    .run(decision.purpose,decision.reason,decision.source||'model',decision.model??null,now(),decision.purpose,0,now(),platformOfId(id),id);
 }
 export function markSaved(id) {
-  return db().prepare("UPDATE items SET status='saved',skip_reason=NULL,saved_at=?,attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?")
-    .run(now(),now(),id);
+  return db().prepare("UPDATE items SET status='saved',skip_reason=NULL,saved_at=?,attempts=0,last_error=NULL,updated_at=? WHERE platform=? AND id=?")
+    .run(now(),now(),platformOfId(id),id);
 }

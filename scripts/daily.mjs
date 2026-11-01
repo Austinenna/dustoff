@@ -3,13 +3,18 @@ import { localPath, under, SAVED_MEDIA } from './policy.mjs';
 import { PURPOSES } from './routing.mjs';
 import { db, importScan } from './ledger.mjs';
 import { boundaryIndex } from './incremental.mjs';
-import { POLICY, mediaDecision } from './policy.mjs';
+import { POLICY, mediaDecision, dailyLimitFor } from './policy.mjs';
+import { platformOfId } from './platforms.mjs';
 import { processingActions } from './item-actions.mjs';
 function database() {
   const d = db();
   d.exec(`CREATE TABLE IF NOT EXISTS daily_state (name TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS daily_queue (id TEXT PRIMARY KEY, metadata TEXT NOT NULL, enqueued INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS daily_usage (day TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(day,id));`);
+  // 各平台 ID 格式不重叠，主键沿用 id；平台列用于联表与分平台计额度。旧行均属抖音。
+  for (const table of ['daily_queue','daily_usage'])
+    if (!d.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === 'platform'))
+      d.exec(`ALTER TABLE ${table} ADD COLUMN platform TEXT NOT NULL DEFAULT 'douyin'`);
   return d;
 }
 export function localDay() {
@@ -21,6 +26,11 @@ export function baseline() {
   return r ? JSON.parse(r.value) : null;
 }
 export class ScanError extends Error {}
+/** 按 ID 读取条目；ID 格式决定平台。 */
+export function itemRow(id) {
+  const platform = platformOfId(id);
+  return platform ? database().prepare('SELECT * FROM items WHERE platform=? AND id=?').get(platform, String(id)) : undefined;
+}
 export function acceptScan(scan) {
   if (!scan?.ok || !scan.logged_in || scan.scan_error || !Array.isArray(scan.items)) {
     const detail = scan?.scan_error ? `：${String(scan.scan_error).replace(/https?:\/\/\S+/g,'[地址已隐藏]').slice(0,240)}` : '';
@@ -61,33 +71,43 @@ export function acceptScan(scan) {
   } catch (e) { d.exec('ROLLBACK'); throw e; }
 }
 export function pendingQueue() {
-  return database().prepare(`SELECT i.*, q.metadata FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform='douyin'
+  return database().prepare(`SELECT i.*, q.metadata FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform=q.platform
     WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts < 3
     ORDER BY q.enqueued ASC, q.rowid DESC`).all();
 }
 export function inScope(id) { return !!database().prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id); }
+/** 预留当天额度。返回 true 表示可处理；否则返回触达的额度说明。 */
 export function reserveDaily(id, day = localDay()) {
-  const d = database();
+  const d = database(), platform = platformOfId(id) || 'douyin';
   d.exec('BEGIN IMMEDIATE');
   try {
-    const used = d.prepare('SELECT COUNT(*) n FROM daily_usage WHERE day=?').get(day).n;
     const already = d.prepare('SELECT 1 FROM daily_usage WHERE day=? AND id=?').get(day,id);
-    if (!already && used >= POLICY.daily) { d.exec('COMMIT'); return false; }
-    d.prepare('INSERT OR IGNORE INTO daily_usage VALUES(?,?)').run(day,id);
+    if (!already) {
+      const used = d.prepare('SELECT COUNT(*) n FROM daily_usage WHERE day=? AND platform=?').get(day,platform).n;
+      const total = d.prepare('SELECT COUNT(*) n FROM daily_usage WHERE day=?').get(day).n;
+      if (used >= dailyLimitFor(platform) || total >= POLICY.totalDaily) { d.exec('COMMIT'); return false; }
+    }
+    d.prepare('INSERT OR IGNORE INTO daily_usage(day,id,platform) VALUES(?,?,?)').run(day,id,platform);
     d.exec('COMMIT'); return true;
   } catch(e) { d.exec('ROLLBACK'); throw e; }
 }
-export function usage(day = localDay()) { return database().prepare('SELECT COUNT(*) n FROM daily_usage WHERE day=?').get(day).n; }
+export function usage(day = localDay(), platform = null) {
+  return database().prepare('SELECT COUNT(*) n FROM daily_usage WHERE day=? AND (? IS NULL OR platform=?)').get(day,platform,platform).n;
+}
+/** 当天还能否为该平台预留额度（不写入）。 */
+export function dailyRoom(platform, day = localDay()) {
+  return usage(day, platform) < dailyLimitFor(platform) && usage(day) < POLICY.totalDaily;
+}
 
 export function retryItem(id) {
   const d = database();
   if (!inScope(id)) throw new Error('条目不在本次启用范围内');
-  const row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+  const row = itemRow(id), platform = row?.platform;
   if (!row || ['extracted','saved','review'].includes(row.status) || row.skip_reason === 'baseline') throw new Error('已完成或基线条目不能作为失败待办重试');
   if (['user_discarded','user_deleted'].includes(row.skip_reason)) throw new Error('这条作品已停止处理，请先在收藏详情重新选择用途');
   if (row.skip_reason === 'too_long' || row.skip_reason === 'gallery') throw new Error('本轮不支持恢复主动跳过的内容');
   if (row.media_type === 'gallery') {
-    d.prepare("UPDATE items SET status='pending',attempts=0,last_error=NULL WHERE platform='douyin' AND id=?").run(id);
+    d.prepare("UPDATE items SET status='pending',attempts=0,last_error=NULL WHERE platform=? AND id=?").run(platform,id);
     return 'pending';
   }
   let status = 'pending';
@@ -99,45 +119,45 @@ export function retryItem(id) {
   // 改用途后可能仍有旧转写稿；保留视频的路径必须先取得符合新规格的素材。
   if (profile.transcribe && (!profile.retain || mediaReady) && row.transcribed_at && row.text_path && existsSync(localPath(row.text_path)) && readFileSync(localPath(row.text_path),'utf8').length === row.text_chars) status = 'transcribed';
   else if (mediaReady) status = 'downloaded';
-  d.prepare("UPDATE items SET status=?,attempts=0,last_error=NULL WHERE platform='douyin' AND id=?").run(status,id);
+  d.prepare("UPDATE items SET status=?,attempts=0,last_error=NULL WHERE platform=? AND id=?").run(status,platform,id);
   return status;
 }
 
 /** 手动用途覆盖保留已有成果，重新排队；不处理历史基线、图集或超长条目。 */
 export function setPurpose(id, purpose) {
   if (!['note','video','review'].includes(purpose)) throw new Error('用途无效');
-  const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+  const d = database(), row = itemRow(id);
   if (!row || row.media_type === 'gallery' || !inScope(id) || ['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
   const now = Math.floor(Date.now()/1000);
   d.prepare(`UPDATE items SET processing_mode=?,routing_reason='用户手动选择',routing_source='manual',routing_model=NULL,routed_at=?,
     status=?,skip_reason=NULL,needs_ocr=?,delete_after_note=CASE WHEN ?='note' THEN delete_after_note ELSE 0 END,
-    attempts=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?`)
-    .run(purpose,now,purpose==='review'?'review':'pending',0,purpose,now,id);
+    attempts=0,last_error=NULL,updated_at=? WHERE platform=? AND id=?`)
+    .run(purpose,now,purpose==='review'?'review':'pending',0,purpose,now,row.platform,id);
   if (purpose !== 'review') retryItem(id);
   return purpose;
 }
 
 /** 调用方须持有流水线锁。保留记录、产物与启用范围，停止自动处理。 */
 export function discardItem(id) {
-  const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+  const d = database(), row = itemRow(id);
   if (!row) throw new Error('找不到这条作品');
   if (row.skip_reason === 'user_discarded') return {discarded:true, alreadyDiscarded:true};
   if (!processingActions(row,inScope(id)).can_discard) throw new Error('只能放弃当前范围内尚未完成的处理任务');
   const now = Math.floor(Date.now()/1000);
-  d.prepare("UPDATE items SET status='skipped',skip_reason='user_discarded',delete_after_note=0,updated_at=? WHERE platform='douyin' AND id=?").run(now,id);
+  d.prepare("UPDATE items SET status='skipped',skip_reason='user_discarded',delete_after_note=0,updated_at=? WHERE platform=? AND id=?").run(now,row.platform,id);
   return {discarded:true};
 }
 
 /** 调用方须持有流水线锁。隐藏无产物的记录，保留去重标记，防止重扫后恢复。 */
 export function deleteItem(id) {
-  const d = database(), row = d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+  const d = database(), row = itemRow(id);
   if (!row) throw new Error('找不到这条作品');
   if (row.skip_reason === 'user_deleted') return {deleted:true, alreadyDeleted:true};
   if (!processingActions(row,inScope(id)).can_delete) throw new Error('只能删除当前范围内没有本地产物的待确认或已放弃记录');
   d.exec('BEGIN IMMEDIATE');
   try {
     d.prepare('DELETE FROM daily_queue WHERE id=?').run(id);
-    d.prepare("UPDATE items SET status='skipped',skip_reason='user_deleted',delete_after_note=0,updated_at=? WHERE platform='douyin' AND id=?").run(Math.floor(Date.now()/1000),id);
+    d.prepare("UPDATE items SET status='skipped',skip_reason='user_deleted',delete_after_note=0,updated_at=? WHERE platform=? AND id=?").run(Math.floor(Date.now()/1000),row.platform,id);
     d.exec('COMMIT');
   } catch (error) { d.exec('ROLLBACK'); throw error; }
   return {deleted:true};
@@ -174,4 +194,50 @@ export function queueSkippedGalleries() {
     }
     d.exec('COMMIT');return rows.length;
   } catch(e) { d.exec('ROLLBACK');throw e; }
+}
+
+// ── 按收藏时间增量的平台（B 站）────────────────────────────────────
+// 与抖音的锚点基线互不相干：状态单独存为 baseline:<platform>，只登记新收藏，不写存量。
+export function platformState(platform) {
+  const r = database().prepare('SELECT value FROM daily_state WHERE name=?').get(`baseline:${platform}`);
+  return r ? JSON.parse(r.value) : null;
+}
+/**
+ * 在一个事务里登记新收藏、入队并推进扫描状态。调用方持有流水线锁。
+ * 已在账本中的作品只合并收藏夹，不重新入队；超长作品登记为 skipped 以便控制台查看。
+ */
+export function acceptIncremental(platform, items, nextState) {
+  if (!Array.isArray(items) || !nextState || typeof nextState !== 'object') throw new ScanError('扫描结果不完整');
+  for (const it of items) if (platformOfId(it?.aweme_id) !== platform) throw new ScanError('扫描包含无效作品 ID');
+  const d = database();
+  let added = 0, merged = 0;
+  d.exec('BEGIN IMMEDIATE');
+  try {
+    const known = d.prepare('SELECT id, folders FROM items WHERE platform=? AND id=?');
+    const fresh = [];
+    for (const it of items) {
+      const row = known.get(platform, it.aweme_id);
+      if (!row) { fresh.push(it); continue; }
+      const folders = [...new Set([...(row.folders ? JSON.parse(row.folders) : []), ...(it.folders || [])])];
+      if (folders.length !== (row.folders ? JSON.parse(row.folders).length : 0)) {
+        d.prepare('UPDATE items SET folders=?,updated_at=? WHERE platform=? AND id=?').run(JSON.stringify(folders), Math.floor(Date.now()/1000), platform, it.aweme_id);
+        merged++;
+      }
+    }
+    importScan(fresh, platform);
+    const put = d.prepare('INSERT OR IGNORE INTO daily_queue(id,metadata,enqueued,platform) VALUES(?,?,?,?)');
+    const skip = d.prepare("UPDATE items SET status='skipped',skip_reason=? WHERE platform=? AND id=? AND status='pending'");
+    for (const it of fresh) {
+      const reason = mediaDecision(it);
+      if (reason && reason !== 'unknown_duration') { skip.run(reason, platform, it.aweme_id); continue; }
+      added += put.run(it.aweme_id, JSON.stringify(it), Date.now(), platform).changes;
+    }
+    d.prepare("INSERT INTO daily_state VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value").run(`baseline:${platform}`, JSON.stringify(nextState));
+    d.exec('COMMIT');
+    return { added, merged, scanned: items.length };
+  } catch (e) { d.exec('ROLLBACK'); throw e; }
+}
+/** 更新排队条目的元数据快照（刷新播放信息后调用）。 */
+export function updateQueued(id, metadata) {
+  database().prepare('UPDATE daily_queue SET metadata=? WHERE id=?').run(JSON.stringify(metadata), id);
 }

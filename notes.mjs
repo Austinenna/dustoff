@@ -34,6 +34,7 @@ import { makeCfg, DUST_HOME, CONF_FILE, expand } from './scripts/config.mjs';
 import { claim, markExtracted, markSkipped, markFailed, staleNotes, db } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { pathToFileURL } from 'node:url';
+import { platformInfo, platformOfId } from './scripts/platforms.mjs';
 import { prepareTranscript, numberedTranscript, formatTranscript, verifyTranscript, transcriptMetadataPath, transcriptKey, readTranscriptMetadata, TRANSCRIPT_METADATA_DIR } from './scripts/transcript.mjs';
 
 // 原稿快照由程序持有，不允许模型通过 JSON 字段提供或替换。
@@ -215,7 +216,7 @@ async function askOnce(item, source) {
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: PROMPT },
-        { role: 'user', content: `请同时返回「转写排版」和笔记字段。转写排版只选择下列片段编号，不复写原稿。\n\n标题：${item.title || '(无)'}\n作者：${item.author || '(无)'}\n时长：${fmtDur(item.duration_s || 0)}\n\n原稿片段（JSON 数组，按顺序连接所有 text 即为完整原稿）：\n${numberedTranscript(source)}` },
+        { role: 'user', content: `请同时返回「转写排版」和笔记字段。转写排版只选择下列片段编号，不复写原稿。\n\n标题：${item.title || '(无)'}\n作者：${item.author || '(无)'}\n时长：${fmtDur(item.duration_s || 0)}${item.extra_context ? `\n${item.extra_context}` : ''}\n\n原稿片段（JSON 数组，按顺序连接所有 text 即为完整原稿）：\n${numberedTranscript(source)}` },
       ],
     }),
   });
@@ -325,14 +326,18 @@ function writeNote(item, note, { dir, metadataDir = TRANSCRIPT_METADATA_DIR }) {
 
   const decay = DECAY.includes(note.时效) ? note.时效 : 'none';
   const tags = Array.isArray(note.标签) ? note.标签 : [];
+  const platform = platformInfo(item.platform || platformOfId(item.id) || 'douyin');
+  const link = platform.url(item.id, item.media_type);
+  let folders = [];
+  try { folders = item.folders ? JSON.parse(item.folders) : []; } catch {}
 
   const fm = [
     '---',
     `标题: ${y(note.标题 || item.title)}`,
-    '来源: 抖音',
+    `来源: ${platform.label}`,
     `作者: ${y(item.author)}`,
     `视频ID: ${y(item.id)}`,
-    `链接: ${y(`https://www.douyin.com/video/${item.id}`)}`,
+    `链接: ${y(link)}`,
     `发布日期: ${ymd(item.created_at)}`,
     `收藏日期: ${ymd(collected)}`,
     // 只留三个日期，各自回答不同的问题：作者哪天发的 / 我哪天存的 / 这篇笔记哪天写的。
@@ -349,6 +354,7 @@ function writeNote(item, note, { dir, metadataDir = TRANSCRIPT_METADATA_DIR }) {
     `分类: ${y(note.分类 || '未分类')}`,
     `时效: ${y(decay)}`,
     `标签: [${tags.map(y).join(', ')}]`,
+    ...(folders.length ? [`收藏夹: [${folders.map(y).join(', ')}]`] : []),
     '---',
     '',
   ].join('\n');
@@ -360,7 +366,7 @@ function writeNote(item, note, { dir, metadataDir = TRANSCRIPT_METADATA_DIR }) {
 
   // 完整原稿就在同一篇笔记内，核对时不再依赖阅读器打开 file:// 本机链接。
   const src = ['[完整转写稿](#完整转写稿)'];
-  src.push(`[原视频](https://www.douyin.com/video/${item.id})`);
+  src.push(`[原视频](${link})`);
 
   const body = String(note.正文 || '').trim();
   dir = localPath(dir);
@@ -452,7 +458,7 @@ async function main() {
     if (!items.length) { log(`所有笔记都是当前这版指令（${HASH}）写的，没有要重跑的。`); return; }
   } else {
     const status = FORCE ? 'extracted' : 'transcribed';
-    items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
+    items = claim(status, LIMIT || 10000, null, FORCE ? 1e9 : MAX_ATTEMPTS);
   }
   items = items.filter(i => (DRY_RUN || inScope(i.id)) && i.media_type !== 'gallery' && [null,'note','speech'].includes(i.processing_mode));
   if (LIMIT) items = items.slice(0, LIMIT);
@@ -527,7 +533,7 @@ async function main() {
         stat.fail++;
         failures.push({ id: item.id, title: item.title, error: e.message });
         if (!TRIAL) {
-          markFailed(item.id, e.message, 'douyin', e instanceof PermanentError ? 1 : MAX_ATTEMPTS);
+          markFailed(item.id, e.message, item.platform, e instanceof PermanentError ? 1 : MAX_ATTEMPTS);
         }
         log(`  ✗ ${label} — ${e.message}`);
         if (++consecutiveFails >= MAX_CONSECUTIVE_FAILS) {

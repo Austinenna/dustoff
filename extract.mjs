@@ -5,7 +5,7 @@
 // node extract.mjs [--limit 1] [--id ID] [--dry-run] [--clean-only]
 // 外接盘归档和文字备份代码保留但禁用，强制重转及旧外接参数当前拒绝执行。
 
-import { POLICY, MEDIA, SAVED_MEDIA, TEMP, localPath, under, storage, writeMedia, requestSignal, deadlineMs, atomicWrite, PauseError, mediaDecision } from './scripts/policy.mjs';
+import { POLICY, MEDIA, SAVED_MEDIA, TEMP, localPath, under, storage, writeMedia, requestSignal, deadlineMs, atomicWrite, PauseError, mediaDecision, asrSecondsFor } from './scripts/policy.mjs';
 import { inScope, reserveDaily } from './scripts/daily.mjs';
 import { spawnSync, spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, cpSync, readdirSync } from 'node:fs';
@@ -207,7 +207,7 @@ async function transcribeOne(item, tmpRoot) {
     const audio = join(work, 'a.mp3');
     await extractAudio(mp4, audio);
     const dur = probeDuration(audio);
-    if (!(dur > 0) || dur > POLICY.seconds + 0.2) throw new PermanentError('实际音频时长不满足限制');
+    if (!(dur > 0) || dur > asrSecondsFor(item) + 0.2) throw new PermanentError('实际音频时长不满足限制');
     const chunks = planChunks(dur, dur > CHUNK_MAX ? silenceMidpoints(audio) : []);
 
     const parts = [];
@@ -403,13 +403,13 @@ function backupText({ dryRun }) {
  *      （见 docs/待办-OCR增强.md）。删了等于把原料丢了。
  */
 function cleanMedia({ dryRun = false, limit = 10000 } = {}) {
-  const rows = cleanable('douyin', { limit });
+  const rows = cleanable(null, { limit });
   const done = []; let bytes = 0, held = 0, failed = 0;
   for (const row of rows) {
     if (!inScope(row.id)) continue; // 当前启用范围以外的旧数据留给一次性清理操作
     try {
       const media = localPath(row.media_path), text = localPath(row.text_path || '');
-      if (!under(media, MEDIA) || !/\.(mp4|mov|webm|m4v)$/i.test(media)) { held++; continue; }
+      if (!under(media, MEDIA) || !/\.(mp4|mov|webm|m4v|m4a)$/i.test(media)) { held++; continue; }
       if (!row.text_path || !existsSync(text)) { held++; continue; }
       const contents = readFileSync(text,'utf8');
       if (!contents.trim() || contents.length !== row.text_chars) { held++; continue; }
@@ -492,7 +492,7 @@ async function main() {
     }
   } else {
     const status = FORCE ? 'transcribed' : 'downloaded';
-    items = claim(status, LIMIT || 10000, 'douyin', FORCE ? 1e9 : MAX_ATTEMPTS);
+    items = claim(status, LIMIT || 10000, null, FORCE ? 1e9 : MAX_ATTEMPTS);
   }
   items = items.filter(i => inScope(i.id) && !i.transcribed_at && i.media_type !== 'gallery' && [null,'note','speech'].includes(i.processing_mode));
   if (LIMIT) items = items.slice(0, LIMIT);
@@ -557,7 +557,7 @@ async function main() {
         failures.push({ id: item.id, title: item.title, error: e.message });
         // 永久性错误（文件不在、音频超长、参数错）重试没有意义，一次就放弃。
         // 尤其是「媒体文件不存在」——那多半是用户自己删的，撞三次只是噪音。
-        const res = markFailed(item.id, e.message, 'douyin',
+        const res = markFailed(item.id, e.message, item.platform,
           e instanceof PermanentError ? 1 : MAX_ATTEMPTS);
         log(`  ✗ ${label} — ${e.message}${res.gaveUp ? '（已放弃）' : `（第 ${res.attempts} 次）`}`);
         if (++consecutiveFails >= MAX_CONSECUTIVE_FAILS) {

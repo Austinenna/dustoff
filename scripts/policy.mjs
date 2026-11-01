@@ -2,6 +2,7 @@
 import { existsSync, lstatSync, readlinkSync, readFileSync, statfsSync, readdirSync, mkdirSync, openSync, writeSync, closeSync, fsyncSync, renameSync, rmSync } from 'node:fs';
 import { resolve, dirname, join, sep } from 'node:path';
 import { makeCfg, DUST_HOME } from './config.mjs';
+import { platformOfId } from './platforms.mjs';
 const cfg = makeCfg();
 export const GiB = 1024 ** 3;
 export function readPolicy(conf) {
@@ -17,6 +18,16 @@ export function readPolicy(conf) {
   requestMs: positive('DUST_REQUEST_TIMEOUT_S', 180) * 1000,
   runMs: positive('DUST_RUN_TIMEOUT_S', 7200) * 1000,
   external: false,
+  // 各平台单独计每日额度，同时受总额度约束。
+  totalDaily: Math.max(1, Math.min(100, Math.floor(positive('DUST_TOTAL_DAILY_LIMIT', 60)))),
+  bilibili: Object.freeze({
+    enabled: cfg('DUST_BILI_ENABLED', '0') === '1',
+    daily: Math.max(1, Math.min(50, Math.floor(positive('DUST_BILI_DAILY_LIMIT', 20)))),
+    // 有字幕时不产生转写费用，只防异常超长；没有字幕时另设转写上限和每日转写总量。
+    seconds: Math.min(600 * 60, positive('DUST_BILI_MAX_DURATION_MIN', 240) * 60),
+    asrSeconds: Math.min(180 * 60, positive('DUST_BILI_MAX_ASR_MIN', 30) * 60),
+    dailyAsrSeconds: Math.min(1440 * 60, positive('DUST_BILI_DAILY_ASR_MIN', 120) * 60),
+  }),
 });
 }
 export const POLICY = readPolicy();
@@ -100,9 +111,14 @@ export async function writeMedia(stream, path) {
   } catch (e) { rmSync(path, { force: true }); throw e; }
   finally { closeSync(fd); }
 }
+const platformOf = item => item.platform || platformOfId(item.aweme_id ?? item.id) || 'douyin';
+export const dailyLimitFor = platform => platform === 'bilibili' ? POLICY.bilibili.daily : POLICY.daily;
+/** 能送进 ASR 的最长音频。 */
+export const asrSecondsFor = item => platformOf(item) === 'bilibili' ? POLICY.bilibili.asrSeconds : POLICY.seconds;
 export function mediaDecision(item) {
   if (item.is_gallery || item.media_type === 'gallery') return null;
   const seconds = Number(item.duration_s);
   if (!Number.isFinite(seconds) || seconds <= 0) return 'unknown_duration';
-  return seconds > POLICY.seconds ? 'too_long' : null;
+  const cap = platformOf(item) === 'bilibili' ? POLICY.bilibili.seconds : POLICY.seconds;
+  return seconds > cap ? 'too_long' : null;
 }

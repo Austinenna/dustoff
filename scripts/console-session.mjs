@@ -9,6 +9,7 @@ import { guardSession } from './session_guard.mjs';
 import { cookieSession, cookieParameters } from './session-status.mjs';
 import { launchLoginBrowser, OPEN_LOGIN, ONLINE_STATUS, LOGIN_DIAGNOSTICS } from './login-browser.mjs';
 import { createLoginControl } from './remote-login.mjs';
+import { manageBiliSession } from './sources/bilibili/session.mjs';
 const SELF='https://www.douyin.com/user/self';
 const HOME='https://www.douyin.com/';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
@@ -71,6 +72,7 @@ export async function manageSession({mode='login',profile,home=DUST_HOME,launch=
 
 async function main(){
   const mode=process.argv[2]||'login';if(!['login','check','window'].includes(mode))throw new Error('登录操作无效');
+  const site=process.argv[3]||'douyin';if(!['douyin','bilibili'].includes(site))throw new Error('登录平台无效');
   const stage=createStage({name:'console-action',dustHome:DUST_HOME,notify:false});stage.acquireLock();
   const controller=new AbortController();
   const control=createLoginControl(),remote=process.env.DUST_REMOTE_LOGIN==='1';
@@ -83,7 +85,10 @@ async function main(){
     }
   });
   const emit=value=>{if(process.connected)process.send({type:'session',...value});};
-  try{await manageSession({mode,home:DUST_HOME,profile:localPath(makeCfg()('DUST_PROFILE',join(DUST_HOME,'chrome-profile'))),signal:controller.signal,emit,remote,control,diagnose:message=>stage.log('[登录诊断]',message)});}
+  try{
+    if(site==='bilibili')await manageBiliSession({mode:mode==='check'?'check':'login',home:DUST_HOME,signal:controller.signal,emit,remote,control});
+    else await manageSession({mode,home:DUST_HOME,profile:localPath(makeCfg()('DUST_PROFILE',join(DUST_HOME,'chrome-profile'))),signal:controller.signal,emit,remote,control,diagnose:message=>stage.log('[登录诊断]',message)});
+  }
   catch(error){stage.log(error.message);emit({phase:controller.signal.aborted?'cancelled':'error',message:controller.signal.aborted?'本次操作已取消':'登录操作未完成，请重试或在 Chrome 官方窗口完成验证'});process.exitCode=controller.signal.aborted?0:1;}
   finally{stage.releaseLock();stage.pruneRuns();if(process.connected)process.disconnect();}
 }

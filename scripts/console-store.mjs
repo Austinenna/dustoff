@@ -12,14 +12,15 @@ import { sessionSummary } from './session-status.mjs';
 import { readGallery } from './gallery.mjs';
 import { processingActions } from './item-actions.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
+import { PLATFORMS, platformOfId, validItemId } from './platforms.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const savedVideoWhere = conversion => `COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (processing_mode='video' OR (processing_mode IS NULL AND status='saved') OR (${conversion}=1 AND processing_mode='note'))`;
 const number = (label, group, fallback, min, max, step = 1) => ({ label, group, type:'number', fallback, min, max, step });
 const text = (label, group, fallback, type = 'text') => ({ label, group, type, fallback });
 export const FIELDS = {
-  DUST_DAILY_LIMIT:number('每日最多处理（条）','policy',50,1,50),
-  DUST_MAX_DURATION_MIN:number('视频最长时长（分钟）','policy',10,0.1,10,0.1),
+  DUST_DAILY_LIMIT:number('抖音每日最多处理（条）','policy',50,1,50),
+  DUST_MAX_DURATION_MIN:number('抖音视频最长时长（分钟）','policy',10,0.1,10,0.1),
   DUST_SAVED_MEDIA_MAX_GB:number('视频与图集收藏上限（GiB）','policy',1,0.1,10240,0.1),
   DUST_MEDIA_MAX_GB:number('媒体缓存上限（GiB）','policy',1,0.1,1,0.1),
   DUST_MIN_FREE_GB:number('最低可用空间（GiB）','policy',10,10,10240,0.1),
@@ -44,6 +45,17 @@ export const FIELDS = {
   DUST_SAVED_MEDIA:text('视频与图集收藏目录','paths','','path'),
   DUST_TEXT:text('原始文字稿目录','paths','','path'),
   DUST_WARN_DAYS:number('登录到期提前提醒（天）','login',7,1,30),
+  DUST_TOTAL_DAILY_LIMIT:number('全部平台每日合计（条）','policy',60,1,100),
+  DUST_BILI_ENABLED:{...text('处理 B站收藏','bilibili','0'),type:'select',options:['0','1']},
+  DUST_BILI_START_DATE:text('起始日期（YYYY-MM-DD，只处理此后的收藏）','bilibili',''),
+  DUST_BILI_FOLDERS:text('只跟踪这些收藏夹（ID 或标题，逗号分隔；留空为全部）','bilibili',''),
+  DUST_BILI_EXCLUDE_FOLDERS:text('不跟踪的收藏夹（ID 或标题，逗号分隔）','bilibili',''),
+  DUST_BILI_FOLDER_PURPOSES:text('收藏夹指定用途（如：课程=note，舞蹈=video）','bilibili','','textarea'),
+  DUST_BILI_DAILY_LIMIT:number('B站每日最多处理（条）','bilibili',20,1,50),
+  DUST_BILI_MAX_DURATION_MIN:number('B站视频最长时长（分钟）','bilibili',240,1,600),
+  DUST_BILI_MAX_ASR_MIN:number('无字幕时可转写的最长时长（分钟）','bilibili',30,1,180),
+  DUST_BILI_DAILY_ASR_MIN:number('B站每日转写总时长（分钟）','bilibili',120,1,1440),
+  DUST_BILI_SUBTITLE_AI:{...text('使用 B站 AI 字幕','bilibili','1'),type:'select',options:['1','0']},
   DUST_ASR_CONTEXT:text('转写热词','login','','textarea'),
 };
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -78,7 +90,8 @@ export function createStore(home = DUST_HOME) {
   function policy() { return readPolicy(conf()); }
   function settings() {
     const current=conf(),get=cfg(),p=policy();
-    const effective={DUST_DAILY_LIMIT:p.daily,DUST_SCAN_COUNT:p.scan,DUST_MAX_DURATION_MIN:p.seconds/60,DUST_MEDIA_MAX_GB:p.bytes/1024**3,DUST_MIN_FREE_GB:p.free/1024**3};
+    const effective={DUST_DAILY_LIMIT:p.daily,DUST_SCAN_COUNT:p.scan,DUST_MAX_DURATION_MIN:p.seconds/60,DUST_MEDIA_MAX_GB:p.bytes/1024**3,DUST_MIN_FREE_GB:p.free/1024**3,
+      DUST_TOTAL_DAILY_LIMIT:p.totalDaily,DUST_BILI_DAILY_LIMIT:p.bilibili.daily,DUST_BILI_MAX_DURATION_MIN:p.bilibili.seconds/60,DUST_BILI_MAX_ASR_MIN:p.bilibili.asrSeconds/60,DUST_BILI_DAILY_ASR_MIN:p.bilibili.dailyAsrSeconds/60};
     const fields=Object.entries(FIELDS).map(([key,f])=>{
       let value=get(key,key==='DUST_TEXT'?join(home,'text'):key==='DUST_SAVED_MEDIA'?join(home,'saved-media'):f.fallback);
       if (key==='DUST_ASR_KEY') {
@@ -106,8 +119,9 @@ export function createStore(home = DUST_HOME) {
       if(/[\r\n\0]/.test(value)||/\s#/.test(value)||value.length>8000)throw new HttpError(400,`${f.label} 包含不支持的内容`);
       if(f.type==='number') { const n=Number(value); if(!value||!Number.isFinite(n)||n<f.min||n>f.max||(f.step===1&&!Number.isInteger(n)))throw new HttpError(400,`${f.label} 范围为 ${f.min}–${f.max}`); value=String(n); }
       if(f.type==='select'&&!f.options.includes(value))throw new HttpError(400,`${f.label} 选项无效`);
+      if(key==='DUST_BILI_START_DATE'&&value&&(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(new Date(value).getTime())))throw new HttpError(400,'起始日期须为 YYYY-MM-DD');
       if(f.type==='url') {try{chatEndpoint(value);}catch{throw new HttpError(400,'模型接口必须是无内嵌凭据的 HTTPS 或本机 HTTP 地址');}}
-      if(!value&&!['password','textarea'].includes(f.type))throw new HttpError(400,`${f.label} 不能为空`);
+      if(!value&&!['password','textarea'].includes(f.type)&&f.group!=='bilibili')throw new HttpError(400,`${f.label} 不能为空`);
       if(f.type==='path') {value=expand(value);if(!value.startsWith('/'))throw new HttpError(400,'请填写绝对路径或 ~/ 开头的路径');value=localPath(value);if(existsSync(value)&&!statSync(value).isDirectory())throw new HttpError(400,'输出位置必须是文件夹');}
       changes[key]=value;
     }
@@ -131,7 +145,8 @@ export function createStore(home = DUST_HOME) {
       // 旧账本在首次写操作时迁移；只读控制台也能先展示转换按钮。
       const columns=new Set(db.prepare('PRAGMA table_info(items)').all().map(c=>c.name));
       const conversion=columns.has('delete_after_note')?'COALESCE(delete_after_note,0)':'0';
-      const where=["platform='douyin'", "COALESCE(skip_reason,'')!='user_deleted'"],values=[];
+      const where=["COALESCE(skip_reason,'')!='user_deleted'"],values=[];
+      if(params.platform&&params.platform!=='all'){if(!PLATFORMS[params.platform])throw new HttpError(400,'平台无效');where.push('platform=?');values.push(params.platform);}
       if(params.galleries==='1')where.push("media_type='gallery' AND status='saved' AND media_path IS NOT NULL AND COALESCE(media_deleted,0)=0");
       else if(params.videos==='1')where.push(savedVideoWhere(conversion));
       else if(params.results==='1') {where.push("COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
@@ -141,7 +156,7 @@ export function createStore(home = DUST_HOME) {
       const clause=where.join(' AND '),total=db.prepare(`SELECT count(*) n FROM items WHERE ${clause}`).get(...values).n,pages=Math.max(1,Math.ceil(total/size)),actual=Math.min(page,pages);
       const order=params.videos==='1'||params.galleries==='1'?'COALESCE(updated_at,collected_at,first_seen)':'COALESCE(extracted_at,transcribed_at,collected_at,first_seen)';
       const imageCount=db.prepare('PRAGMA table_info(items)').all().some(c=>c.name==='image_count')?'image_count':'NULL AS image_count';
-      const rows=db.prepare(`SELECT id,title,author,status,media_type,${imageCount},${conversion} AS delete_after_note,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr,retain_media FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
+      const rows=db.prepare(`SELECT id,platform,title,author,status,media_type,${imageCount},${conversion} AS delete_after_note,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr,retain_media FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
       const previews=readPreviews(home);
       const inScope=has(db,'daily_queue')?db.prepare('SELECT 1 FROM daily_queue WHERE id=?'):null;
       return {items:rows.map(r=>({...r,...processingActions(r,!!inScope?.get(r.id)),routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
@@ -166,17 +181,18 @@ export function createStore(home = DUST_HOME) {
     // 与 daily.mjs 的队列筛选、顺序相同；metadata 含下载信息，不发送给浏览器。
     return readDb(db=>{
       if(!has(db,'items')||!has(db,'daily_queue'))return {items:[]};
-      const rows=db.prepare("SELECT i.id,i.title,i.author,i.status,i.media_type,i.processing_mode,i.duration_s,i.note_path,i.attempts FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform='douyin' WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3 ORDER BY q.enqueued ASC,q.rowid DESC LIMIT 10").all();
+      const queuePlatform=db.prepare('PRAGMA table_info(daily_queue)').all().some(c=>c.name==='platform')?'q.platform':"'douyin'";
+      const rows=db.prepare("SELECT i.id,i.platform,i.title,i.author,i.status,i.media_type,i.processing_mode,i.duration_s,i.note_path,i.attempts FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform="+queuePlatform+" WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3 ORDER BY q.enqueued ASC,q.rowid DESC LIMIT 10").all();
       return {items:rows.map(row=>({...row,display_title:displayTitle(row)}))};
     },{items:[]});
   }
   function item(id) {
-    if(!/^\d{1,30}$/.test(String(id)))throw new HttpError(400,'作品 ID 不正确');
-    const row=readDb(db=>has(db,'items')?db.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id):null,null);
+    if(!validItemId(id))throw new HttpError(400,'作品 ID 不正确');
+    const row=readDb(db=>has(db,'items')?db.prepare("SELECT * FROM items WHERE platform=? AND id=?").get(platformOfId(id),String(id)):null,null);
     if(!row)throw new HttpError(404,'找不到这条作品');
     const inQueue=readDb(db=>has(db,'daily_queue')&&!!db.prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id),false);
     const canChange=row.media_type!=='gallery'&&inQueue&&!['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason)&&row.status!=='removed';
-    const canConvert=canChange&&!!row.media_path&&!row.media_deleted&&row.has_audio!==0&&Number(row.duration_s)>0&&Number(row.duration_s)<=policy().seconds
+    const canConvert=canChange&&!!row.media_path&&!row.media_deleted&&row.has_audio!==0&&Number(row.duration_s)>0&&Number(row.duration_s)<=(row.platform==='bilibili'?policy().bilibili.asrSeconds:policy().seconds)
       &&(row.processing_mode==='video'||(row.processing_mode==null&&row.status==='saved'));
     return JSON.parse(redact({...row,...processingActions(row,inQueue),routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,display_title:displayTitle(row)}));
   }
@@ -204,9 +220,13 @@ export function createStore(home = DUST_HOME) {
     const midnight=new Date(date.getFullYear(),date.getMonth(),date.getDate()).getTime()/1000;
     const totals=readDb(db=>{
       const out={total:0,notes:0,todayNotes:0,pending:0,failed:0,usedToday:0,baseline:null,statuses:[]};
-      if(has(db,'items')){out.statuses=db.prepare("SELECT status,count(*) n FROM items WHERE platform='douyin' AND COALESCE(skip_reason,'')!='user_deleted' GROUP BY status").all();out.total=out.statuses.reduce((s,r)=>s+r.n,0);out.notes=out.statuses.find(r=>r.status==='extracted')?.n||0;out.failed=out.statuses.find(r=>r.status==='failed')?.n||0;out.todayNotes=db.prepare("SELECT count(*) n FROM items WHERE platform='douyin' AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND extracted_at>=?").get(midnight).n;}
-      if(has(db,'daily_queue')&&has(db,'items'))out.pending=db.prepare("SELECT count(*) n FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform='douyin' WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3").get().n;
-      if(has(db,'daily_usage'))out.usedToday=db.prepare('SELECT count(*) n FROM daily_usage WHERE day=?').get(day).n;
+      if(has(db,'items')){out.statuses=db.prepare("SELECT status,count(*) n FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' GROUP BY status").all();out.total=out.statuses.reduce((s,r)=>s+r.n,0);out.notes=out.statuses.find(r=>r.status==='extracted')?.n||0;out.failed=out.statuses.find(r=>r.status==='failed')?.n||0;out.todayNotes=db.prepare("SELECT count(*) n FROM items WHERE COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND extracted_at>=?").get(midnight).n;
+        out.platforms=Object.fromEntries(db.prepare("SELECT platform,count(*) n FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' GROUP BY platform").all().map(r=>[r.platform,r.n]));}
+      const queuePlatform=has(db,'daily_queue')&&db.prepare('PRAGMA table_info(daily_queue)').all().some(c=>c.name==='platform')?'q.platform':"'douyin'";
+      if(has(db,'daily_queue')&&has(db,'items'))out.pending=db.prepare(`SELECT count(*) n FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform=${queuePlatform} WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3`).get().n;
+      if(has(db,'daily_usage')){out.usedToday=db.prepare('SELECT count(*) n FROM daily_usage WHERE day=?').get(day).n;
+        if(db.prepare('PRAGMA table_info(daily_usage)').all().some(c=>c.name==='platform'))out.usedByPlatform=Object.fromEntries(db.prepare('SELECT platform,count(*) n FROM daily_usage WHERE day=? GROUP BY platform').all(day).map(r=>[r.platform,r.n]));}
+      if(has(db,'daily_state')){const r=db.prepare("SELECT value FROM daily_state WHERE name='baseline:bilibili'").get();if(r)out.biliState=JSON.parse(r.value);}
       if(has(db,'daily_state')){const r=db.prepare("SELECT value FROM daily_state WHERE name='baseline'").get();if(r)out.baseline=JSON.parse(r.value);}
       return out;
     },{total:0,notes:0,todayNotes:0,pending:0,failed:0,usedToday:0,baseline:null,statuses:[]});
@@ -225,7 +245,11 @@ export function createStore(home = DUST_HOME) {
     const session=readJson(join(home,'state','session.json'));
     const login=readJson(join(home,'console','login.json'));
     const flag=existsSync(join(home,'NEEDS_LOGIN'));
-    return {...totals,day,policy:policy(),lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:notes.items,recentVideos:videos.items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
+    const p=policy(),biliFolders=readJson(join(home,'bilibili','folders.json'));
+    const bilibili={enabled:p.bilibili.enabled,session:sessionSummary(readJson(join(home,'state','bilibili-session.json')),Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),
+      startAt:totals.biliState?.start_at??null,scannedAt:totals.biliState?.scanned_at??null,folders:biliFolders?.folders||[],usedToday:totals.usedByPlatform?.bilibili||0,daily:p.bilibili.daily};
+    delete totals.biliState;
+    return {...totals,bilibili,day,policy:p,lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:notes.items,recentVideos:videos.items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
   }
   return {home,settings,saveSettings,overview,listItems,pendingItems,item,document,fileFor,gallery,galleryFile,runs,runDetail,tail,redact,cfg,policy};
 }

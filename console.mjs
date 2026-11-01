@@ -13,7 +13,10 @@ import { localPath, atomicWrite } from './scripts/policy.mjs';
 import { createMediaService, streamMedia } from './scripts/console-media.mjs';
 import { validateLoginInput } from './scripts/remote-login.mjs';
 import { createConsoleAccess } from './scripts/console-auth.mjs';
+import { sourceUrl } from './scripts/platforms.mjs';
 const ROOT=dirname(fileURLToPath(import.meta.url));
+// 登录类任务：抖音沿用原名，B 站加前缀；B 站任务在 console-session.mjs 中按平台参数分派。
+const LOGIN_KINDS=['login','session-check','login-window','bili-login','bili-session-check'],WINDOW_KINDS=['login','login-window','bili-login'];
 const encode=value=>JSON.stringify(value,(_,v)=>typeof v==='bigint'?Number(v):v);
 export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,publicUrl=process.env.DUST_PUBLIC_URL||'',serverMode=process.env.DUST_SERVER_MODE==='1',openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
   const external=publicUrl?new URL(publicUrl):null;
@@ -29,7 +32,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   let nextBrowserRequest=0;
   function browserRequest(input) {
     const operation=active;
-    if(!operation||operation.cancelling||!['login','login-window'].includes(operation.kind)||!auth?.remote||auth.phase!=='window')throw new HttpError(409,'当前没有可操作的登录页面');
+    if(!operation||operation.cancelling||!WINDOW_KINDS.includes(operation.kind)||!auth?.remote||auth.phase!=='window')throw new HttpError(409,'当前没有可操作的登录页面');
     operation.requests ||= new Map();
     if(operation.requests.size>=4)throw new HttpError(429,'操作正在处理中，请稍后重试');
     return new Promise((resolve,reject)=>{
@@ -48,9 +51,10 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       if(!Number.isInteger(n)||n<1||n>store.policy().daily)throw new HttpError(400,`本轮处理数量须为 1–${store.policy().daily}`);
       if(body.noScan!==undefined&&typeof body.noScan!=='boolean')throw new HttpError(400,'只继续待办选项无效');
       script=join(root,'run.mjs');args=['--limit',String(n),...(body.noScan?['--no-scan']:[])];
-    } else if(['login','session-check','login-window'].includes(kind)){
-      script=join(root,'scripts','console-session.mjs');args=[kind==='session-check'?'check':kind==='login-window'?'window':'login'];
-      auth={phase:'starting',message:kind==='session-check'?'正在检查登录状态…':'正在打开 Chrome 官方登录页…'};
+    } else if(LOGIN_KINDS.includes(kind)){
+      const bili=kind.startsWith('bili-');
+      script=join(root,'scripts','console-session.mjs');args=[kind.endsWith('session-check')?'check':kind==='login-window'?'window':'login',...(bili?['bilibili']:[])];
+      auth={phase:'starting',platform:bili?'bilibili':'douyin',message:kind.endsWith('session-check')?'正在检查登录状态…':'正在打开 Chrome 官方登录页…'};
     } else {
       if(kind==='retry'){const i=store.item(body.id);if(i.status!=='failed')throw new HttpError(400,'只能重试已失败作品');}
       if(kind==='purpose'){if(!store.item(body.id).can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['note','video','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
@@ -79,12 +83,12 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       if(active!==operation||m?.type!=='session'||operation.cancelling&&m.phase!=='cancelled'&&m.phase!=='error')return;
       const {phase,message,deadline}=m;
       if(!['starting','checking','checked','saving','success','timeout','window','cancelled','error'].includes(phase))return;
-      auth={phase,message:String(message||'').slice(0,300),deadline,remote:m.remote===true};
+      auth={phase,platform:operation.kind.startsWith('bili-')?'bilibili':'douyin',message:String(message||'').slice(0,300),deadline,remote:m.remote===true};
     });
     child.stdout.on('data',log);child.stderr.on('data',log);
     child.once('close',()=>{for(const pending of operation.requests?.values()||[]){clearTimeout(pending.timer);pending.reject(new HttpError(409,'登录任务已结束'));}operation.requests?.clear();});
     child.once('error',e=>log(`启动失败：${e.message}\n`));
-    child.once('close',(code,signal)=>{lastAction={kind,pid:operation.pid,startedAt:operation.startedAt,finishedAt:Date.now(),exitCode:code??1,signal};log(`结束：退出码 ${lastAction.exitCode}\n`);if(fd!==null){closeSync(fd);fd=null;}atomicWrite(join(actionsDir,'last-action.json'),encode(lastAction));if(active===operation){active=null;if(['login','session-check','login-window'].includes(kind)){if(!['checked','success','cancelled','timeout','error'].includes(auth?.phase))auth={phase:'error',message:'登录任务已结束，请重新开始'};}}});
+    child.once('close',(code,signal)=>{lastAction={kind,pid:operation.pid,startedAt:operation.startedAt,finishedAt:Date.now(),exitCode:code??1,signal};log(`结束：退出码 ${lastAction.exitCode}\n`);if(fd!==null){closeSync(fd);fd=null;}atomicWrite(join(actionsDir,'last-action.json'),encode(lastAction));if(active===operation){active=null;if(LOGIN_KINDS.includes(kind)){if(!['checked','success','cancelled','timeout','error'].includes(auth?.phase))auth={phase:'error',platform:auth?.platform,message:'登录任务已结束，请重新开始'};}}});
     return state();
   }
   async function body(req){let size=0,parts=[];for await(const data of req){size+=data.length;if(size>32*1024)throw new HttpError(413,'请求内容过大');parts.push(data);}try{return JSON.parse(Buffer.concat(parts).toString('utf8')||'{}');}catch{throw new HttpError(400,'请求不是有效 JSON');}}
@@ -127,7 +131,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       const params=Object.fromEntries(url.searchParams);
       let result;
       if(req.method==='GET')switch(path){
-        case '/api/session':result={session:store.overview().session,auth,active:!!active&&['login','session-check','login-window'].includes(active.kind),kind:active?.kind};break;
+        case '/api/session':{const o=store.overview();result={session:o.session,bilibili:o.bilibili,auth,active:!!active&&LOGIN_KINDS.includes(active.kind),kind:active?.kind};break;}
         case '/api/health':result={app:'dustoff',home,root,pid:process.pid};break;
         case '/api/overview':result={...store.overview(),execution:state(),scheduler:scheduleState()};break;
         case '/api/items':result=store.listItems(params);break;
@@ -172,27 +176,27 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           if(code!==0)throw new HttpError(code===3?409:400,operation.error||'操作未完成，请查看控制台操作日志');
           result=kind==='discard'?{discarded:true}:{deleted:true};break;
         }
-        case '/api/login':result=start('login');break;
+        case '/api/login':result=start(data.platform==='bilibili'?'bili-login':'login');break;
         case '/api/login-input':{
           let input;try{input=validateLoginInput(data);}catch(e){throw new HttpError(400,e.message);}
           result=await browserRequest(input);break;
         }
-        case '/api/session-check':result=start('session-check');break;
+        case '/api/session-check':result=start(data.platform==='bilibili'?'bili-session-check':'session-check');break;
         case '/api/login-control':{
           if(data.action!=='cancel')throw new HttpError(400,'登录操作无效');
-          if(!active||!['login','login-window','session-check'].includes(active.kind))throw new HttpError(409,'当前没有登录任务');
+          if(!active||!LOGIN_KINDS.includes(active.kind))throw new HttpError(409,'当前没有登录任务');
           if(data.action==='cancel')active.cancelling=true;auth={phase:'starting',message:'正在处理…'};active.child.send({action:data.action});result={accepted:true};break;
         }
         case '/api/stop':
           if(!active?.pid)throw new HttpError(409,'只能停止本控制台启动的任务');
-          if(['login','session-check','login-window'].includes(active.kind)){active.cancelling=true;}
+          if(LOGIN_KINDS.includes(active.kind)){active.cancelling=true;}
           try{process.kill(-active.pid,'SIGTERM');}catch(e){if(e.code!=='ESRCH')throw e;}
           result={stopping:true};break;
         case '/api/open': {
           if(serverMode)throw new HttpError(409,'请直接在网页中阅读或播放');
           if(!['note','text','video','gallery-folder','folder','source','notes-folder','runs-folder'].includes(data.kind))throw new HttpError(400,'打开目标无效');
           let args;
-          if(data.kind==='source'){const row=store.item(data.id);args=[`https://www.douyin.com/${row.media_type==='gallery'?'note':'video'}/${data.id}`];}
+          if(data.kind==='source'){args=[sourceUrl(store.item(data.id))];}
           else if(data.kind==='gallery-folder'){args=[dirname(store.galleryFile(data.id,0))];}
           else if(data.kind==='notes-folder'||data.kind==='runs-folder'){const p=data.kind==='notes-folder'?store.overview().paths.notes:join(home,'runs');if(!existsSync(localPath(p)))throw new HttpError(404,'文件夹尚不存在');args=[p];}
           else {const kind=data.kind==='folder'?(data.fileKind||'note'):data.kind;const p=store.fileFor(data.id,kind);args=data.kind==='folder'?['-R',p]:data.kind==='note'?['-a','Obsidian',p]:[p];}

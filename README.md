@@ -1,6 +1,6 @@
 # dustoff
 
-给吃灰的收藏夹掸掸灰：读取抖音新收藏，保存视频和图集，或通过语音转写整理为知识笔记。
+给吃灰的收藏夹掸掸灰：读取抖音和 B站的新收藏，保存视频和图集，或通过字幕、语音转写整理为知识笔记。
 
 ## 环境定位
 
@@ -11,6 +11,11 @@
 ## 核心流程
 
 扫描收藏 → SQLite 基线与待办 → 判断用途 → 保存视频/图集，或转写并生成 Markdown 笔记。
+
+两个来源同一个定时、同一轮运行，扫描状态、登录、每日额度和风控暂停各自独立：
+
+- **抖音**：无界面 Chrome 截获收藏列表；首次只登记最近 100 条为历史基线。
+- **B站**（默认关闭，`DUST_BILI_ENABLED=1` 开启）：带登录 Cookie 直连收藏夹接口，只处理起始日期之后的收藏，存量不登记。默认跟踪全部自建收藏夹，可排除或给收藏夹指定用途。笔记用途优先使用字幕（人工字幕优先于 AI 字幕），没有字幕时只下载音频走转写；视频用途保存第 1 P 的最高可用画质。代码在 `scripts/sources/bilibili/`。
 
 网页可以阅读笔记与格式化转写、播放视频、浏览图集、确认用途、查看运行记录、管理定时，并远程完成抖音扫码和后续验证。Linux 使用 systemd 用户服务和 timer；macOS 开发兼容 launchd，开发默认关闭自动安排。
 
@@ -40,12 +45,18 @@ node console.mjs --port 47832
 ## 验证
 
 ```sh
-DUST_AUTO_SCHEDULE=0 DUST_NOTIFY=0 node --test tests/*.test.mjs
+DUST_NOTIFY=0 node --test tests/*.test.mjs
 python3 tests/migrate-data.test.py
 git diff --check
 ```
 
-测试使用临时目录和 `tests/fixtures/` 中的虚构固定文本，不依赖私有文档或生产数据。系统集成用例按平台或显式开关执行。
+测试使用临时目录和 `tests/fixtures/` 中的虚构固定文本，不依赖私有文档或生产数据。系统集成用例按平台或显式开关执行。不要在测试命令前加 `DUST_AUTO_SCHEDULE=0`：环境变量会覆盖定时相关用例自己的配置。
+
+B站接口可用本机账号只读预览（不写账本、不推进扫描位置）：
+
+```sh
+node scripts/sources/bilibili/index.mjs --dry-run
+```
 
 ## 文档与发布
 

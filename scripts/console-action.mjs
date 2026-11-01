@@ -9,10 +9,11 @@ import { createStage } from './stage.mjs';
 import { retryItem, setPurpose, discardItem, deleteItem } from './daily.mjs';
 import { deleteLocalVideo } from './delete-video.mjs';
 import { queueVideoToNote } from './video-to-note.mjs';
+import { validItemId } from './platforms.mjs';
 const [action,id,purpose]=process.argv.slice(2);
 const stage=createStage({name:'console-action',dustHome:DUST_HOME,notify:false});
 if(!['retry','purpose','login','video-delete','video-to-note','discard','delete-item'].includes(action))throw new Error('不支持的控制台操作');
-if(['retry','purpose','video-delete','video-to-note','discard','delete-item'].includes(action)&&!/^\d{1,30}$/.test(id||''))throw new Error('作品 ID 无效');
+if(['retry','purpose','video-delete','video-to-note','discard','delete-item'].includes(action)&&!validItemId(id))throw new Error('作品 ID 无效');
 stage.acquireLock();
 if(action==='video-to-note') {
   try {queueVideoToNote(id);stage.log(`视频 ${id} 已加入待办，下次运行使用本地视频生成笔记，成功后移入废纸篓`);}

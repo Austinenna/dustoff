@@ -6,7 +6,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DUST_HOME, makeCfg } from './scripts/config.mjs';
 import { POLICY, TEMP, PauseError, mediaDecision, localPath, atomicWrite, deadlineMs } from './scripts/policy.mjs';
-import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, queueSkippedGalleries, migratePurposes, ScanError } from './scripts/daily.mjs';
+import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, queueSkippedGalleries, migratePurposes, ScanError, itemRow } from './scripts/daily.mjs';
+import { scanBilibili, processBilibili } from './scripts/sources/bilibili/index.mjs';
+import { createClient } from './scripts/sources/bilibili/client.mjs';
+import { platformInfo, validItemId } from './scripts/platforms.mjs';
 import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { transcribeOne, cleanMedia, CONF as ASR_CONF } from './extract.mjs';
@@ -16,7 +19,10 @@ import { downloadGallery } from './scripts/gallery.mjs';
 import { downloadOne } from './scripts/download.mjs';
 import { cleanConvertedVideos } from './scripts/video-to-note.mjs';
 const scripts = join(dirname(fileURLToPath(import.meta.url)), 'scripts');
-const fresh = id => db().prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+const fresh = id => itemRow(id);
+// 抖音沿用原来的用途键（note / video …），其他平台加前缀，暂停和熔断互不影响。
+const typeKey = (platform, kind) => platform === 'douyin' ? kind : `${platform}:${kind}`;
+const typeLabel = key => { const [p, k] = key.includes(':') ? key.split(':') : ['douyin', key]; return `${p === 'douyin' ? '' : platformInfo(p).label}${PURPOSES[k]?.label || '用途判断'}`; };
 async function script(name, args, env, log) {
   return new Promise((resolve, reject) => {
     const timeout = deadlineMs(name === 'get_collection.mjs' ? 15 * 60_000 : 90_000);
@@ -35,7 +41,7 @@ async function script(name, args, env, log) {
     });
   });
 }
-export async function main(args = process.argv.slice(2), { runScript = script, trashFile } = {}) {
+export async function main(args = process.argv.slice(2), { runScript = script, trashFile, bilibili = {} } = {}) {
   const has = f => args.includes(f);
   const value = f => { const i = args.indexOf(f); return i < 0 ? null : args[i+1]; };
   const dry = has('--dry-run'), noScan = has('--no-scan'), downloadOnly = has('--download-only'), skipNotes = has('--skip-notes');
@@ -49,13 +55,13 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
   const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', keepRuns: Number(makeCfg()('DUST_KEEP_RUNS',30)), record: !dry });
   const { log } = stage;
   stage.acquireLock();
-  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, galleries: 0, review: 0, skipped: 0, failures: [], paused: null, pausedTypes: {}, scanWarning: null, cleanup: null, transcriptLayouts: [] };
+  const summary = { mode: dry ? 'preview' : 'daily', scanned: 0, added: 0, processed: 0, notes: 0, text: 0, saved: 0, galleries: 0, review: 0, skipped: 0, failures: [], paused: null, pausedTypes: {}, pausedPlatforms: {}, quotaReached: [], scanWarning: null, cleanup: null, transcriptLayouts: [] };
   let initializedThisRun = false;
   const tmp = localPath(join(TEMP, `run-${process.pid}`));
   try {
     const old = baseline();
     if (has('--status') && has('--retry')) throw new Error('--status 不能与 --retry 同用');
-    if (has('--retry') && !/^\d+$/.test(value('--retry') || '')) throw new Error('--retry 需要作品 ID');
+    if (has('--retry') && !validItemId(value('--retry'))) throw new Error('--retry 需要作品 ID');
     if (!dry && !has('--status') && old) {
       const migrated = migratePurposes();
       if (migrated.requeued) log(`恢复 ${migrated.requeued} 条旧混合用途，按新规则重新判断；现有文件保留`);
@@ -66,8 +72,9 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       if (dry) { log('预览模式不重置失败状态'); return summary; }
       log(`恢复 ${value('--retry')} 到 ${retryItem(value('--retry'))} 阶段`);
     }
-    if (has('--status')) { console.log(JSON.stringify({ baseline: old, pending: pendingQueue().length, usedToday: usage(), policy: POLICY }, null, 2)); return summary; }
+    if (has('--status')) { console.log(JSON.stringify({ baseline: old, pending: pendingQueue().length, usedToday: usage(), usedTodayByPlatform: { douyin: usage(undefined, 'douyin'), bilibili: usage(undefined, 'bilibili') }, policy: POLICY }, null, 2)); return summary; }
     log(`日常限制：${POLICY.daily} 条/日，${POLICY.seconds} 秒，${POLICY.bytes / 1024 ** 3} GiB 媒体，至少 ${POLICY.free / 1024 ** 3} GiB 空闲；外接盘停用`);
+    if (POLICY.bilibili.enabled) log(`B站限制：${POLICY.bilibili.daily} 条/日（全部平台合计 ${POLICY.totalDaily} 条），单条 ${POLICY.bilibili.seconds / 60} 分钟，无字幕转写单条 ${POLICY.bilibili.asrSeconds / 60} 分钟、每日 ${POLICY.bilibili.dailyAsrSeconds / 60} 分钟`);
     if (dry) {
       summary.mode = old ? 'preview-queue' : 'preview-baseline';
       log(old ? `已建基线；待办 ${pendingQueue().length} 条，今日额度已用 ${usage()}` : '尚无基线；真实运行将只登记最近 100 条，不下载');
@@ -100,24 +107,62 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
         log(`扫描未完成：${e.message}；本轮不导入扫描结果，继续处理已有待办`);
       }
     } else if (!old) throw new Error('尚无基线，请先正常运行一次');
+    // B 站扫描与抖音互不影响：失败只记警告，已有待办照常处理。
+    if (!noScan && POLICY.bilibili.enabled) {
+      try {
+        const r = await scanBilibili({ log, client: bilibili.client });
+        summary.bilibili = { scanned: r.scanned, added: r.added, folders: r.folders };
+        summary.scanned += r.scanned; summary.added += r.added;
+        log(`B站扫描 ${r.folders} 个收藏夹，新收藏 ${r.scanned} 条，新增待办 ${r.added} 条`);
+      } catch (e) {
+        if (e instanceof PauseError && !e.scope) throw e;
+        const message = `B站：${e.message}`;
+        summary.scanWarning = summary.scanWarning ? `${summary.scanWarning}；${message}` : message;
+        log(`B站扫描未完成：${e.message}；继续处理已有待办`);
+      }
+    }
     // 模型密钥在实际走到对应分支时检查，单纯保存视频无需 ASR/笔记密钥。
-    const consecutive = {};
+    const consecutive = {}, quotaFull = {};
+    let biliClient = null;
+    const biliDeps = {
+      client: () => biliClient ||= bilibili.client || createClient(),
+      transcribe: transcribeOne, note: noteOne, writeNote, hash: HASH,
+      textDir: ASR_CONF.TEXT_DIR, notesDir: NOTES_CONF.NOTES_DIR, asrKey: ASR_CONF.API_KEY, llmKey: NOTES_CONF.API_KEY,
+      ...bilibili.deps,
+    };
     const queue = pendingQueue().filter(r => (!downloadOnly || r.status === 'pending') && (!value('--retry') || r.id === value('--retry')));
     for (const candidate of queue) {
       if (summary.processed >= limit) break;
       deadlineMs();
       let row = fresh(candidate.id);
       let item = JSON.parse(candidate.metadata);
-      const id = row.id;
+      const id = row.id, platform = row.platform;
       let kind = row.media_type === 'gallery' ? 'gallery' : row.processing_mode || 'routing';
-      if (summary.pausedTypes[kind]) continue;
+      if (summary.pausedPlatforms[platform] || quotaFull[platform] || summary.pausedTypes[typeKey(platform, kind)]) continue;
+      if (platform !== 'douyin' && !POLICY[platform]?.enabled) continue;
       try {
+        if (platform === 'bilibili') {
+          if (!reserveDaily(id)) {
+            if (usage() >= POLICY.totalDaily) { summary.paused = `当天累计已达 ${POLICY.totalDaily} 条`; summary.quotaPaused = true; break; }
+            quotaFull[platform] = true; summary.quotaReached.push(platform); log(`B站当天已达 ${POLICY.bilibili.daily} 条，其他平台继续`); continue;
+          }
+          summary.processed++;
+          await processBilibili({ candidate, summary, log, tmp, downloadOnly, skipNotes, deps: biliDeps });
+          consecutive[typeKey(platform, fresh(id).processing_mode || kind)] = 0;
+          log(`完成 ${id}，本轮 ${summary.processed} 条`);
+          continue;
+        }
         if(row.delete_after_note&&row.status==='pending')throw new Error('本地原视频不可用，转换已暂停；请恢复原文件后重试');
         if (row.status === 'pending') {
           const reason = mediaDecision(item);
           if (reason && reason !== 'unknown_duration') { markSkipped(id, reason); summary.skipped++; continue; }
         }
-        if (!reserveDaily(id)) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; break; }
+        if (!reserveDaily(id)) {
+          if (usage() >= POLICY.totalDaily) { summary.paused = `当天累计已达 ${POLICY.totalDaily} 条`; summary.quotaPaused = true; break; }
+          quotaFull[platform] = true; summary.quotaReached.push(platform);
+          if (!POLICY.bilibili.enabled) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; summary.quotaPaused = true; break; }
+          log(`抖音当天已达 ${POLICY.daily} 条，其他平台继续`); continue;
+        }
         summary.processed++;
         if (kind === 'routing') {
           const decision = await classifyItem(item);
@@ -182,18 +227,22 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
         }
         consecutive[kind] = 0; log(`完成 ${id}，本轮 ${summary.processed} 条`);
       } catch (e) {
+        kind = fresh(id)?.processing_mode || kind;
+        const key = typeKey(platform, kind);
         if (e instanceof PauseError) {
+          if (e.scope === 'platform') { summary.pausedPlatforms[platform] = e.message; log(`${e.message}；继续其他平台`); continue; }
           if (!e.scope) { summary.paused = e.message; break; }
-          summary.pausedTypes[kind] = e.message;
-          log(`${PURPOSES[kind]?.label || '用途判断'}暂停：${e.message}；继续其他类型`);continue;
+          summary.pausedTypes[key] = e.message;
+          log(`${typeLabel(key)}暂停：${e.message}；继续其他类型`);continue;
         }
-        markFailed(id, e.message, 'douyin', 3);
+        if (e.code === 4 && platform !== 'douyin') { summary.pausedPlatforms[platform] = e.message; log(`${e.message}；继续其他平台`); continue; }
+        markFailed(id, e.message, platform, 3);
         summary.failures.push({ id, error:e.message });
         log(`失败 ${id}：${e.message}`);
-        consecutive[kind] = (consecutive[kind] || 0) + 1;
-        if (consecutive[kind] >= 3) {
-          summary.pausedTypes[kind] = '连续 3 条失败，本轮暂停该类型';
-          log(`${PURPOSES[kind]?.label || '用途判断'}连续 3 条失败；继续其他类型`);
+        consecutive[key] = (consecutive[key] || 0) + 1;
+        if (consecutive[key] >= 3) {
+          summary.pausedTypes[key] = '连续 3 条失败，本轮暂停该类型';
+          log(`${typeLabel(key)}连续 3 条失败；继续其他类型`);
         }
       }
     }
@@ -221,12 +270,13 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       stage.pruneRuns();
       if (summary.failures.length || summary.paused) stage.notify('dustoff 需要留意', summary.paused || `${summary.failures.length} 项失败`);
       else if (Object.keys(summary.pausedTypes).length) stage.notify('dustoff 部分类型暂停', Object.values(summary.pausedTypes).join('；'));
+      if (Object.keys(summary.pausedPlatforms).length) stage.notify('dustoff 平台暂停', Object.values(summary.pausedPlatforms).join('；'));
       if (summary.scanWarning) stage.notify('dustoff 扫描未完成', `已继续处理已有待办；${summary.scanWarning}`);
       if (summary.review) stage.notify('dustoff 用途待确认', `${summary.review} 条收藏请在作品详情选择用途`);
       log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，保存图集 ${summary.galleries}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || (Object.keys(summary.pausedTypes).length ? '部分类型暂停，其他类型已继续' : summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
       if (summary.failures.length) process.exitCode = 1;
-      else if (summary.paused && summary.paused !== `当天累计已达 ${POLICY.daily} 条`) process.exitCode = 5;
-      else if (Object.keys(summary.pausedTypes).length) process.exitCode = 5;
+      else if (summary.paused && !summary.quotaPaused) process.exitCode = 5;
+      else if (Object.keys(summary.pausedTypes).length || Object.keys(summary.pausedPlatforms).length) process.exitCode = 5;
       else if (summary.scanWarning) process.exitCode = 1;
     }
     } finally { stage.releaseLock(); }

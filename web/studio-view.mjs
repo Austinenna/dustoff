@@ -3,12 +3,13 @@ import {escapeHtml} from './markdown.mjs';
 export const esc = escapeHtml;
 export const PURPOSES = {note:'知识笔记',video:'视频',gallery:'图集',review:'待确认'};
 export const STATUSES = {pending:'待处理',downloaded:'已下载',transcribed:'已转写',extracted:'已整理',saved:'已保存',review:'待确认',failed:'失败',skipped:'已跳过',removed:'已取消收藏'};
-export const REASONS = {video_deleted:'已手动删除视频',user_discarded:'已放弃处理',user_deleted:'已删除记录',baseline:'历史基线，不自动处理',gallery:'图集将在下次运行恢复处理',too_long:'超过时长限制',insufficient_text:'文字材料不足，原稿和素材保留',need_ocr:'旧记录：文字材料不足',no_url:'缺少下载地址'};
+export const PLATFORM_LABELS = {douyin:'抖音',bilibili:'B站'};
+export const REASONS = {too_long_for_asr:'没有字幕且超过转写时长上限',video_deleted:'已手动删除视频',user_discarded:'已放弃处理',user_deleted:'已删除记录',baseline:'历史基线，不自动处理',gallery:'图集将在下次运行恢复处理',too_long:'超过时长限制',insufficient_text:'文字材料不足，原稿和素材保留',need_ocr:'旧记录：文字材料不足',no_url:'缺少下载地址'};
 export const SETTINGS = {
-  account:['DUST_WARN_DAYS'],
+  account:['DUST_WARN_DAYS','DUST_BILI_ENABLED','DUST_BILI_START_DATE','DUST_BILI_FOLDERS','DUST_BILI_EXCLUDE_FOLDERS','DUST_BILI_FOLDER_PURPOSES','DUST_BILI_SUBTITLE_AI'],
   models:['DUST_ROUTER_BASE','DUST_ROUTER_MODEL','DUST_ROUTER_KEY','DUST_ASR_BASE','DUST_ASR_MODEL','DUST_ASR_KEY','DUST_LLM_BASE','DUST_LLM_MODEL','DUST_LLM_KEY','DUST_LLM_EFFORT','DUST_LLM_MAX_TOKENS','DUST_ASR_CONTEXT','DUST_REQUEST_TIMEOUT_S','DUST_DASHSCOPE_KEY'],
   storage:['DUST_NOTES','DUST_TEXT','DUST_SAVED_MEDIA','DUST_SAVED_MEDIA_MAX_GB','DUST_MEDIA_MAX_GB','DUST_MIN_FREE_GB','DUST_KEEP_RUNS'],
-  rules:['DUST_DAILY_LIMIT','DUST_MAX_DURATION_MIN','DUST_NOTIFY','DUST_SCAN_COUNT','DUST_RUN_TIMEOUT_S'],
+  rules:['DUST_DAILY_LIMIT','DUST_MAX_DURATION_MIN','DUST_NOTIFY','DUST_SCAN_COUNT','DUST_RUN_TIMEOUT_S','DUST_TOTAL_DAILY_LIMIT','DUST_BILI_DAILY_LIMIT','DUST_BILI_MAX_DURATION_MIN','DUST_BILI_MAX_ASR_MIN','DUST_BILI_DAILY_ASR_MIN'],
 };
 export const fmt = value => {
   if(value===null||value===undefined||value==='')return '暂无记录';
@@ -43,7 +44,9 @@ export function runSummary(run) {
   if(r.error)return {label:'执行失败',tone:'danger',detail:r.error};
   if(r.paused)return {label:'已暂停',tone:'warn',detail:r.paused};
   if(r.failures?.length)return {label:'有处理失败',tone:'danger',detail:`${r.failures.length} 项失败，可展开日志查看原因。`};
-  if(Object.keys(r.pausedTypes||{}).length)return {label:'部分类型暂停',tone:'warn',detail:Object.entries(r.pausedTypes).map(([key,value])=>`${PURPOSES[key]||'用途判断'}：${value}`).join('；')};
+  if(Object.keys(r.pausedPlatforms||{}).length)return {label:'部分平台暂停',tone:'warn',detail:Object.entries(r.pausedPlatforms).map(([key,value])=>`${PLATFORM_LABELS[key]||key}：${value}`).join('；')};
+  const typeLabel=key=>{const [p,k]=key.includes(':')?key.split(':'):[null,key];return `${p?PLATFORM_LABELS[p]||p:''}${PURPOSES[k]||'用途判断'}`;};
+  if(Object.keys(r.pausedTypes||{}).length)return {label:'部分类型暂停',tone:'warn',detail:Object.entries(r.pausedTypes).map(([key,value])=>`${typeLabel(key)}：${value}`).join('；')};
   if(r.scanWarning)return {label:'扫描受阻，已继续待办',tone:'warn',detail:r.scanWarning};
   return {label:r.mode==='baseline'?'已建立历史基线':'已完成',tone:'green',detail:r.mode==='baseline'?'首次运行建立参照，历史收藏不会自动进入处理队列。':''};
 }

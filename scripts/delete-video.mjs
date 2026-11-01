@@ -28,16 +28,16 @@ export async function deleteLocalVideo({id,home=DUST_HOME,trashFile=moveVideoToT
   try {
     db.exec('PRAGMA busy_timeout=1500; BEGIN IMMEDIATE');
     transaction=true;
-    const row=db.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(id);
+    const row=db.prepare("SELECT * FROM items WHERE platform=? AND id=?").get(item.platform,id);
     if(!row||row.media_deleted||localPath(row.media_path)!==source)throw new HttpError(409,'视频状态已变化，请刷新后重试');
     const shared=db.prepare("SELECT platform,id,media_path FROM items WHERE media_path IS NOT NULL AND COALESCE(media_deleted,0)=0").all()
-      .some(other=>(other.platform!=='douyin'||other.id!==id)&&localPath(other.media_path)===source);
+      .some(other=>(other.platform!==item.platform||other.id!==id)&&localPath(other.media_path)===source);
     if(shared)throw new HttpError(409,'还有其他收藏使用同一个视频文件，暂不能删除');
     snapshot={version:1,requestedAt:new Date().toISOString(),source,item:row};
     atomicWrite(record,JSON.stringify({...snapshot,state:'prepared'},null,2)+'\n');
     // 先验证数据库写入，再移动文件；事务提交前失败可回滚。恢复记录保留原始条目。
-    db.prepare("UPDATE items SET media_deleted=1,status=?,skip_reason=?,needs_ocr=0,last_error=NULL,updated_at=? WHERE platform='douyin' AND id=?")
-      .run(row.status==='removed'?'removed':row.note_path?'extracted':'skipped',afterNote?null:'video_deleted',Math.floor(Date.now()/1000),id);
+    db.prepare("UPDATE items SET media_deleted=1,status=?,skip_reason=?,needs_ocr=0,last_error=NULL,updated_at=? WHERE platform=? AND id=?")
+      .run(row.status==='removed'?'removed':row.note_path?'extracted':'skipped',afterNote?null:'video_deleted',Math.floor(Date.now()/1000),item.platform,id);
     await trashFile(source);
     if(existsSync(source))throw new Error('视频仍在原位置，未完成移入废纸篓');
     db.exec('COMMIT');

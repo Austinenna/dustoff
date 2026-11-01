@@ -6,10 +6,11 @@ import {db,cleanable} from './ledger.mjs';
 import {inScope,setPurpose} from './daily.mjs';
 import {localPath,under,SAVED_MEDIA,mediaDecision} from './policy.mjs';
 import {deleteLocalVideo} from './delete-video.mjs';
+import {platformOfId,validItemId} from './platforms.mjs';
 
 export function queueVideoToNote(id) {
-  if(!/^\d{1,30}$/.test(String(id)))throw new Error('作品 ID 无效');
-  const d=db(),row=d.prepare("SELECT * FROM items WHERE platform='douyin' AND id=?").get(String(id));
+  if(!validItemId(id))throw new Error('作品 ID 无效');
+  const d=db(),row=d.prepare("SELECT * FROM items WHERE platform=? AND id=?").get(platformOfId(id),String(id));
   if(!row||row.media_type==='gallery'||row.media_deleted||!row.media_path||!inScope(String(id))
     ||['baseline','gallery','too_long'].includes(row.skip_reason)||row.status==='removed')throw new Error('这条作品不支持从本地视频转为笔记');
   // 重复点击只返回原有请求，不重置已经完成的阶段或失败计数。
@@ -23,7 +24,7 @@ export function queueVideoToNote(id) {
   d.exec('BEGIN IMMEDIATE');
   try {
     setPurpose(String(id),'note');
-    d.prepare("UPDATE items SET delete_after_note=1 WHERE platform='douyin' AND id=?").run(String(id));
+    d.prepare("UPDATE items SET delete_after_note=1 WHERE platform=? AND id=?").run(row.platform,String(id));
     d.exec('COMMIT');
   } catch(e) {d.exec('ROLLBACK');throw e;}
   return {queued:true,alreadyQueued:false};
@@ -32,7 +33,7 @@ export function queueVideoToNote(id) {
 // 普通收藏视频继续保留。仅清理用户点过转换且笔记、原稿均可靠落盘的文件。
 export async function cleanConvertedVideos({trashFile,log=()=>{}}={}) {
   const result={n:0,held:0,failures:[]};
-  for(const row of cleanable('douyin')) {
+  for(const row of cleanable(null)) {
     if(!row.delete_after_note||!inScope(row.id))continue;
     try {
       const media=localPath(row.media_path),text=localPath(row.text_path||''),note=localPath(row.note_path||'');
