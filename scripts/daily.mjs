@@ -241,3 +241,15 @@ export function acceptIncremental(platform, items, nextState) {
 export function updateQueued(id, metadata) {
   database().prepare('UPDATE daily_queue SET metadata=? WHERE id=?').run(JSON.stringify(metadata), id);
 }
+
+export const VIDEO_QUALITIES = Object.freeze([64, 80, 116, 120, 0]);
+/** 调用方须持有流水线锁。只在 B 站视频尚未保存前可改；null 表示恢复默认。 */
+export function setVideoQuality(id, quality) {
+  const value = quality === null || quality === '' || quality === undefined ? null : Number(quality);
+  if (value !== null && !VIDEO_QUALITIES.includes(value)) throw new Error('画质选项无效');
+  const row = itemRow(id);
+  if (!row || row.platform !== 'bilibili' || !inScope(id)) throw new Error('只能为待处理的 B站视频选择画质');
+  if (row.status === 'saved' || (row.processing_mode === 'video' && row.media_path && !row.media_deleted)) throw new Error('视频已经保存，不能再修改画质');
+  database().prepare('UPDATE items SET video_quality=?,updated_at=? WHERE platform=? AND id=?').run(value, Math.floor(Date.now()/1000), 'bilibili', id);
+  return value;
+}

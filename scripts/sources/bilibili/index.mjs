@@ -24,6 +24,8 @@ const settings = () => {
     purposes: folderPurposes(cfg('DUST_BILI_FOLDER_PURPOSES', '')),
     maxPages: Math.max(1, Math.min(20, Number(cfg('DUST_BILI_MAX_PAGES', 5)) || 5)),
     startDate: cfg('DUST_BILI_START_DATE', ''), allowAi: cfg('DUST_BILI_SUBTITLE_AI', '1') !== '0',
+    // B站多为长视频：默认不让模型判断，新收藏全部进入待确认，由用户选择用途。
+    autoRoute: cfg('DUST_BILI_AUTO_ROUTE', '0') === '1',
   };
 };
 function recordSession(patch, home = DUST_HOME) {
@@ -48,6 +50,13 @@ export async function scanBilibili({ log = () => {}, client, dryRun = false, hom
   for (const w of scan.warnings) log(`B站：${w}`);
   if (dryRun) return { dryRun: true, items: scan.items, folders: scan.folders, warnings: scan.warnings, start_at: scan.nextState.start_at };
   const accepted = acceptIncremental('bilibili', scan.items, scan.nextState);
+  // 入队即定用途：收藏夹指定了用途的按指定处理；其余默认待确认，不占额度、不调用模型。
+  if (!s.autoRoute) for (const item of scan.items) {
+    const row = fresh(item.aweme_id);
+    if (!row || row.processing_mode || row.status !== 'pending') continue;
+    const decision = folderDecision(item, s.purposes) || { purpose: 'review', reason: 'B站收藏默认等待你确认用途', source: 'default', model: null };
+    markRouting(item.aweme_id, decision);
+  }
   mkdirSync(join(home, 'bilibili'), { recursive: true, mode: 0o700 });
   atomicWrite(foldersFile(home), JSON.stringify({ scanned_at: scan.nextState.scanned_at, start_at: scan.nextState.start_at, folders: scan.folders }, null, 2) + '\n');
   recordSession({ logged_in: true, expires_at: session.expiresAt, online: 'verified', online_checked_at: Math.floor(Date.now() / 1000) }, home);
@@ -110,7 +119,10 @@ export async function processBilibili({ candidate, summary, log, tmp, downloadOn
     retryItem(id); row = fresh(id);
   }
   if (row.processing_mode === 'video') {
-    if (row.status === 'pending') { importDownload([await video(client(), item)], 'bilibili', { countFailures: false }); row = fresh(id); }
+    if (row.status === 'pending') {
+      const maxQuality = row.video_quality ?? POLICY.bilibili.maxQuality;
+      importDownload([await video(client(), item, { maxQuality })], 'bilibili', { countFailures: false }); row = fresh(id);
+    }
     if (row.status === 'downloaded') { markSaved(id); summary.saved++; log(`视频已保存 ${id}`); }
     return;
   }

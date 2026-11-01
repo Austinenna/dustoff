@@ -10,6 +10,7 @@ import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, que
 import { scanBilibili, processBilibili } from './scripts/sources/bilibili/index.mjs';
 import { createClient } from './scripts/sources/bilibili/client.mjs';
 import { platformInfo, validItemId } from './scripts/platforms.mjs';
+import { applyIntents, intentsById } from './scripts/intents.mjs';
 import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { transcribeOne, cleanMedia, CONF as ASR_CONF } from './extract.mjs';
@@ -62,6 +63,8 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
     const old = baseline();
     if (has('--status') && has('--retry')) throw new Error('--status 不能与 --retry 同用');
     if (has('--retry') && !validItemId(value('--retry'))) throw new Error('--retry 需要作品 ID');
+    // 控制台在上一轮运行期间记下的用户决定，持锁后先执行。
+    if (!dry && !has('--status')) { const r = applyIntents(DUST_HOME, { log }); if (r.applied || r.failed.length) summary.intents = r; }
     if (!dry && !has('--status') && old) {
       const migrated = migratePurposes();
       if (migrated.requeued) log(`恢复 ${migrated.requeued} 条旧混合用途，按新规则重新判断；现有文件保留`);
@@ -140,6 +143,8 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       let kind = row.media_type === 'gallery' ? 'gallery' : row.processing_mode || 'routing';
       if (summary.pausedPlatforms[platform] || quotaFull[platform] || summary.pausedTypes[typeKey(platform, kind)]) continue;
       if (platform !== 'douyin' && !POLICY[platform]?.enabled) continue;
+      // 用户刚在控制台改过的条目本轮不处理，收尾时按新决定执行。
+      if (intentsById(DUST_HOME).has(id)) { log(`跳过 ${id}：有运行期间记下的操作，本轮结束后执行`); continue; }
       try {
         if (platform === 'bilibili') {
           if (!reserveDaily(id)) {
@@ -256,6 +261,8 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
     try {
     if (!dry && !has('--status')) {
       rmSync(tmp, { recursive:true, force:true });
+      try { const r = applyIntents(DUST_HOME, { log }); if (r.applied || r.failed.length) summary.intentsAfter = r; }
+      catch(e) { summary.failures.push({ error:`执行运行期间记下的操作失败：${e.message}` }); }
       // 首次建基线不清理旧素材；日常收尾按独立转写成果判断资格。
       if (baseline() && !initializedThisRun) {
         try { summary.cleanup = cleanMedia({ dryRun:false }); }

@@ -323,8 +323,14 @@ DUST_BILI_START_DATE=
 # 下面两项用收藏夹 ID 或完整标题，逗号分隔；标题含逗号时请用 ID。
 DUST_BILI_FOLDERS=
 DUST_BILI_EXCLUDE_FOLDERS=
-# 给收藏夹直接指定用途（note / video / review），指定的不再调用用途模型：
+# B站多为长视频：默认新收藏全部进入「待确认」，由你在控制台选择用途（不占每日额度）。
+# 设为 1 时改为和抖音一样由用途模型自动判断。
+DUST_BILI_AUTO_ROUTE=0
+# 给收藏夹直接指定用途（note / video / review），指定的不进待确认、也不调用用途模型：
 # DUST_BILI_FOLDER_PURPOSES=课程=note,舞蹈=video
+# 保存视频的默认最高画质：80=1080p（不含高帧率/高码率）64=720p 116=1080p 高帧率/高码率 120=4K 0=不限。
+# 也可以在控制台「待确认」里逐条选择。
+DUST_BILI_MAX_QUALITY=80
 DUST_BILI_DAILY_LIMIT=20
 # 单条视频最长时长（分钟），超过的跳过。有字幕时不产生转写费用。
 DUST_BILI_MAX_DURATION_MIN=240

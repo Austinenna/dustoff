@@ -1,7 +1,7 @@
 import {renderMarkdown} from './markdown.mjs';
 import {remainingLabel,loginFlow} from './login-ui.mjs';
 import {makePlan,nextOccurrence} from './schedule-plan.mjs';
-import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,PLATFORM_LABELS,fmt,bytes,duration,titleOf,mediaLabel,resultLabel,runSummary,splitNoteContent} from './studio-view.mjs';
+import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,PLATFORM_LABELS,QUALITY_LABELS,intentLabel,fmt,bytes,duration,titleOf,mediaLabel,resultLabel,runSummary,splitNoteContent} from './studio-view.mjs';
 
 const root=document.querySelector('#dustoff-studio'),main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 const token=document.querySelector('meta[name="dustoff-token"]').content;
@@ -196,7 +196,7 @@ function videoDeleteButton(item) {
 }
 function processingButtons(item) {
   const attrs=`data-id="${item.id}" data-idle ${busy()?'disabled':''}`;
-  return (item.can_discard?button('放弃处理','discard-item',`${attrs} title="停止自动处理，保留收藏记录和本地文件"`,'quiet danger'):'')
+  return (item.can_discard?button('放弃处理','discard-item',`data-id="${item.id}" title="停止自动处理，保留收藏记录和本地文件；运行中会先记下，本轮结束后生效"`,'quiet danger'):'')
     +(item.can_delete?button('删除记录','delete-item',`${attrs} title="从本机列表移除，不取消原平台收藏"`,'quiet danger'):'');
 }
 function processingPanel(item) {
@@ -209,7 +209,8 @@ async function stopProcessing(action,id) {
   if(action==='delete-item'&&!window.confirm('删除这条收藏记录？只会从本机列表移除，不会取消抖音收藏；此操作不可恢复。'))return;
   if(action==='discard'&&!window.confirm('放弃处理这条收藏？记录和已有本地文件会保留，之后仍可重新选择用途。'))return;
   const epoch=dialogEpoch;
-  await api(action,{id});
+  const r=await api(action,{id});
+  if(r.deferred){await refreshOverview();if(state.route==='pending')await loadPending();else if(state.route==='collection')await loadCollection();notice('当前正在运行，已记下“放弃处理”，本轮结束后生效。');return;}
   delete state.review.choices[id];
   if(action==='delete-item'&&dialog.open&&epoch===dialogEpoch&&drawerId===id)closeDialog();
   await refreshOverview();
@@ -325,19 +326,23 @@ async function detail(id) {
   openDialog(dialogHead('收藏详情')+empty('正在读取…'),true);
   try {
     const i=await api('item?'+query({id}));if(epoch!==dialogEpoch||!dialog.open)return;
-    dialog.innerHTML=dialogHead('收藏详情')+`<div class="drawer-body"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</p><div class="row">${tag(STATUSES[i.status]||i.status)}${tag(mediaLabel(i))}</div><section><h3>留下的内容</h3><div class="file-actions">${i.note_path?button('阅读知识笔记','read',`data-id="${id}" data-kind="note"`):''}${i.note_path||i.text_path?button('阅读格式化转写','read',`data-id="${id}" data-kind="formatted"`):''}${i.media_path&&!i.media_deleted?button(i.media_type==='gallery'?'查看图集':'播放视频',i.media_type==='gallery'?'view-gallery':'play-video',`data-id="${id}"`):''}${button('查看原作品 ↗','open',`data-id="${id}" data-kind="source"`,'quiet')}${videoNoteButton(i)}${videoDeleteButton(i)}</div>${videoNoteHint(i)}${!i.note_path&&!i.text_path?`<p class="muted">${i.media_type==='gallery'?'图集仅保存图片，暂不整理笔记。':'暂未生成文字内容。'}</p>`:''}</section>${i.media_type==='gallery'?'<section><h3>保存图集</h3><p class="muted">按原顺序保存整组图片，每组计一条每日额度。</p></section>':`<section><h3>这条收藏用来做什么</h3><p class="muted">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form method="post" id="purpose-form"><input type="hidden" name="id" value="${id}"><div class="purpose-options">${Object.entries(PURPOSES).filter(([key])=>key!=='gallery').map(([key,label])=>`<label><input type="radio" name="purpose" value="${key}" ${i.processing_mode===key?'checked':''} ${!i.can_change_purpose?'disabled':''} required><span>${label}<small>${({note:'语音转写并整理知识笔记',video:'只保存高清原声视频',review:'暂不处理，等你确认'})[key]}</small></span></label>`).join('')}</div>${i.can_change_purpose?`<p class="muted">保存后更新用途与待办状态，下一轮运行时处理；已有文件保留。</p><button class="button primary" data-idle ${busy()?'disabled':''}>保存用途</button>`:'<p class="muted">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}${i.last_error?`<section class="error-detail"><h3>上次未完成</h3><p>${esc(i.last_error)}</p>${i.status==='failed'?button('恢复为待办','retry',`data-id="${id}" data-idle ${busy()?'disabled':''}`):''}</section>`:''}<details><summary>作品信息</summary><dl><dt>来源</dt><dd>${esc(PLATFORM_LABELS[i.platform]||'抖音')}${i.folders?` · 收藏夹：${esc(JSON.parse(i.folders).join('、'))}`:''}</dd><dt>作品 ID</dt><dd>${id}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd></dl></details></div>`;
+    dialog.innerHTML=dialogHead('收藏详情')+`<div class="drawer-body"><h3>${esc(titleOf(i))}</h3><p class="muted">${esc(i.author||'未知作者')} · ${i.media_type==='gallery'?'图集':duration(i.duration_s)}</p><div class="row">${tag(STATUSES[i.status]||i.status)}${tag(mediaLabel(i))}</div><section><h3>留下的内容</h3><div class="file-actions">${i.note_path?button('阅读知识笔记','read',`data-id="${id}" data-kind="note"`):''}${i.note_path||i.text_path?button('阅读格式化转写','read',`data-id="${id}" data-kind="formatted"`):''}${i.media_path&&!i.media_deleted?button(i.media_type==='gallery'?'查看图集':'播放视频',i.media_type==='gallery'?'view-gallery':'play-video',`data-id="${id}"`):''}${button('查看原作品 ↗','open',`data-id="${id}" data-kind="source"`,'quiet')}${videoNoteButton(i)}${videoDeleteButton(i)}</div>${videoNoteHint(i)}${!i.note_path&&!i.text_path?`<p class="muted">${i.media_type==='gallery'?'图集仅保存图片，暂不整理笔记。':'暂未生成文字内容。'}</p>`:''}</section>${i.media_type==='gallery'?'<section><h3>保存图集</h3><p class="muted">按原顺序保存整组图片，每组计一条每日额度。</p></section>':`<section><h3>这条收藏用来做什么</h3><p class="muted">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form method="post" id="purpose-form"><input type="hidden" name="id" value="${id}"><div class="purpose-options">${Object.entries(PURPOSES).filter(([key])=>key!=='gallery').map(([key,label])=>`<label><input type="radio" name="purpose" value="${key}" ${i.processing_mode===key?'checked':''} ${!i.can_change_purpose?'disabled':''} required><span>${label}<small>${({note:'语音转写并整理知识笔记',video:'只保存高清原声视频',review:'暂不处理，等你确认'})[key]}</small></span></label>`).join('')}</div>${i.can_change_purpose?`<p class="muted">保存后更新用途与待办状态，下一轮运行时处理；已有文件保留。</p><button class="button primary">保存用途</button>${i.pending_intents?`<p class="intent-note">${esc(intentLabel(i.pending_intents))}</p>`:''}`:'<p class="muted">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}${i.last_error?`<section class="error-detail"><h3>上次未完成</h3><p>${esc(i.last_error)}</p>${i.status==='failed'?button('恢复为待办','retry',`data-id="${id}" data-idle ${busy()?'disabled':''}`):''}</section>`:''}<details><summary>作品信息</summary><dl><dt>来源</dt><dd>${esc(PLATFORM_LABELS[i.platform]||'抖音')}${i.folders?` · 收藏夹：${esc(JSON.parse(i.folders).join('、'))}`:''}</dd><dt>作品 ID</dt><dd>${id}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd></dl></details></div>`;
     if(i.media_type!=='gallery'&&(i.can_discard||i.can_delete||i.skip_reason==='user_discarded'))dialog.querySelector('.drawer-body')?.insertAdjacentHTML('beforeend',processingPanel(i));
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('收藏详情')+empty(e.message);}
 }
 function executionPanel() {
   const e=state.overview.execution;
-  return `<div class="execution ${e.running?'active':''}"><div><span class="dot"></span><strong>${e.running?'正在执行'+({run:'本轮整理',retry:'恢复待办',purpose:'保存用途',discard:'放弃处理','delete-item':'删除记录',login:'扫码登录','session-check':'登录检查','bili-login':'B站扫码登录','bili-session-check':'B站登录检查'}[e.kind]||'任务'):'准备好整理下一批收藏'}</strong><small>${e.running?`开始于 ${esc(fmt(e.startedAt))}${e.owned?'':' · 由其他入口启动'}`:'完成后，可在笔记、视频和图集栏目查看成果。'}</small></div><div class="row">${e.running?(e.owned?button('停止本轮','stop'):'')+`<a class="button quiet" href="#history">查看记录 ›</a>`:button('现在运行','manual-run','data-idle','primary')}</div></div>`;
+  return `<div class="execution ${e.running?'active':''}"><div><span class="dot"></span><strong>${e.running?'正在执行'+({run:'本轮整理',retry:'恢复待办',purpose:'保存用途',discard:'放弃处理','delete-item':'删除记录',login:'扫码登录','session-check':'登录检查','bili-login':'B站扫码登录','bili-session-check':'B站登录检查',quality:'保存画质','apply-intents':'执行记下的操作'}[e.kind]||'任务'):'准备好整理下一批收藏'}</strong><small>${e.running?`开始于 ${esc(fmt(e.startedAt))}${e.owned?'':' · 由其他入口启动'}`:'完成后，可在笔记、视频和图集栏目查看成果。'}</small></div><div class="row">${e.running?(e.owned?button('停止本轮','stop'):'')+`<a class="button quiet" href="#history">查看记录 ›</a>`:button('现在运行','manual-run','data-idle','primary')}</div></div>`;
 }
 function pendingPage() {
   return `${head('待处理','',button('刷新','refresh','','quiet'))}<div id="pending-content">${empty('正在读取…')}</div>`;
 }
 function reviewRow(i) {
-  return `<article class="review-row"><div class="review-info"><h3><button class="item-title" data-action="detail" data-id="${i.id}">${esc(i.title||i.id)}</button></h3><small>${esc(i.author||'未知作者')} · ${duration(i.duration_s)}</small><p class="muted">${esc(i.routing_reason||'需要你确认这条收藏的用途。')}</p><div class="row">${button('查看原作品 ↗','open',`data-id="${i.id}" data-kind="source"`,'quiet')}${processingButtons(i)}</div></div><div class="review-form" aria-label="为 ${esc(i.title||i.id)} 选择用途"><span class="review-choice-label">选择用途</span><div class="quick-purpose-buttons">${[['note','知识笔记','语音转写并整理笔记'],['video','视频','保存高清原声视频']].map(([key,label,hint])=>button(`${label}<small>${hint}</small>`,'quick-purpose',`data-id="${i.id}" data-purpose="${key}" data-idle ${busy()?'disabled':''}`,'purpose-choice')).join('')}</div></div></article>`;
+  return `<article class="review-row"><div class="review-info"><h3><button class="item-title" data-action="detail" data-id="${i.id}">${esc(i.title||i.id)}</button></h3><small>${esc(i.author||'未知作者')} · ${duration(i.duration_s)}</small><p class="muted">${esc(i.routing_reason||'需要你确认这条收藏的用途。')}</p>${i.pending_intents?`<p class="intent-note">${esc(intentLabel(i.pending_intents))}</p>`:''}<div class="row">${button('查看原作品 ↗','open',`data-id="${i.id}" data-kind="source"`,'quiet')}${processingButtons(i)}</div></div><div class="review-form" aria-label="为 ${esc(i.title||i.id)} 选择用途"><span class="review-choice-label">选择用途</span><div class="quick-purpose-buttons">${[['note','知识笔记',i.platform==='bilibili'?'字幕或转写后整理笔记':'语音转写并整理笔记'],['video','视频','保存高清原声视频']].map(([key,label,hint])=>button(`${label}<small>${hint}</small>`,'quick-purpose',`data-id="${i.id}" data-purpose="${key}"`,'purpose-choice')).join('')}</div>${i.platform==='bilibili'?qualityPicker(i):''}</div></article>`;
+}
+function qualityPicker(i) {
+  const fallback=String(state.overview?.policy?.bilibili?.maxQuality??80),current=i.video_quality==null?'':String(i.video_quality);
+  return `<label class="quality-pick"><span>保存为视频时的画质</span><select data-quality-for="${i.id}" aria-label="视频画质">${[['',`默认（${QUALITY_LABELS[fallback]||'1080p'}）`],...['64','80','116','120','0'].filter(v=>v!==fallback).map(v=>[v,QUALITY_LABELS[v]])].map(([v,label])=>`<option value="${v}" ${v===current?'selected':''}>${esc(label)}</option>`).join('')}</select></label>`;
 }
 async function loadPending() {
   const epoch=++listEpoch,page=pageEpoch;
@@ -391,7 +396,7 @@ function runEvents(log='') {
 function field(key) {
   const f=state.settings.fields.find(f=>f.key===key);if(!f)return '';
   const attrs=`name="${key}" ${f.overridden?'disabled':''}`;
-  const input=f.type==='select'?`<select ${attrs}>${f.options.map(v=>`<option value="${v}" ${String(f.value)===v?'selected':''}>${['DUST_NOTIFY','DUST_BILI_ENABLED','DUST_BILI_SUBTITLE_AI'].includes(key)?(v==='1'?'开启':'关闭'):esc(v)}</option>`).join('')}</select>`:f.type==='textarea'?`<textarea ${attrs} rows="3">${esc(f.value)}</textarea>`:`<input ${attrs} type="${f.type==='path'?'text':f.type}" value="${esc(f.value)}" ${f.type==='number'?`min="${f.min}" max="${f.max}" step="${f.step}"`:''} ${f.type==='password'?`autocomplete="new-password" placeholder="${f.configured?'已配置 · 留空保留':'尚未配置'}"`:'required'}>`;
+  const input=f.type==='select'?`<select ${attrs}>${f.options.map(v=>`<option value="${v}" ${String(f.value)===v?'selected':''}>${['DUST_NOTIFY','DUST_BILI_ENABLED','DUST_BILI_SUBTITLE_AI','DUST_BILI_AUTO_ROUTE'].includes(key)?(v==='1'?'开启':'关闭'):key==='DUST_BILI_MAX_QUALITY'?esc(QUALITY_LABELS[v]+(v==='80'?'（推荐）':'')):esc(v)}</option>`).join('')}</select>`:f.type==='textarea'?`<textarea ${attrs} rows="3">${esc(f.value)}</textarea>`:`<input ${attrs} type="${f.type==='path'?'text':f.type}" value="${esc(f.value)}" ${f.type==='number'?`min="${f.min}" max="${f.max}" step="${f.step}"`:''} ${f.type==='password'?`autocomplete="new-password" placeholder="${f.configured?'已配置 · 留空保留':'尚未配置'}"`:'required'}>`;
   return `<label class="field ${f.type==='path'||f.type==='textarea'?'wide':''}"><span>${esc(f.label)}</span>${input}${f.overridden?'<small>由环境变量覆盖，此处只读</small>':f.type==='password'?'<small>留空保留已有密钥</small>':f.clamped?'<small>已显示当前规则下的实际生效值</small>':''}</label>`;
 }
 function sectionFields(title,keys,note='') {return `<section class="settings-section"><h2>${title}</h2>${note?`<p class="muted">${note}</p>`:''}<div class="fields">${keys.map(field).join('')}</div></section>`;}
@@ -441,6 +446,11 @@ dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoun
 async function mutate(path,data,message) {const result=await api(path,data);if(result.error)throw new Error(result.error);await refreshOverview();notice(message);return result;}
 async function queueMutation(path,data) {
   const e=await mutate(path,data,path==='purpose'?'正在保存用途…':'正在恢复待办…');
+  if(e.deferred){
+    notice('当前正在运行，已记下这个选择，本轮结束后生效。');delete state.review.choices[data.id];
+    if(state.route==='pending')await loadPending();if(state.route==='collection')await loadCollection();
+    return;
+  }
   const expected=e.startedAt;const originalDrawer=dialogEpoch;
   for(let n=0;n<20;n++){
     await new Promise(resolve=>setTimeout(resolve,200));await refreshOverview();
@@ -479,7 +489,7 @@ root.addEventListener('click',async event=>{
     else if(a==='open')await mutate('open',{kind:b.dataset.kind,id,fileKind:b.dataset.fileKind},'已在本机打开。');
     else if(a==='stop')await mutate('stop',{},'已发送停止请求，正在完成收尾。');
     else if(a==='retry')await queueMutation('retry',{id});
-    else if(a==='quick-purpose')await queueMutation('purpose',{id,purpose:b.dataset.purpose});
+    else if(a==='quick-purpose'){const q=root.querySelector(`[data-quality-for="${CSS.escape(id)}"]`);await queueMutation('purpose',{id,purpose:b.dataset.purpose,...(q&&b.dataset.purpose==='video'?{quality:q.value}:{})});}
     else if(a==='review-items'){state.review.page=1;navigate('pending');}
     else if(a==='failed-items'){Object.assign(state.collection,{status:'failed',q:'',page:1});navigate('collection');}
     else if(a==='read'){Object.assign(state.results,{id,q:id,page:1,status:b.dataset.kind==='note'?'notes':'all',kind:b.dataset.kind,reader:true});closeDialog();navigate('notes');}

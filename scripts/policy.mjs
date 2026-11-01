@@ -27,6 +27,8 @@ export function readPolicy(conf) {
     seconds: Math.min(600 * 60, positive('DUST_BILI_MAX_DURATION_MIN', 240) * 60),
     asrSeconds: Math.min(180 * 60, positive('DUST_BILI_MAX_ASR_MIN', 30) * 60),
     dailyAsrSeconds: Math.min(1440 * 60, positive('DUST_BILI_DAILY_ASR_MIN', 120) * 60),
+    // 保存视频的最高画质（B 站 qn）：64=720p 80=1080p 116=1080p 高帧率/高码率 120=4K 0=不限。
+    maxQuality: [64, 80, 116, 120, 0].includes(Number(cfg('DUST_BILI_MAX_QUALITY', 80))) ? Number(cfg('DUST_BILI_MAX_QUALITY', 80)) : 80,
   }),
 });
 }

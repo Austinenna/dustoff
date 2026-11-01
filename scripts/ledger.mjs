@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS items (
   routing_model TEXT,
   routed_at INTEGER,
   media_quality TEXT,              -- high / low
+  video_quality INTEGER,           -- B 站：这条视频单独指定的最高画质（qn），NULL 用默认
   saved_at INTEGER,
 
   -- ── 素材 ────────────────────────────────────────

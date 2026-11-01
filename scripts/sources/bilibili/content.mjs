@@ -135,15 +135,28 @@ export async function downloadAudio(client, meta) {
   } finally { for (const p of parts) rmSync(p, { force: true }); rmSync(join(dir, 'audio.tmp.m4a'), { force: true }); }
 }
 
-/** 视频用途：保存第 1 P 的最高可用画质（优先 H.264 便于浏览器播放）与原声，合并为 mp4。 */
-export async function downloadVideo(client, meta) {
+/**
+ * 在不超过上限的画质里选最高的一档；同档优先 H.264（浏览器可直接播放）。
+ * 上限用 B 站画质编号：80=1080p 不含 1080p 高码率(112)/高帧率(116)；0 表示不限。没有符合的就取最低一档。
+ */
+export function pickVideo(videos, maxQuality = 80) {
+  const list = (videos || []).filter(v => Number.isFinite(v?.id));
+  if (!list.length) return null;
+  const allowed = maxQuality ? list.filter(v => v.id <= maxQuality) : list;
+  const pool = allowed.length ? allowed : list.filter(v => v.id === Math.min(...list.map(x => x.id)));
+  const top = Math.max(...pool.map(v => v.id));
+  const same = pool.filter(v => v.id === top);
+  return same.find(v => /^avc1/.test(v.codecs || '')) || same[0];
+}
+
+/** 视频用途：保存第 1 P 不超过画质上限的最高画质与原声，合并为 mp4。 */
+export async function downloadVideo(client, meta, { maxQuality = 80 } = {}) {
   const dir = localPath(join(SAVED_MEDIA, meta.aweme_id)), out = join(dir, 'video.mp4');
   if (!under(out, SAVED_MEDIA)) throw new Error('视频位置不在收藏目录');
   if (existsSync(out)) { try { probe(out, { video: true }); return result(meta, out, { gear: 'cached', quality: 'high' }); } catch { rmSync(out, { force: true }); } }
   mkdirSync(dir, { recursive: true });
   const page = meta.pages[0], dash = await playurl(client, meta.aweme_id, page.cid);
-  const videos = [...(dash.video || [])].sort((a, b) => (b.id - a.id) || ((/^avc1/.test(b.codecs) ? 1 : 0) - (/^avc1/.test(a.codecs) ? 1 : 0)));
-  const best = videos.find(v => /^avc1/.test(v.codecs) && v.id === videos[0]?.id) || videos[0];
+  const best = pickVideo(dash.video, maxQuality);
   const audio = [...(dash.audio || [])].sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
   if (!best || !audio) throw new Error('没有取得视频或音频流');
   const v = join(dir, 'v.part'), a = join(dir, 'a.part'), temp = join(dir, 'video.tmp.mp4');

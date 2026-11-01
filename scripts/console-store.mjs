@@ -13,6 +13,7 @@ import { readGallery } from './gallery.mjs';
 import { processingActions } from './item-actions.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
 import { PLATFORMS, platformOfId, validItemId } from './platforms.mjs';
+import { intentsById } from './intent-store.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const savedVideoWhere = conversion => `COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (processing_mode='video' OR (processing_mode IS NULL AND status='saved') OR (${conversion}=1 AND processing_mode='note'))`;
@@ -56,6 +57,8 @@ export const FIELDS = {
   DUST_BILI_MAX_ASR_MIN:number('无字幕时可转写的最长时长（分钟）','bilibili',30,1,180),
   DUST_BILI_DAILY_ASR_MIN:number('B站每日转写总时长（分钟）','bilibili',120,1,1440),
   DUST_BILI_SUBTITLE_AI:{...text('使用 B站 AI 字幕','bilibili','1'),type:'select',options:['1','0']},
+  DUST_BILI_AUTO_ROUTE:{...text('B站新收藏自动判断用途（关闭时全部进入待确认）','bilibili','0'),type:'select',options:['0','1']},
+  DUST_BILI_MAX_QUALITY:{...text('B站保存视频的默认最高画质','bilibili','80'),type:'select',options:['80','64','116','120','0']},
   DUST_ASR_CONTEXT:text('转写热词','login','','textarea'),
 };
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -155,11 +158,12 @@ export function createStore(home = DUST_HOME) {
       if(search){where.push("(title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\' OR note_path LIKE ? ESCAPE '\\')");const q='%'+search.replace(/[\\%_]/g,'\\$&')+'%';values.push(q,q,q,q);}
       const clause=where.join(' AND '),total=db.prepare(`SELECT count(*) n FROM items WHERE ${clause}`).get(...values).n,pages=Math.max(1,Math.ceil(total/size)),actual=Math.min(page,pages);
       const order=params.videos==='1'||params.galleries==='1'?'COALESCE(updated_at,collected_at,first_seen)':'COALESCE(extracted_at,transcribed_at,collected_at,first_seen)';
-      const imageCount=db.prepare('PRAGMA table_info(items)').all().some(c=>c.name==='image_count')?'image_count':'NULL AS image_count';
-      const rows=db.prepare(`SELECT id,platform,title,author,status,media_type,${imageCount},${conversion} AS delete_after_note,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr,retain_media FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
+      const imageCount=columns.has('image_count')?'image_count':'NULL AS image_count',videoQuality=columns.has('video_quality')?'video_quality':'NULL AS video_quality';
+      const rows=db.prepare(`SELECT id,platform,title,author,status,media_type,${imageCount},${videoQuality},${conversion} AS delete_after_note,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr,retain_media FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
       const previews=readPreviews(home);
       const inScope=has(db,'daily_queue')?db.prepare('SELECT 1 FROM daily_queue WHERE id=?'):null;
-      return {items:rows.map(r=>({...r,...processingActions(r,!!inScope?.get(r.id)),routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
+      const intents=intentsById(home);
+      return {items:rows.map(r=>({...r,...processingActions(r,!!inScope?.get(r.id)),pending_intents:intents.get(r.id)||null,routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
     },{items:[],total:0,page:1,pages:1,size});
   }
   function displayTitle(row) {
@@ -183,7 +187,8 @@ export function createStore(home = DUST_HOME) {
       if(!has(db,'items')||!has(db,'daily_queue'))return {items:[]};
       const queuePlatform=db.prepare('PRAGMA table_info(daily_queue)').all().some(c=>c.name==='platform')?'q.platform':"'douyin'";
       const rows=db.prepare("SELECT i.id,i.platform,i.title,i.author,i.status,i.media_type,i.processing_mode,i.duration_s,i.note_path,i.attempts FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform="+queuePlatform+" WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3 ORDER BY q.enqueued ASC,q.rowid DESC LIMIT 10").all();
-      return {items:rows.map(row=>({...row,display_title:displayTitle(row)}))};
+      const intents=intentsById(home);
+      return {items:rows.map(row=>({...row,pending_intents:intents.get(row.id)||null,display_title:displayTitle(row)}))};
     },{items:[]});
   }
   function item(id) {
@@ -194,7 +199,7 @@ export function createStore(home = DUST_HOME) {
     const canChange=row.media_type!=='gallery'&&inQueue&&!['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason)&&row.status!=='removed';
     const canConvert=canChange&&!!row.media_path&&!row.media_deleted&&row.has_audio!==0&&Number(row.duration_s)>0&&Number(row.duration_s)<=(row.platform==='bilibili'?policy().bilibili.asrSeconds:policy().seconds)
       &&(row.processing_mode==='video'||(row.processing_mode==null&&row.status==='saved'));
-    return JSON.parse(redact({...row,...processingActions(row,inQueue),routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,display_title:displayTitle(row)}));
+    return JSON.parse(redact({...row,...processingActions(row,inQueue),pending_intents:intentsById(home).get(String(id))||null,routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,display_title:displayTitle(row)}));
   }
   function fileFor(id,kind) {const row=item(id),path=row[kind==='note'?'note_path':kind==='video'?'media_path':'text_path'];if(!['note','text','video'].includes(kind)||!path||(kind==='video'&&row.media_deleted))throw new HttpError(404,'尚未生成这份文件或视频已清理');const p=localPath(path);if(kind==='video'?!['.mp4','.mov','.webm','.m4v'].includes(extname(p)):extname(p)!==(kind==='note'?'.md':'.txt'))throw new HttpError(400,'产物格式不正确');if(!existsSync(p)||!statSync(p).isFile())throw new HttpError(404,'文件已移动或不存在，请核对账本路径');return p;}
   function gallery(id) {

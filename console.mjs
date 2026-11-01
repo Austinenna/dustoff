@@ -14,6 +14,8 @@ import { createMediaService, streamMedia } from './scripts/console-media.mjs';
 import { validateLoginInput } from './scripts/remote-login.mjs';
 import { createConsoleAccess } from './scripts/console-auth.mjs';
 import { sourceUrl } from './scripts/platforms.mjs';
+import { addIntent, listIntents } from './scripts/intent-store.mjs';
+const QUALITY_VALUES=['','64','80','116','120','0'];
 const ROOT=dirname(fileURLToPath(import.meta.url));
 // 登录类任务：抖音沿用原名，B 站加前缀；B 站任务在 console-session.mjs 中按平台参数分派。
 const LOGIN_KINDS=['login','session-check','login-window','bili-login','bili-session-check'],WINDOW_KINDS=['login','login-window','bili-login'];
@@ -41,6 +43,24 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       operation.child.send({type:'browser-request',requestId,input},error=>{if(error){clearTimeout(timer);operation.requests.delete(requestId);reject(new HttpError(409,'登录任务已结束'));}});
     });
   }
+  // 用途与画质的校验：立即执行和“运行中先记下”共用。
+  function validateChoice(kind,body){
+    const i=store.item(body.id);
+    if(kind==='purpose'){if(!i.can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['note','video','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
+    if(kind==='quality'||body.quality!==undefined){
+      if(i.platform!=='bilibili')throw new HttpError(400,'只有 B站视频可以选择画质');
+      if(!QUALITY_VALUES.includes(String(body.quality??'')))throw new HttpError(400,'画质选项无效');
+    }
+    return i;
+  }
+  // 运行中不能取锁：用途、画质、放弃先记下，本轮结束或控制台空闲时执行。
+  function defer(kind,body){
+    if(kind==='discard'){const i=store.item(body.id);if(!i.can_discard&&i.skip_reason!=='user_discarded')throw new HttpError(400,'只能放弃当前范围内尚未完成的处理任务');addIntent({id:body.id,action:'discard'},home);return {deferred:true};}
+    validateChoice(kind,body);
+    if(body.quality!==undefined||kind==='quality')addIntent({id:body.id,action:'quality',value:String(body.quality??'')},home);
+    if(kind==='purpose')addIntent({id:body.id,action:'purpose',value:body.purpose},home);
+    return {deferred:true};
+  }
   function state(){const lock=liveLock(home);return {running:!!active||lock.running,pid:active?.pid||lock.pid||null,owned:!!active,kind:active?.kind||null,startedAt:active?.startedAt||null,lastAction};}
   function scheduleState(){try{const current=scheduler.status();return {...current,error:null,warning:current.loaded?null:scheduleStartupWarning};}catch(e){return {error:e.message,loaded:null,time:null,intervalHours:null,nextRun:null};}}
   function start(kind,body={}) {
@@ -57,12 +77,12 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       auth={phase:'starting',platform:bili?'bilibili':'douyin',message:kind.endsWith('session-check')?'正在检查登录状态…':'正在打开 Chrome 官方登录页…'};
     } else {
       if(kind==='retry'){const i=store.item(body.id);if(i.status!=='failed')throw new HttpError(400,'只能重试已失败作品');}
-      if(kind==='purpose'){if(!store.item(body.id).can_change_purpose)throw new HttpError(400,'这条作品不在可修改用途的处理范围内');if(!['note','video','review'].includes(body.purpose))throw new HttpError(400,'用途无效');}
+      if(kind==='purpose'||kind==='quality')validateChoice(kind,body);
       if(kind==='video-delete'){if(store.item(body.id).media_type==='gallery')throw new HttpError(400,'此操作只支持视频');}
       if(kind==='video-to-note'){const i=store.item(body.id);if(!i.can_convert_to_note&&!(i.delete_after_note&&i.processing_mode==='note'&&!i.media_deleted))throw new HttpError(400,'这条作品不支持从本地视频转为笔记');}
       if(kind==='discard'){const i=store.item(body.id);if(!i.can_discard&&i.skip_reason!=='user_discarded')throw new HttpError(400,'只能放弃当前范围内尚未完成的处理任务');}
       if(kind==='delete-item'){const i=store.item(body.id);if(!i.can_delete&&i.skip_reason!=='user_deleted')throw new HttpError(400,'只能删除当前范围内没有本地产物的待确认或已放弃记录');}
-      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose','video-delete','video-to-note','discard','delete-item'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose]:[])];
+      script=join(root,'scripts','console-action.mjs');args=[kind,...(['retry','purpose','video-delete','video-to-note','discard','delete-item','quality'].includes(kind)?[body.id]:[]),...(kind==='purpose'?[body.purpose,...(body.quality!==undefined?[String(body.quality)]:[])]:[]),...(kind==='quality'?[String(body.quality??'')]:[])];
     }
     mkdirSync(actionsDir,{recursive:true,mode:0o700});
     const logfile=join(actionsDir,'latest-action.log');let fd=openSync(logfile,'w',0o600),written=0;
@@ -133,7 +153,11 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       if(req.method==='GET')switch(path){
         case '/api/session':{const o=store.overview();result={session:o.session,bilibili:o.bilibili,auth,active:!!active&&LOGIN_KINDS.includes(active.kind),kind:active?.kind};break;}
         case '/api/health':result={app:'dustoff',home,root,pid:process.pid};break;
-        case '/api/overview':result={...store.overview(),execution:state(),scheduler:scheduleState()};break;
+        case '/api/overview':{
+          // 被中断的运行可能留下未执行的操作；空闲时由控制台补执行。
+          if(!state().running&&listIntents(home).length)try{start('apply-intents');}catch{}
+          result={...store.overview(),execution:state(),scheduler:scheduleState()};break;
+        }
         case '/api/items':result=store.listItems(params);break;
         case '/api/gallery':result=store.gallery(params.id);break;
         case '/api/video-status':result=media.status(params.id);break;
@@ -167,10 +191,12 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           else if(data.action==='start')scheduler.start();else if(data.action==='stop')scheduler.stop();else throw new HttpError(400,'定时操作无效');
           scheduleStartupWarning=null;result=scheduleState();break;
         case '/api/run':result=start('run',data);break;
-        case '/api/purpose':result=start('purpose',data);break;
+        case '/api/purpose':result=state().running?defer('purpose',data):start('purpose',data);break;
+        case '/api/quality':result=state().running?defer('quality',data):start('quality',data);break;
         case '/api/retry':result=start('retry',data);break;
         case '/api/discard':case '/api/delete-item': {
           const kind=path.slice('/api/'.length);
+          if(kind==='discard'&&state().running){result=defer('discard',data);break;}
           start(kind,data);const operation=active;
           const code=await new Promise(resolve=>operation.child.once('close',resolve));
           if(code!==0)throw new HttpError(code===3?409:400,operation.error||'操作未完成，请查看控制台操作日志');

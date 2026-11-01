@@ -148,7 +148,7 @@ test('日常一轮：B站与抖音同轮运行，字幕成笔记、视频保存�
   assert.equal(second.bilibili.added,0);assert.equal(platformState('bilibili').folders['5'].watermark,T0+900);
   assert.equal(db().prepare("SELECT count(*) n FROM items WHERE platform='bilibili'").get().n,2);
   process.exitCode=0;
-`));
+`,{DUST_BILI_AUTO_ROUTE:'1'}));
 
 test('B站登录失效只作扫描警告，抖音待办照常；关闭 B站时不扫描',()=>isolated(`
   import assert from 'node:assert/strict';
@@ -197,14 +197,14 @@ test('没有字幕时只下载音频走转写；超过转写时长上限的跳�
   assert.equal(row('BV1test00001').status,'extracted');assert.equal(row('BV1test00001').text_source,'asr');assert.equal(row('BV1test00001').audio_seconds,300);
   assert.equal(row('BV1test00002').status,'skipped');assert.equal(row('BV1test00002').skip_reason,'too_long_for_asr');
   process.exitCode=0;
-`));
+`,{DUST_BILI_AUTO_ROUTE:'1'}));
 
 test('B站每日转写总量用尽时只暂停 B站笔记，条目保留待办',()=>isolated(pipelineSetup+`
   const r=await main(['--limit','5'],{runScript,bilibili:{client,deps}});
   assert.match(r.pausedTypes['bilibili:note'],/转写时长已达 4 分钟/);assert.equal(r.paused,null);assert.deepEqual(transcribed,[]);
   assert.equal(row('BV1test00001').status,'pending');assert.equal(row('BV1test00001').attempts,0);
   process.exitCode=0;
-`,{DUST_BILI_DAILY_ASR_MIN:'4'}));
+`,{DUST_BILI_DAILY_ASR_MIN:'4',DUST_BILI_AUTO_ROUTE:'1'}));
 
 test('控制台按 ID 读取 B站条目，可按平台筛选，总览含 B站状态',()=>isolated(`
   import assert from 'node:assert/strict';
@@ -238,5 +238,78 @@ test('B站扫码登录只保存 bilibili.com Cookie 并在线核对；检查未�
   assert.deepEqual(readdirSync(join(DUST_HOME,'console')).filter(n=>n.startsWith('bili-profile-')),[]);
   await manageBiliSession({mode:'check',home:join(DUST_HOME,'empty'),emit:()=>{},makeClient:()=>{throw new Error('无 Cookie 时不应联网');}});
   assert.equal(JSON.parse(readFileSync(join(DUST_HOME,'empty','state','bilibili-session.json'),'utf8')).logged_in,false);
+  process.exitCode=0;
+`));
+
+test('画质：默认最高 1080p 不含高帧率/高码率，同档优先 H.264，没有符合的取最低档',async()=>{
+  const {pickVideo}=await import('../scripts/sources/bilibili/content.mjs');
+  const v=[{id:120,codecs:'avc1'},{id:116,codecs:'avc1'},{id:80,codecs:'hev1'},{id:80,codecs:'avc1.640032'},{id:64,codecs:'avc1'}];
+  assert.deepEqual(pickVideo(v),{id:80,codecs:'avc1.640032'});
+  assert.equal(pickVideo(v,116).id,116);assert.equal(pickVideo(v,0).id,120);assert.equal(pickVideo(v,64).id,64);
+  assert.equal(pickVideo([{id:112,codecs:'avc1'},{id:116,codecs:'avc1'}],80).id,112);
+});
+
+test('B站新收藏默认进入待确认，不调用模型不占额度；收藏夹指定用途的照常处理',()=>isolated(pipelineSetup+`
+  writeFileSync(join(DUST_HOME,'dustoff.conf'),'DUST_BILI_FOLDER_PURPOSES=课程=video\\n');
+  const folders2={nav:client.nav,get:async path=>path.endsWith('list-all')?{list:[{id:1,title:'课程',media_count:1},{id:2,title:'其他',media_count:1}],has_more:false}:{medias:[m(1,T0+10)],has_more:false}};
+  // 两个收藏夹返回同一条：只要有一个收藏夹指定了用途就按指定处理。
+  let classified=0;const d2={...deps,classify:async()=>{classified++;return {purpose:'note',reason:'x'};},
+    video:async(_,item)=>{const dir=join(DUST_HOME,'saved-media',item.aweme_id);mkdirSync(dir,{recursive:true});writeFileSync(join(dir,'video.mp4'),'x');return {aweme_id:item.aweme_id,status:'done',path:join(dir,'video.mp4'),bytes:1,has_audio:true,quality:'high'};}};
+  const r=await main(['--limit','5'],{runScript,bilibili:{client:folders2,deps:d2}});
+  assert.equal(classified,0);assert.equal(row('BV1test00001').processing_mode,'video');assert.equal(row('BV1test00001').status,'saved');assert.equal(row('BV1test00001').routing_source,'folder');
+  const plain={nav:client.nav,get:async path=>path.endsWith('list-all')?{list:[{id:2,title:'其他',media_count:1}],has_more:false}:{medias:[m(2,T0+20)],has_more:false}};
+  const r2=await main(['--limit','5'],{runScript,bilibili:{client:plain,deps:d2}});
+  assert.equal(classified,0);assert.equal(row('BV1test00002').status,'review');assert.equal(row('BV1test00002').routing_source,'default');
+  assert.equal(r2.processed,0);
+  process.exitCode=0;
+`));
+
+test('运行期间记下的用途、画质和放弃：运行跳过该条并在收尾执行；画质只能在视频保存前改',()=>isolated(pipelineSetup+`
+  import {addIntent,intentsById} from './scripts/intent-store.mjs';
+  import {setVideoQuality} from './scripts/daily.mjs';
+  // 先让两条进入待确认。
+  await main(['--limit','5'],{runScript,bilibili:{client,deps}});
+  assert.equal(row('BV1test00001').status,'review');
+  addIntent({id:'BV1test00001',action:'quality',value:'64'},DUST_HOME);
+  addIntent({id:'BV1test00001',action:'purpose',value:'video'},DUST_HOME);
+  addIntent({id:'BV1test00002',action:'purpose',value:'note'},DUST_HOME);
+  addIntent({id:'BV1test00002',action:'discard'},DUST_HOME);
+  assert.deepEqual(intentsById(DUST_HOME).get('BV1test00002').map(i=>i.action),['discard']);
+  let asked;const d3={...deps,video:async(_,item,opts)=>{asked=opts.maxQuality;const dir=join(DUST_HOME,'saved-media',item.aweme_id);mkdirSync(dir,{recursive:true});writeFileSync(join(dir,'video.mp4'),'x');return {aweme_id:item.aweme_id,status:'done',path:join(dir,'video.mp4'),bytes:1,has_audio:true,quality:'high'};}};
+  const r=await main(['--limit','5','--no-scan'],{runScript,bilibili:{client,deps:d3}});
+  assert.equal(intentsById(DUST_HOME).size,0);assert.equal(r.intents.applied,3);
+  assert.equal(row('BV1test00001').status,'saved');assert.equal(asked,64);
+  assert.equal(row('BV1test00002').skip_reason,'user_discarded');
+  assert.throws(()=>setVideoQuality('BV1test00001','80'),/已经保存/);
+  assert.throws(()=>setVideoQuality('BV1test00001','99'),/画质选项无效/);
+  process.exitCode=0;
+`));
+
+test('控制台：运行中选用途和画质先记下；空闲后自动执行',()=>isolated(`
+  import assert from 'node:assert/strict';
+  import {join} from 'node:path';
+  import {writeFileSync,rmSync} from 'node:fs';
+  import {DUST_HOME} from './scripts/config.mjs';
+  import {acceptIncremental} from './scripts/daily.mjs';
+  import {markRouting} from './scripts/ledger.mjs';
+  import {createConsole} from './console.mjs';
+  acceptIncremental('bilibili',[{aweme_id:'BV1test00001',platform:'bilibili',desc:'虚构',author:'作者',duration_s:60,collected_at:1}],{version:1,mid:'42',start_at:1,scanned_at:2,folders:{}});
+  markRouting('BV1test00001',{purpose:'review',reason:'默认',source:'default'});
+  const scheduler={status:()=>({loaded:false,time:null,intervalHours:null,nextRun:null}),start(){},stop(){}};
+  const app=createConsole({home:DUST_HOME,scheduler});const url=await app.listen(0);
+  try{
+    const token=(await(await fetch(url)).text()).match(/name="dustoff-token" content="([^"]+)"/)[1];
+    const post=(p,body)=>fetch(url+'/api/'+p,{method:'POST',headers:{'Content-Type':'application/json','X-Dustoff-Token':token,Origin:new URL(url).origin},body:JSON.stringify(body)});
+    writeFileSync(join(DUST_HOME,'.lock.pipeline'),String(process.pid));
+    const r=await post('purpose',{id:'BV1test00001',purpose:'video',quality:'64'});assert.equal(r.status,200);assert.deepEqual(await r.json(),{deferred:true});
+    assert.equal((await post('quality',{id:'BV1test00001',quality:'99'})).status,400);
+    const item=await(await fetch(url+'/api/item?id=BV1test00001')).json();
+    assert.equal(item.status,'review');assert.deepEqual(item.pending_intents.map(i=>i.action),['quality','purpose']);
+    rmSync(join(DUST_HOME,'.lock.pipeline'));
+    await fetch(url+'/api/overview');
+    for(let n=0;n<100&&app.execution().running;n++)await new Promise(r=>setTimeout(r,50));
+    const after=await(await fetch(url+'/api/item?id=BV1test00001')).json();
+    assert.equal(after.processing_mode,'video');assert.equal(after.status,'pending');assert.equal(after.video_quality,64);assert.equal(after.pending_intents,null);
+  }finally{app.server.close();}
   process.exitCode=0;
 `));
