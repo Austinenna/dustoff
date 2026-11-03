@@ -215,7 +215,7 @@ test('控制台按 ID 读取 B站条目，可按平台筛选，总览含 B站状
   const store=createStore(DUST_HOME);
   const item=store.item('BV1test00001');assert.equal(item.platform,'bilibili');assert.equal(item.folders,'["课程"]');
   assert.equal(store.listItems({platform:'bilibili'}).total,1);assert.equal(store.listItems({platform:'douyin'}).total,0);
-  assert.throws(()=>store.listItems({platform:'x'}),/平台无效/);assert.throws(()=>store.item('BV1短'),/作品 ID 不正确/);
+  assert.throws(()=>store.listItems({platform:'weibo'}),/平台无效/);assert.throws(()=>store.item('BV1短'),/作品 ID 不正确/);
   const o=store.overview();assert.equal(o.bilibili.enabled,true);assert.equal(o.bilibili.startAt,1);assert.equal(o.pending,1);assert.equal(o.platforms.bilibili,1);
   assert.equal(store.pendingItems().items[0].platform,'bilibili');
   process.exitCode=0;

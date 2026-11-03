@@ -577,6 +577,6 @@ async function main() {
 }
 
 export { noteOne, writeNote, PermanentError, HASH };
-export const CONF = { NOTES_DIR, MODEL, EFFORT, MAX_ATTEMPTS, API_KEY };
+export const CONF = { NOTES_DIR, MODEL, EFFORT, MAX_ATTEMPTS, API_KEY, BASE, MAX_TOKENS };
 
 if (IS_MAIN) main().catch(e => { console.error(e.message); process.exitCode=1; }).finally(() => stage.releaseLock());

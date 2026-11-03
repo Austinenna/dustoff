@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS items (
   author        TEXT,               -- 作者昵称
   created_at    INTEGER,            -- 发布时间 unix 秒。注意不是收藏时间
   duration_s    INTEGER,            -- 时长秒。图集为 NULL
-  media_type    TEXT,               -- video / gallery
+  media_type    TEXT,               -- video / gallery / post（X 的文字或图文帖子）
   folders       TEXT,               -- B 站：所在收藏夹标题的 JSON 数组；抖音为 NULL
 
   -- ── 采集状态 ─────────────────────────────────────
@@ -225,7 +225,7 @@ export function importScan(items, platform = 'douyin') {
       // aweme_id 是沿用的字段名，各平台都放平台内作品 ID。
       ins.run(it.aweme_id, platform, it.desc || null, it.author || null,
         it.create_time || null, it.duration_s || null,
-        it.is_gallery ? 'gallery' : 'video',
+        it.is_gallery ? 'gallery' : it.media_type === 'post' ? 'post' : 'video',
         it.collected_at || null, t, t, STATUS.PENDING, t,
         Array.isArray(it.folders) && it.folders.length ? JSON.stringify(it.folders) : null);
     }

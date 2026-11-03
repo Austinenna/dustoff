@@ -15,12 +15,14 @@ import { validateLoginInput } from './scripts/remote-login.mjs';
 import { createConsoleAccess } from './scripts/console-auth.mjs';
 import { sourceUrl } from './scripts/platforms.mjs';
 import { addIntent, listIntents } from './scripts/intent-store.mjs';
+import { CALLBACK_PATH, appConfig, exchangeCode, recordSession as recordXSession, saveToken, startAuthorization } from './scripts/sources/x/auth.mjs';
+import { createClient as createXClient } from './scripts/sources/x/client.mjs';
 const QUALITY_VALUES=['','64','80','116','120','0'];
 const ROOT=dirname(fileURLToPath(import.meta.url));
 // 登录类任务：抖音沿用原名，B 站加前缀；B 站任务在 console-session.mjs 中按平台参数分派。
 const LOGIN_KINDS=['login','session-check','login-window','bili-login','bili-session-check'],WINDOW_KINDS=['login','login-window','bili-login'];
 const encode=value=>JSON.stringify(value,(_,v)=>typeof v==='bigint'?Number(v):v);
-export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,publicUrl=process.env.DUST_PUBLIC_URL||'',serverMode=process.env.DUST_SERVER_MODE==='1',openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
+export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,xFetch=fetch,publicUrl=process.env.DUST_PUBLIC_URL||'',serverMode=process.env.DUST_SERVER_MODE==='1',openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
   const external=publicUrl?new URL(publicUrl):null;
   if(external&&(external.protocol!=='https:'||external.username||external.password||external.search||external.hash||!/^\/[a-zA-Z0-9/_-]*$/.test(external.pathname)))throw new Error('公网地址必须为不含凭据、查询参数的 HTTPS 地址');
   const basePath=external?external.pathname.replace(/\/+$/,''):'';
@@ -32,6 +34,35 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   let active=null,lastAction=null,origin,auth=null,scheduleStartupWarning=null;
   const actionsDir=localPath(join(home,'console'));
   let nextBrowserRequest=0;
+  // X 授权：state 与 PKCE verifier 只留在本进程内存，10 分钟内单次有效。
+  const xPending=new Map();
+  const xApp=()=>appConfig(store.cfg());
+  function xAuthorize(){
+    if(state().running)throw new HttpError(409,'已有任务正在运行，请等本轮结束后再连接 X');
+    for(const [k,v] of xPending)if(v.expires<Date.now())xPending.delete(k);
+    let auth;try{auth=startAuthorization({clientId:xApp().clientId,redirectUri:origin+basePath+CALLBACK_PATH});}catch(e){throw new HttpError(400,e.message);}
+    xPending.clear();xPending.set(auth.state,{verifier:auth.verifier,redirectUri:auth.redirectUri,expires:Date.now()+600000});
+    return {url:auth.url};
+  }
+  // X 授权回调来自 x.com 的跳转，控制台的登录 Cookie（SameSite=Strict）不会带上；
+  // 只凭控制台内生成的一次性 state 认可这次回调。
+  async function xCallback(url,res,send){
+    // 从 x.com 跳转而来的整条重定向链都算跨站，不能直接 303 回控制台；改由本页自行跳转。
+    const page=(code,title,text,refresh=false)=>{res.writeHead(code,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'"});res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">${refresh?`<meta http-equiv="refresh" content="1;url=${basePath}/#account">`:''}<title>${title}</title><body style="font:16px system-ui;max-width:32rem;margin:15vh auto;padding:0 16px"><h1 style="font-size:1.3rem">${title}</h1><p>${text}</p><p><a href="${basePath}/#account">返回控制台</a></p>`);};
+    const key=url.searchParams.get('state')||'',pending=xPending.get(key);
+    if(!pending||pending.expires<Date.now()){page(400,'连接 X 未完成','这次授权已过期或不是从本控制台发起的，请回到控制台重新点击「连接 X」。');return;}
+    xPending.delete(key);
+    if(url.searchParams.get('error')){page(400,'连接 X 已取消','你在 X 页面没有同意授权。需要时可回到控制台重新连接。');return;}
+    const code=url.searchParams.get('code');
+    if(!code||code.length>2000){page(400,'连接 X 未完成','X 没有返回授权码，请重试。');return;}
+    if(state().running){page(409,'连接 X 未完成','控制台正在运行任务，请等本轮结束后重新连接。');return;}
+    try{
+      saveToken(await exchangeCode({code,verifier:pending.verifier,redirectUri:pending.redirectUri,app:xApp(),fetchImpl:xFetch}),home);
+      const me=await createXClient({home,app:xApp(),fetchImpl:xFetch,interval:0}).me();
+      recordXSession({logged_in:true,online:'verified',online_checked_at:Math.floor(Date.now()/1000),username:me.username,user_id:me.id},home);
+      page(200,'已连接 X',`已授权账号 @${String(me.username).replace(/[^\w]/g,'')}，正在返回控制台…`,true);
+    }catch(e){page(502,'连接 X 未完成',store.redact(String(e.message||'授权失败')).replace(/[<>&"]/g,''));}
+  }
   function browserRequest(input) {
     const operation=active;
     if(!operation||operation.cancelling||!WINDOW_KINDS.includes(operation.kind)||!auth?.remote||auth.phase!=='window')throw new HttpError(409,'当前没有可操作的登录页面');
@@ -117,6 +148,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     const send=(code,value,type='application/json; charset=utf-8')=>{res.writeHead(code,{...headers,'Content-Type':type});res.end(type.startsWith('application/json')?encode(value):value);};
     try {
       if(req.headers.host!==new URL(origin).host)throw new HttpError(403,'请使用配置的控制台地址');
+      {const u=new URL(req.url,origin);if(req.method==='GET'&&u.pathname===basePath+CALLBACK_PATH){await xCallback(u,res,send);return;}}
       if(req.headers['sec-fetch-site']==='cross-site')throw new HttpError(403,'不接受跨站请求');
       const url=new URL(req.url,origin);let path=url.pathname;
       if(basePath){if(path===basePath){res.setHeader('Location',basePath+'/');send(308,'','text/plain');return;}if(!path.startsWith(basePath+'/'))throw new HttpError(404,'页面不存在');path=path.slice(basePath.length);}
@@ -151,7 +183,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       const params=Object.fromEntries(url.searchParams);
       let result;
       if(req.method==='GET')switch(path){
-        case '/api/session':{const o=store.overview();result={session:o.session,bilibili:o.bilibili,auth,active:!!active&&LOGIN_KINDS.includes(active.kind),kind:active?.kind};break;}
+        case '/api/session':{const o=store.overview();result={session:o.session,bilibili:o.bilibili,x:o.x,auth,active:!!active&&LOGIN_KINDS.includes(active.kind),kind:active?.kind};break;}
         case '/api/health':result={app:'dustoff',home,root,pid:process.pid};break;
         case '/api/overview':{
           // 被中断的运行可能留下未执行的操作；空闲时由控制台补执行。
@@ -202,6 +234,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           if(code!==0)throw new HttpError(code===3?409:400,operation.error||'操作未完成，请查看控制台操作日志');
           result=kind==='discard'?{discarded:true}:{deleted:true};break;
         }
+        case '/api/x-authorize':result=xAuthorize();break;
         case '/api/login':result=start(data.platform==='bilibili'?'bili-login':'login');break;
         case '/api/login-input':{
           let input;try{input=validateLoginInput(data);}catch(e){throw new HttpError(400,e.message);}

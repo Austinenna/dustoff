@@ -3,7 +3,7 @@ import {escapeHtml} from './markdown.mjs';
 export const esc = escapeHtml;
 export const PURPOSES = {note:'知识笔记',video:'视频',gallery:'图集',review:'待确认'};
 export const STATUSES = {pending:'待处理',downloaded:'已下载',transcribed:'已转写',extracted:'已整理',saved:'已保存',review:'待确认',failed:'失败',skipped:'已跳过',removed:'已取消收藏'};
-export const PLATFORM_LABELS = {douyin:'抖音',bilibili:'B站'};
+export const PLATFORM_LABELS = {douyin:'抖音',bilibili:'B站',x:'X'};
 export const QUALITY_LABELS = {'64':'720p','80':'1080p','116':'1080p 高帧率/高码率','120':'4K','0':'不限'};
 /** 运行期间记下、尚未执行的操作，给用户的一句话说明。 */
 export function intentLabel(list) {
@@ -35,6 +35,7 @@ export function splitNoteContent(source) {
   return {note:content.slice(0,start.index),formatted:content.slice(start.index+start[0].length,end.index)};
 }
 export function mediaLabel(item) {
+  if(item.media_type==='post')return item.note_path?'原帖已保存':'原帖尚未保存';
   if(item.media_type==='gallery')return item.media_path&&!item.media_deleted?`已保存图集${item.image_count?' · '+item.image_count+' 张':''}`:'图片尚未保存';
   if(item.media_deleted)return item.skip_reason==='video_deleted'?'视频已删除':'视频已清理';
   if(item.media_path)return `${item.processing_mode==='video'?'已保留':'笔记素材仍在'}${item.media_quality==='high'?' · 高清':item.media_quality==='low'?' · 低清':''}`;

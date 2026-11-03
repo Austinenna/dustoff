@@ -343,3 +343,23 @@ DUST_BILI_SUBTITLE_AI=1
 DUST_BILI_MAX_PAGES=5
 # 请求间隔（毫秒）。
 DUST_BILI_INTERVAL_MS=1500
+
+# ─────────────────────────────────────────────────────────────
+# X 书签（官方接口，按调用计费；默认关闭）
+# ─────────────────────────────────────────────────────────────
+
+# 在 console.x.com 的应用里开启 OAuth 2.0（Web App），回调地址填控制台地址 + /x/callback，
+# 例如本机 http://127.0.0.1:47832/x/callback。Client ID / Secret 只写在这里，不进源码。
+# 填好后在控制台「设置 › 账号」点「连接 X」完成授权；只申请只读权限。
+# DUST_X_CLIENT_ID=
+# DUST_X_CLIENT_SECRET=
+DUST_X_ENABLED=0
+# 首次读入全部书签（官方接口最多返回最近 800 条），之后只读顶部新增。
+DUST_X_DAILY_LIMIT=30
+# 正文（去掉链接）达到这个字数才另外整理成笔记，短帖只存原帖。
+DUST_X_NOTE_MIN_CHARS=280
+# 视频推文：超过时长上限不处理；转为笔记时的转写单条上限。
+DUST_X_MAX_DURATION_MIN=60
+DUST_X_MAX_ASR_MIN=20
+# 请求间隔（毫秒）。
+DUST_X_INTERVAL_MS=1000

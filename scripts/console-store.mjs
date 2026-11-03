@@ -196,7 +196,7 @@ export function createStore(home = DUST_HOME) {
     const row=readDb(db=>has(db,'items')?db.prepare("SELECT * FROM items WHERE platform=? AND id=?").get(platformOfId(id),String(id)):null,null);
     if(!row)throw new HttpError(404,'找不到这条作品');
     const inQueue=readDb(db=>has(db,'daily_queue')&&!!db.prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id),false);
-    const canChange=row.media_type!=='gallery'&&inQueue&&!['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason)&&row.status!=='removed';
+    const canChange=row.media_type!=='gallery'&&row.media_type!=='post'&&inQueue&&!['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason)&&row.status!=='removed';
     const canConvert=canChange&&!!row.media_path&&!row.media_deleted&&row.has_audio!==0&&Number(row.duration_s)>0&&Number(row.duration_s)<=(row.platform==='bilibili'?policy().bilibili.asrSeconds:policy().seconds)
       &&(row.processing_mode==='video'||(row.processing_mode==null&&row.status==='saved'));
     return JSON.parse(redact({...row,...processingActions(row,inQueue),pending_intents:intentsById(home).get(String(id))||null,routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,display_title:displayTitle(row)}));
@@ -232,6 +232,7 @@ export function createStore(home = DUST_HOME) {
       if(has(db,'daily_usage')){out.usedToday=db.prepare('SELECT count(*) n FROM daily_usage WHERE day=?').get(day).n;
         if(db.prepare('PRAGMA table_info(daily_usage)').all().some(c=>c.name==='platform'))out.usedByPlatform=Object.fromEntries(db.prepare('SELECT platform,count(*) n FROM daily_usage WHERE day=? GROUP BY platform').all(day).map(r=>[r.platform,r.n]));}
       if(has(db,'daily_state')){const r=db.prepare("SELECT value FROM daily_state WHERE name='baseline:bilibili'").get();if(r)out.biliState=JSON.parse(r.value);}
+      if(has(db,'daily_state')){const r=db.prepare("SELECT value FROM daily_state WHERE name='baseline:x'").get();if(r)out.xState=JSON.parse(r.value);}
       if(has(db,'daily_state')){const r=db.prepare("SELECT value FROM daily_state WHERE name='baseline'").get();if(r)out.baseline=JSON.parse(r.value);}
       return out;
     },{total:0,notes:0,todayNotes:0,pending:0,failed:0,usedToday:0,baseline:null,statuses:[]});
@@ -253,8 +254,12 @@ export function createStore(home = DUST_HOME) {
     const p=policy(),biliFolders=readJson(join(home,'bilibili','folders.json'));
     const bilibili={enabled:p.bilibili.enabled,session:sessionSummary(readJson(join(home,'state','bilibili-session.json')),Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),
       startAt:totals.biliState?.start_at??null,scannedAt:totals.biliState?.scanned_at??null,folders:biliFolders?.folders||[],usedToday:totals.usedByPlatform?.bilibili||0,daily:p.bilibili.daily};
-    delete totals.biliState;
-    return {...totals,bilibili,day,policy:p,lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:notes.items,recentVideos:videos.items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
+    // X 只回传连接状态，不回传令牌。
+    const xSession=readJson(join(home,'state','x-session.json'))||{};
+    const x={enabled:p.x.enabled,configured:!!get('DUST_X_CLIENT_ID',''),connected:existsSync(join(home,'x','token.json')),username:xSession.username||totals.xState?.username||null,
+      online:xSession.online||null,onlineCheckedAt:xSession.online_checked_at||null,lastCheckAt:xSession.last_check_at||null,scannedAt:totals.xState?.scanned_at??null,complete:!!totals.xState?.complete,usedToday:totals.usedByPlatform?.x||0,daily:p.x.daily};
+    delete totals.biliState;delete totals.xState;
+    return {...totals,bilibili,x,day,policy:p,lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:notes.items,recentVideos:videos.items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
   }
   return {home,settings,saveSettings,overview,listItems,pendingItems,item,document,fileFor,gallery,galleryFile,runs,runDetail,tail,redact,cfg,policy};
 }

@@ -8,7 +8,7 @@ import { isExpired } from './lib.mjs';
 
 export const IMAGE_TYPES = { jpg:'image/jpeg', png:'image/png', webp:'image/webp', gif:'image/gif', avif:'image/avif' };
 const imageName = /^\d{3,4}\.(jpg|png|webp|gif|avif)$/;
-function inspect(file) {
+export function inspect(file) {
   if (!statSync(file).isFile() || statSync(file).size === 0) throw new Error('图片文件为空');
   const mime = spawnSync('file', ['-b','--mime-type',file], {encoding:'utf8',timeout:deadlineMs(15000)});
   const ext = Object.keys(IMAGE_TYPES).find(key => IMAGE_TYPES[key] === mime.stdout?.trim());

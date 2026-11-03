@@ -30,6 +30,15 @@ export function readPolicy(conf) {
     // 保存视频的最高画质（B 站 qn）：64=720p 80=1080p 116=1080p 高帧率/高码率 120=4K 0=不限。
     maxQuality: [64, 80, 116, 120, 0].includes(Number(cfg('DUST_BILI_MAX_QUALITY', 80))) ? Number(cfg('DUST_BILI_MAX_QUALITY', 80)) : 80,
   }),
+  x: Object.freeze({
+    enabled: cfg('DUST_X_ENABLED', '0') === '1',
+    daily: Math.max(1, Math.min(50, Math.floor(positive('DUST_X_DAILY_LIMIT', 30)))),
+    // 视频推文：超过时长上限不处理；转为笔记时另受转写单条上限约束。
+    seconds: Math.min(180 * 60, positive('DUST_X_MAX_DURATION_MIN', 60) * 60),
+    asrSeconds: Math.min(60 * 60, positive('DUST_X_MAX_ASR_MIN', 20) * 60),
+    // 正文达到这个字数（去掉链接）才另外整理成笔记，短帖只存原帖。
+    noteChars: Math.max(50, Math.floor(positive('DUST_X_NOTE_MIN_CHARS', 280))),
+  }),
 });
 }
 export const POLICY = readPolicy();
@@ -114,13 +123,13 @@ export async function writeMedia(stream, path) {
   finally { closeSync(fd); }
 }
 const platformOf = item => item.platform || platformOfId(item.aweme_id ?? item.id) || 'douyin';
-export const dailyLimitFor = platform => platform === 'bilibili' ? POLICY.bilibili.daily : POLICY.daily;
+export const dailyLimitFor = platform => POLICY[platform]?.daily ?? POLICY.daily;
 /** 能送进 ASR 的最长音频。 */
-export const asrSecondsFor = item => platformOf(item) === 'bilibili' ? POLICY.bilibili.asrSeconds : POLICY.seconds;
+export const asrSecondsFor = item => POLICY[platformOf(item)]?.asrSeconds ?? POLICY.seconds;
 export function mediaDecision(item) {
-  if (item.is_gallery || item.media_type === 'gallery') return null;
+  if (item.is_gallery || item.media_type === 'gallery' || item.media_type === 'post') return null;
   const seconds = Number(item.duration_s);
   if (!Number.isFinite(seconds) || seconds <= 0) return 'unknown_duration';
-  const cap = platformOf(item) === 'bilibili' ? POLICY.bilibili.seconds : POLICY.seconds;
+  const cap = POLICY[platformOf(item)]?.seconds ?? POLICY.seconds;
   return seconds > cap ? 'too_long' : null;
 }

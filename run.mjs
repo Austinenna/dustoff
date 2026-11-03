@@ -9,6 +9,7 @@ import { POLICY, TEMP, PauseError, mediaDecision, localPath, atomicWrite, deadli
 import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, queueSkippedGalleries, migratePurposes, ScanError, itemRow } from './scripts/daily.mjs';
 import { scanBilibili, processBilibili } from './scripts/sources/bilibili/index.mjs';
 import { createClient } from './scripts/sources/bilibili/client.mjs';
+import { scanX, processX } from './scripts/sources/x/index.mjs';
 import { platformInfo, validItemId } from './scripts/platforms.mjs';
 import { applyIntents, intentsById } from './scripts/intents.mjs';
 import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved } from './scripts/ledger.mjs';
@@ -42,7 +43,7 @@ async function script(name, args, env, log) {
     });
   });
 }
-export async function main(args = process.argv.slice(2), { runScript = script, trashFile, bilibili = {} } = {}) {
+export async function main(args = process.argv.slice(2), { runScript = script, trashFile, bilibili = {}, x = {} } = {}) {
   const has = f => args.includes(f);
   const value = f => { const i = args.indexOf(f); return i < 0 ? null : args[i+1]; };
   const dry = has('--dry-run'), noScan = has('--no-scan'), downloadOnly = has('--download-only'), skipNotes = has('--skip-notes');
@@ -75,8 +76,9 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       if (dry) { log('预览模式不重置失败状态'); return summary; }
       log(`恢复 ${value('--retry')} 到 ${retryItem(value('--retry'))} 阶段`);
     }
-    if (has('--status')) { console.log(JSON.stringify({ baseline: old, pending: pendingQueue().length, usedToday: usage(), usedTodayByPlatform: { douyin: usage(undefined, 'douyin'), bilibili: usage(undefined, 'bilibili') }, policy: POLICY }, null, 2)); return summary; }
+    if (has('--status')) { console.log(JSON.stringify({ baseline: old, pending: pendingQueue().length, usedToday: usage(), usedTodayByPlatform: { douyin: usage(undefined, 'douyin'), bilibili: usage(undefined, 'bilibili'), x: usage(undefined, 'x') }, policy: POLICY }, null, 2)); return summary; }
     log(`日常限制：${POLICY.daily} 条/日，${POLICY.seconds} 秒，${POLICY.bytes / 1024 ** 3} GiB 媒体，至少 ${POLICY.free / 1024 ** 3} GiB 空闲；外接盘停用`);
+    if (POLICY.x.enabled) log(`X 限制：${POLICY.x.daily} 条/日（全部平台合计 ${POLICY.totalDaily} 条），正文 ${POLICY.x.noteChars} 字以上另出笔记，视频转写单条 ${POLICY.x.asrSeconds / 60} 分钟`);
     if (POLICY.bilibili.enabled) log(`B站限制：${POLICY.bilibili.daily} 条/日（全部平台合计 ${POLICY.totalDaily} 条），单条 ${POLICY.bilibili.seconds / 60} 分钟，无字幕转写单条 ${POLICY.bilibili.asrSeconds / 60} 分钟、每日 ${POLICY.bilibili.dailyAsrSeconds / 60} 分钟`);
     if (dry) {
       summary.mode = old ? 'preview-queue' : 'preview-baseline';
@@ -124,6 +126,20 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
         log(`B站扫描未完成：${e.message}；继续处理已有待办`);
       }
     }
+    // X 扫描同样互不影响：未连接、限流或额度用尽只记警告。
+    if (!noScan && POLICY.x.enabled) {
+      try {
+        const r = await scanX({ log, client: x.client });
+        summary.x = { scanned: r.scanned, added: r.added, total: r.total };
+        summary.scanned += r.scanned; summary.added += r.added;
+        log(`X 读取书签 ${r.total} 条${r.full ? '（完整读取）' : ''}，新书签 ${r.scanned} 条，新增待办 ${r.added} 条`);
+      } catch (e) {
+        if (e instanceof PauseError && !e.scope) throw e;
+        const message = `X：${e.message}`;
+        summary.scanWarning = summary.scanWarning ? `${summary.scanWarning}；${message}` : message;
+        log(`X 扫描未完成：${e.message}；继续处理已有待办`);
+      }
+    }
     // 模型密钥在实际走到对应分支时检查，单纯保存视频无需 ASR/笔记密钥。
     const consecutive = {}, quotaFull = {};
     let biliClient = null;
@@ -133,6 +149,13 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       textDir: ASR_CONF.TEXT_DIR, notesDir: NOTES_CONF.NOTES_DIR, asrKey: ASR_CONF.API_KEY, llmKey: NOTES_CONF.API_KEY,
       ...bilibili.deps,
     };
+    const xDeps = {
+      transcribe: transcribeOne, note: noteOne, writeNote, hash: HASH,
+      textDir: ASR_CONF.TEXT_DIR, notesDir: NOTES_CONF.NOTES_DIR, asrKey: ASR_CONF.API_KEY,
+      llm: { base: NOTES_CONF.BASE, key: NOTES_CONF.API_KEY, model: NOTES_CONF.MODEL, effort: NOTES_CONF.EFFORT, maxTokens: NOTES_CONF.MAX_TOKENS },
+      ...x.deps,
+    };
+    const processors = { bilibili: [processBilibili, biliDeps], x: [processX, xDeps] };
     const queue = pendingQueue().filter(r => (!downloadOnly || r.status === 'pending') && (!value('--retry') || r.id === value('--retry')));
     for (const candidate of queue) {
       if (summary.processed >= limit) break;
@@ -146,13 +169,14 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       // 用户刚在控制台改过的条目本轮不处理，收尾时按新决定执行。
       if (intentsById(DUST_HOME).has(id)) { log(`跳过 ${id}：有运行期间记下的操作，本轮结束后执行`); continue; }
       try {
-        if (platform === 'bilibili') {
+        if (processors[platform]) {
           if (!reserveDaily(id)) {
             if (usage() >= POLICY.totalDaily) { summary.paused = `当天累计已达 ${POLICY.totalDaily} 条`; summary.quotaPaused = true; break; }
-            quotaFull[platform] = true; summary.quotaReached.push(platform); log(`B站当天已达 ${POLICY.bilibili.daily} 条，其他平台继续`); continue;
+            quotaFull[platform] = true; summary.quotaReached.push(platform); log(`${platformInfo(platform).label}当天已达 ${POLICY[platform].daily} 条，其他平台继续`); continue;
           }
           summary.processed++;
-          await processBilibili({ candidate, summary, log, tmp, downloadOnly, skipNotes, deps: biliDeps });
+          const [processItem, deps] = processors[platform];
+          await processItem({ candidate, summary, log, tmp, downloadOnly, skipNotes, deps });
           consecutive[typeKey(platform, fresh(id).processing_mode || kind)] = 0;
           log(`完成 ${id}，本轮 ${summary.processed} 条`);
           continue;
@@ -165,7 +189,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
         if (!reserveDaily(id)) {
           if (usage() >= POLICY.totalDaily) { summary.paused = `当天累计已达 ${POLICY.totalDaily} 条`; summary.quotaPaused = true; break; }
           quotaFull[platform] = true; summary.quotaReached.push(platform);
-          if (!POLICY.bilibili.enabled) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; summary.quotaPaused = true; break; }
+          if (!POLICY.bilibili.enabled && !POLICY.x.enabled) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; summary.quotaPaused = true; break; }
           log(`抖音当天已达 ${POLICY.daily} 条，其他平台继续`); continue;
         }
         summary.processed++;

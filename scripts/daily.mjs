@@ -127,7 +127,8 @@ export function retryItem(id) {
 export function setPurpose(id, purpose) {
   if (!['note','video','review'].includes(purpose)) throw new Error('用途无效');
   const d = database(), row = itemRow(id);
-  if (!row || row.media_type === 'gallery' || !inScope(id) || ['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
+  // X 的文字和图文帖子固定保存原帖，没有视频用途可选。
+  if (!row || row.media_type === 'gallery' || row.media_type === 'post' || !inScope(id) || ['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason) || row.status === 'removed') throw new Error('这条作品不在可修改用途的处理范围内');
   const now = Math.floor(Date.now()/1000);
   d.prepare(`UPDATE items SET processing_mode=?,routing_reason='用户手动选择',routing_source='manual',routing_model=NULL,routed_at=?,
     status=?,skip_reason=NULL,needs_ocr=?,delete_after_note=CASE WHEN ?='note' THEN delete_after_note ELSE 0 END,
