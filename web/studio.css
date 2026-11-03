@@ -530,9 +530,33 @@ dialog.drawer{margin:10px 10px 10px auto;height:calc(100dvh - 20px);max-height:n
 .purpose-options label{display:flex;gap:8px;padding:10px;border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:13px}
 .purpose-options label:has(input:checked){border-color:var(--accent-line);background:var(--accent-soft)}
 .purpose-options small{display:block}
-.video-player{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}
-.local-video{width:100%;max-height:72dvh;background:#000;display:block}
-.video-details{padding:20px;display:grid;gap:12px;align-content:start}
+/* 视频播放：深色影院弹窗，左侧画面区按比例完整显示视频，右侧信息栏 */
+dialog.player-dialog{background:#0B0C0B;color:#ECEDE7;border:0;border-radius:18px;overflow:hidden;width:min(1200px,calc(100vw - 32px));height:min(820px,calc(100dvh - 48px));max-width:none;max-height:none}
+dialog.player-dialog::backdrop{background:rgba(5,6,5,.72);backdrop-filter:blur(6px)}
+.player-loading .empty{color:#9A9E96;padding:80px 20px}
+.player-close{position:absolute;top:12px;right:12px;z-index:3;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.12);color:#fff;backdrop-filter:blur(8px)}
+.player-close:hover{background:rgba(255,255,255,.22)}
+.player{display:grid;grid-template-rows:minmax(0,1fr) auto;height:100%}
+.player .screen{background:#000;display:grid;place-items:center;min-width:0;min-height:0;overflow:hidden;position:relative}
+.screen-poster{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;z-index:1}
+.local-video{display:block;background:#000;width:100%;height:100%;object-fit:contain}
+.player .info{min-width:0;display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding:16px 22px 18px}
+.player .info-main{min-width:0;flex:1}
+.player .meta-line{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;font-size:12px;color:#9A9E96}
+.player .meta-line .pf{color:#ECEDE7}
+.player h2{font-family:var(--zh-serif);font-weight:600;font-size:17px;line-height:1.5;margin-top:6px;color:#F4F4EF;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+.player #video-message{font-size:12px;color:#7F847C;margin-top:6px}
+.player .info-acts{display:grid;gap:8px;justify-items:end;flex-shrink:0;max-width:60%}
+.player .info-acts .row{justify-content:flex-end}
+.player .info-acts p{text-align:right;max-width:380px}
+.player .info-acts .muted{color:#7F847C}
+.player .btn{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.1);color:#E6E7E1;box-shadow:none}
+.player .btn:hover{background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.18)}
+.player .btn.primary{background:#ECEDE7;color:#0B0C0B;border-color:transparent}
+.player .btn.primary:hover{background:#fff;color:#0B0C0B}
+.player .btn.quiet{background:transparent;border-color:transparent;color:#B9BDB5}
+.player .btn.quiet:hover{background:rgba(255,255,255,.1);color:#fff}
+.player .btn.danger{color:#E8786B}
 .gallery-stage{background:var(--sunken);display:grid;place-items:center;min-height:220px}
 .gallery-stage img{max-height:60dvh;max-width:100%;object-fit:contain;display:block}
 .gallery-controls{display:flex;align-items:center;justify-content:center;gap:24px;padding:10px}
@@ -596,7 +620,14 @@ dialog.drawer{margin:10px 10px 10px auto;height:calc(100dvh - 20px);max-height:n
   .pipeline-band{grid-template-columns:1fr 1fr}
   .stage:nth-child(2){border-right:0}.stage:nth-child(-n+2){border-bottom:1px solid var(--line)}
   .stage::after{display:none}
-  .fresh,.resurface,.inbox,.focus,.grid2,.history,.video-player,.storage-summary,.steps{grid-template-columns:minmax(0,1fr)}
+  .fresh,.resurface,.inbox,.focus,.grid2,.history,.storage-summary,.steps{grid-template-columns:minmax(0,1fr)}
+  dialog.player-dialog{width:calc(100vw - 16px);height:calc(100dvh - 16px)}
+  .player{grid-template-rows:auto minmax(0,1fr)}
+  .local-video{height:auto;max-height:56dvh}
+  .player .info{flex-direction:column;padding:16px 18px;overflow:auto}
+  .player .info-acts{justify-items:start;max-width:none}
+  .player .info-acts .row{justify-content:flex-start}
+  .player .info-acts p{text-align:left}
   .resurface .r{border-left:0;border-top:1px solid var(--line)}
   .focus .cover{aspect-ratio:16/10;min-height:0;height:auto}
   .choices,.purpose-options{grid-template-columns:1fr}

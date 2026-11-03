@@ -324,16 +324,25 @@ function videoNoteHint(i){
 const videoDeleteButton=i=>i.media_type!=='gallery'&&i.media_path&&!i.media_deleted?button('删除视频','delete-video',`data-id="${esc(i.id)}" data-idle ${busy()?'disabled':''}`,'quiet sm danger'):'';
 async function playVideo(id){
   const epoch=++dialogEpoch;drawerId=null;
-  openDialog(dialogHead('视频')+empty('正在读取视频…'),'modal wide');
+  openDialog(`<div class="player-loading">${empty('正在读取视频…')}</div>`,'player-dialog');
   try{
     const i=await api('item?'+query({id}));if(epoch!==dialogEpoch||!dialog.open)return;
-    // 优先尝试原片，避免支持原格式的浏览器默认降画质。
-    dialog.innerHTML=dialogHead(esc(titleOf(i)))+`<div class="video-player"><video class="local-video" controls playsinline preload="metadata" aria-label="${esc(titleOf(i))}" poster="api/video-poster?id=${encodeURIComponent(id)}" data-compatible="false"></video><div class="video-details"><div class="row">${pf(i.platform)}<small>${esc(i.author||'未知作者')} · ${esc(kindOf(i))} · ${esc(mediaLabel(i))}</small></div><h2 class="title" style="font-family:var(--zh-serif);font-size:19px;line-height:1.45">${esc(titleOf(i))}</h2><p id="video-message" class="muted" style="font-size:12.5px" role="status" aria-live="polite">正在载入视频…</p><div class="row">${button('加入素材箱','add-material',`data-id="${esc(id)}" data-kind="video"`,'sm')}${i.note_path||i.text_path?button('阅读笔记','read',`data-id="${esc(id)}"`,'sm'):''}${videoNoteButton(i)}</div><div class="row">${button('切换兼容播放','prepare-video',`data-id="${esc(id)}"`,'quiet sm')}${button('外部播放器 ↗','open',`data-id="${esc(id)}" data-kind="video"`,'quiet sm')}${sourceA(i)}${button('收藏详情','detail',`data-id="${esc(id)}"`,'quiet sm')}${videoDeleteButton(i)}</div>${videoNoteHint(i)}</div></div>`;
+    // 先按未知方向渲染，读到视频尺寸后切换横屏或竖屏布局；优先尝试原片，避免默认降画质。
+    dialog.innerHTML=`<button type="button" class="player-close" data-action="close-dialog" aria-label="关闭">${ic('x',18)}</button><div class="player">
+      <div class="screen"><img class="screen-poster" src="api/video-poster?id=${encodeURIComponent(id)}" alt=""><video class="local-video" controls playsinline preload="metadata" aria-label="${esc(titleOf(i))}" data-compatible="false"></video></div>
+      <aside class="info">
+        <div class="info-main"><div class="meta-line">${pf(i.platform)}<span>${esc(i.author||'未知作者')}</span><span>${esc(kindOf(i))}</span><span>${esc(mediaLabel(i))}</span></div>
+          <h2 title="${esc(titleOf(i))}">${esc(titleOf(i))}</h2><p id="video-message" role="status" aria-live="polite">正在载入视频…</p></div>
+        <div class="info-acts"><div class="row">${button(`${ic('bookmark',14)}加入素材箱`,'add-material',`data-id="${esc(id)}" data-kind="video"`,'primary sm')}${i.note_path||i.text_path?button(`${ic('note',14)}阅读笔记`,'read',`data-id="${esc(id)}"`,'sm'):''}${videoNoteButton(i)}</div>
+          <div class="row secondary">${sourceA(i)}${button('收藏详情','detail',`data-id="${esc(id)}"`,'quiet sm')}${button('兼容播放','prepare-video',`data-id="${esc(id)}"`,'quiet sm')}${button('外部播放器','open',`data-id="${esc(id)}" data-kind="video"`,'quiet sm')}${videoDeleteButton(i)}</div>${videoNoteHint(i)}</div>
+      </aside></div>`;
     const v=dialog.querySelector('video');
+    // 视频画面出来之前用按比例完整显示的封面占位，避免封面被拉伸裁切。
+    v.addEventListener('loadeddata',()=>{dialog.querySelector('.screen-poster')?.remove();});
     v.addEventListener('loadeddata',()=>{if(epoch===dialogEpoch)videoMessage(v.dataset.compatible==='true'?'播放兼容副本 · 原视频保留':serverMode?'服务器保存的原视频':'本地原视频 · 无需上传');});
     v.addEventListener('error',()=>{if(epoch!==dialogEpoch||!dialog.open)return;if(v.dataset.compatible==='true')videoMessage('播放失败，可尝试外部播放器，或重新打开此视频。');else void preparePlayback(id,epoch);});
     restoreVideoAudio(v);v.src='api/video?'+query({id});void v.play().catch(()=>{});
-  }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('视频暂不可播放')+empty(e.message);}
+  }catch(e){if(epoch===dialogEpoch&&dialog.open){dialog.className='modal';dialog.innerHTML=dialogHead('视频暂不可播放')+empty(e.message);}}
 }
 async function deleteVideo(id){
   if(!window.confirm('把这个视频移入废纸篓？笔记、文字稿和收藏记录会保留。'))return;
