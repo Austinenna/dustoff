@@ -58,7 +58,7 @@ test('图集整组保存：坏内容回退、部分失败续跑、独立浏览�
     const picture=await fetch(url+'/api/gallery-image?id=1&index=1');assert.equal(picture.headers.get('Content-Type'),'image/png');assert.deepEqual(Buffer.from(await picture.arrayBuffer()),content);
     const head=await fetch(url+'/api/gallery-image?id=1&index=0',{method:'HEAD'});assert.equal(head.headers.get('Content-Length'),String(content.length));assert.equal(await head.text(),'');
     assert.equal((await fetch(url+'/api/gallery-image?id=1&index=../0')).status,400);assert.equal((await fetch(url+'/api/gallery-image?id=1&index=99')).status,404);assert.equal((await fetch(url+'/api/gallery?id=100')).status,404);assert.equal((await fetch(url+'/api/video?id=1')).status,400);
-    const html=await(await fetch(url)).text(),token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];assert.ok(html.includes('href="#galleries"'));
+    const html=await(await fetch(url)).text(),token=html.match(/name="dustoff-token" content="([^"]+)"/)[1];assert.ok(html.includes('href="#videos"'));
     const post=body=>fetch(url+'/api/open',{method:'POST',headers:{Origin:url,'Content-Type':'application/json','X-Dustoff-Token':token},body:JSON.stringify(body)});
     assert.equal((await post({kind:'gallery-folder',id:'1'})).status,200);assert.deepEqual(opened[0],[dirname(manifest)]);
     await post({kind:'source',id:'1'});assert.deepEqual(opened[1],['https://www.douyin.com/note/1']);

@@ -2,12 +2,13 @@
 // 本机控制台：只监听 loopback，浏览器与 CLI 共用现有流水线。
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFileSync, existsSync, mkdirSync, openSync, writeSync, closeSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, openSync, writeSync, closeSync, readdirSync, statSync, appendFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, execFile } from 'node:child_process';
 import { DUST_HOME } from './scripts/config.mjs';
 import { createStore, liveLock, HttpError } from './scripts/console-store.mjs';
+import { createLibrary } from './scripts/library-store.mjs';
 import { createScheduler } from './scripts/schedule.mjs';
 import { localPath, atomicWrite } from './scripts/policy.mjs';
 import { createMediaService, streamMedia } from './scripts/console-media.mjs';
@@ -28,6 +29,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   const basePath=external?external.pathname.replace(/\/+$/,''):'';
   const access=createConsoleAccess({home,enabled:!!external});
   const store=createStore(home);
+  const library=createLibrary(home);
   const media=createMediaService({store,home});
   scheduler ||= createScheduler({home,root});
   const token=randomBytes(32).toString('hex');
@@ -142,6 +144,74 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     child.once('close',(code,signal)=>{lastAction={kind,pid:operation.pid,startedAt:operation.startedAt,finishedAt:Date.now(),exitCode:code??1,signal};log(`结束：退出码 ${lastAction.exitCode}\n`);if(fd!==null){closeSync(fd);fd=null;}atomicWrite(join(actionsDir,'last-action.json'),encode(lastAction));if(active===operation){active=null;if(LOGIN_KINDS.includes(kind)){if(!['checked','success','cancelled','timeout','error'].includes(auth?.phase))auth={phase:'error',platform:auth?.platform,message:'登录任务已结束，请重新开始'};}}});
     return state();
   }
+  // 素材附上作品摘要；作品已从账本删除时仍保留素材，标记为缺失。
+  function enrich(list){
+    const items=store.summaries(list.map(m=>m.item));
+    return list.map(m=>({...m,source:items.get(m.item)||{id:m.item,missing:true,title:'作品已不在账本中'}}));
+  }
+  function libraryState(){
+    const topics=library.topics(),materials=enrich(library.materials({limit:500}));
+    return {topics,materials,unsorted:materials.filter(m=>m.topic_id===null).length};
+  }
+  function suggestions(id){
+    const meta=store.itemMeta(id);if(!meta)return [];
+    const cache=new Map(),metaOf=item=>{if(!cache.has(item))cache.set(item,store.itemMeta(item));return cache.get(item);};
+    return library.suggest(meta,metaOf);
+  }
+  // ── 对外接口 /api/v1：只用 Bearer 令牌认证，只能访问素材箱；不读取控制台登录 Cookie。 ──
+  const apiHits=new Map(),apiLog=join(actionsDir,'api-access.jsonl');
+  function logApi(entry){
+    try{mkdirSync(actionsDir,{recursive:true,mode:0o700});appendFileSync(apiLog,JSON.stringify({at:new Date().toISOString(),...entry})+'\n',{mode:0o600});
+      if(statSync(apiLog).size>2*1024**2){const lines=readFileSync(apiLog,'utf8').split('\n').filter(Boolean);writeFileSync(apiLog,lines.slice(-5000).join('\n')+'\n',{mode:0o600});}}catch{} // 日志写不进去不影响接口
+  }
+  function materialDetail(id){
+    const m=enrich([library.material(id)])[0],src=m.source;
+    let content=null,media=[];
+    if(!src.missing){
+      if(src.has_note){try{content=store.document(m.item,'note').content;}catch{}}
+      if(src.has_media){
+        if(src.media_type==='gallery'){try{media=store.gallery(m.item).images.map((_,n)=>({index:n,type:'image',url:`materials/${m.id}/media/${n}`}));}catch{}}
+        else media=[{index:0,type:'video',url:`materials/${m.id}/media/0`}];
+      }
+      try{src.source_url=sourceUrl(store.item(m.item));}catch{}
+    }
+    return {...m,content,media};
+  }
+  async function externalApi(req,res,path,url,send){
+    const started=Date.now(),secret=String(req.headers.authorization||'').match(/^Bearer\s+(\S+)$/i)?.[1]||'';
+    const who=library.verifyToken(secret);
+    const done=(code,value,type)=>{logApi({token:who?.id??null,method:req.method,path,status:code,ms:Date.now()-started});send(code,value,type);};
+    if(!who){done(401,{error:'缺少或无效的访问令牌'});return;}
+    const window=Math.floor(Date.now()/60000),hit=apiHits.get(who.id);
+    if(!hit||hit.window!==window)apiHits.set(who.id,{window,count:1});else if(++hit.count>120){done(429,{error:'请求过于频繁，每个令牌每分钟最多 120 次'});return;}
+    const route=path.slice('/api/v1'.length),params=Object.fromEntries(url.searchParams);
+    try{
+      if(req.method==='GET'&&route==='/topics'){done(200,{topics:library.topics()});return;}
+      if(req.method==='GET'&&route==='/materials'){
+        const limit=Math.min(200,Math.max(1,Number(params.limit)||100)),list=library.materials({topic:params.topic,status:params.status,kind:params.kind,since:params.since,after:params.after,limit});
+        const last=list.at(-1),incremental=params.since!==undefined&&params.since!=='';
+        done(200,{materials:enrich(list),next:incremental&&list.length===limit&&last?{since:last.updated_at,after:last.id}:null});return;
+      }
+      let m=route.match(/^\/materials\/(\d+)$/);
+      if(req.method==='GET'&&m){done(200,JSON.parse(store.redact(materialDetail(m[1]))));return;}
+      m=route.match(/^\/materials\/(\d+)\/media\/(\d+)$/);
+      if(['GET','HEAD'].includes(req.method)&&m){
+        const item=library.material(m[1]).item,src=store.summaries([item]).get(item);
+        if(!src?.has_media)throw new HttpError(404,'这条素材没有可下载的媒体');
+        const file=src.media_type==='gallery'?store.galleryFile(item,m[2]):m[2]==='0'?media.video(item,false):null;
+        if(!file)throw new HttpError(404,'媒体不存在');
+        logApi({token:who.id,method:req.method,path,status:200,ms:Date.now()-started});
+        await streamMedia(req,res,file,{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});return;
+      }
+      m=route.match(/^\/materials\/(\d+)\/usage$/);
+      if(req.method==='POST'&&m){
+        if(who.scope!=='write')throw new HttpError(403,'这个令牌只有只读权限');
+        if(!String(req.headers['content-type']).startsWith('application/json'))throw new HttpError(415,'需要 JSON 请求');
+        done(200,enrich([library.recordUsage(m[1],await body(req))])[0]);return;
+      }
+      throw new HttpError(404,'接口不存在');
+    }catch(e){if(res.headersSent){res.destroy();return;}done(e.status||400,{error:store.redact(e.message||'请求失败')});}
+  }
   async function body(req){let size=0,parts=[];for await(const data of req){size+=data.length;if(size>32*1024)throw new HttpError(413,'请求内容过大');parts.push(data);}try{return JSON.parse(Buffer.concat(parts).toString('utf8')||'{}');}catch{throw new HttpError(400,'请求不是有效 JSON');}}
   const server=createServer(async(req,res)=>{
     const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
@@ -152,7 +222,12 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       if(req.headers['sec-fetch-site']==='cross-site')throw new HttpError(403,'不接受跨站请求');
       const url=new URL(req.url,origin);let path=url.pathname;
       if(basePath){if(path===basePath){res.setHeader('Location',basePath+'/');send(308,'','text/plain');return;}if(!path.startsWith(basePath+'/'))throw new HttpError(404,'页面不存在');path=path.slice(basePath.length);}
+      if(path.startsWith('/api/v1/')){await externalApi(req,res,path,url,send);return;}
       if(await access.handle(req,res,path,{origin,basePath,send}))return;
+      if(req.method==='GET'&&/^\/fonts\/[a-z0-9-]+\.woff2$/.test(path)){
+        const file=join(root,'web',path.slice(1));if(!existsSync(file))throw new HttpError(404,'页面不存在');
+        res.writeHead(200,{...headers,'Content-Type':'font/woff2','Cache-Control':'public, max-age=604800'});res.end(readFileSync(file));return;
+      }
       if(req.method==='GET'&&['/','/studio.mjs','/studio.css','/studio-view.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs','/remote-login.mjs','/remote-login.css'].includes(path)) {
         const name=path==='/'?'studio.html':path.slice(1),types={html:'text/html; charset=utf-8',js:'text/javascript; charset=utf-8',mjs:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8'};
         let content=readFileSync(join(root,name==='schedule-plan.mjs'?'scripts':'web',name),'utf8');if(path==='/')content=content.replace('__CSRF_TOKEN__',token).replace('__SERVER_MODE__',serverMode?'1':'0').replace('__ACCESS_CONTROL__',external?'1':'0');
@@ -197,6 +272,11 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/item':result=store.item(params.id);break;
         case '/api/document':result=store.document(params.id,params.kind);break;
         case '/api/settings':result=store.settings();break;
+        case '/api/notes-index':{const reads=library.readIds();result={items:store.notesIndex().items.map(i=>({...i,read_at:reads.get(i.id)||null}))};break;}
+        case '/api/library':result=libraryState();break;
+        case '/api/suggest':result={suggestions:suggestions(params.id)};break;
+        case '/api/insights':result=store.insights({id:params.id});break;
+        case '/api/tokens':result={tokens:library.tokens()};break;
         case '/api/runs':result={runs:store.runs()};break;
         case '/api/log':result=params.kind==='scheduler'?{log:store.tail(join(home,'scheduler','latest-run.log'))}:params.kind==='console'?{log:store.tail(join(home,'console','latest-action.log'))}:store.runDetail(params.id);break;
         default:throw new HttpError(404,'接口不存在');
@@ -234,6 +314,14 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           if(code!==0)throw new HttpError(code===3?409:400,operation.error||'操作未完成，请查看控制台操作日志');
           result=kind==='discard'?{discarded:true}:{deleted:true};break;
         }
+        case '/api/read':result=library.setRead(data.id,data.read!==false);break;
+        case '/api/topic':result=library.saveTopic(data);break;
+        case '/api/topic-delete':result=library.deleteTopic(data.id);break;
+        case '/api/material':result=enrich([library.addMaterial(data)])[0];break;
+        case '/api/material-update':result=enrich([library.updateMaterial(data.id,data)])[0];break;
+        case '/api/material-delete':result=library.removeMaterial(data.id);break;
+        case '/api/token':result=library.createToken(data);break;
+        case '/api/token-revoke':result=library.revokeToken(data.id);break;
         case '/api/x-authorize':result=xAuthorize();break;
         case '/api/login':result=start(data.platform==='bilibili'?'bili-login':'login');break;
         case '/api/login-input':{

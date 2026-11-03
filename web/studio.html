@@ -3,10 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <meta name="dustoff-token" content="__CSRF_TOKEN__">
   <meta name="dustoff-server" content="__SERVER_MODE__">
   <meta name="dustoff-access" content="__ACCESS_CONTROL__">
-  <title>dustoff · 总览</title>
+  <title>今日 · dustoff</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="./studio.css">
   <link rel="stylesheet" href="./remote-login.css">
   <script type="module" src="./studio.mjs"></script>
@@ -14,29 +16,50 @@
 </head>
 <body>
   <div id="dustoff-studio">
-    <aside class="sidebar">
-      <a class="brand" href="#overview" aria-label="dustoff 总览"><span class="mark">d.</span>dustoff</a>
-      <nav aria-label="主导航">
-        <a href="#overview" data-nav="overview"><span data-icon="overview"></span>总览</a>
-        <a href="#notes" data-nav="notes"><span data-icon="book"></span>笔记<small id="notes-count"></small></a>
-        <a href="#videos" data-nav="videos"><span data-icon="video"></span>视频<small id="videos-count"></small></a>
-        <a href="#galleries" data-nav="galleries"><span data-icon="gallery"></span>图集<small id="galleries-count"></small></a>
-        <div class="nav-separator"></div>
-        <a href="#collection" data-nav="collection"><span data-icon="layers"></span>收藏记录<small id="collection-count"></small></a>
-        <a href="#pending" data-nav="pending"><span data-icon="pending"></span>待处理<small id="pending-count"></small></a>
-        <a href="#schedule" data-nav="run"><span data-icon="play"></span>运行<span id="running-dot"></span></a>
+    <aside class="side">
+      <a class="brand" href="#overview" aria-label="dustoff 今日">
+        <span class="wordmark"><span>dustoff</span><i></i><i></i><i></i></span>
+        <span class="env" id="env-label" title="本机开发环境，与生产不自动同步">dev</span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <div class="nav-group"><div class="nav-label">工作台</div>
+          <a href="#overview" data-nav="overview"><span data-icon="today"></span><span>今日</span></a>
+          <a href="#pending" data-nav="pending"><span data-icon="inbox"></span><span>收件箱</span><small class="count" id="count-pending"></small></a>
+        </div>
+        <div class="nav-group"><div class="nav-label">资料库</div>
+          <a href="#notes" data-nav="notes"><span data-icon="book"></span><span>知识库</span><small class="count" id="count-notes"></small></a>
+          <a href="#videos" data-nav="videos"><span data-icon="media"></span><span>媒体库</span><small class="count" id="count-media"></small></a>
+          <a href="#materials" data-nav="materials"><span data-icon="bookmark"></span><span>素材箱</span><small class="count" id="count-materials"></small></a>
+          <a href="#collection" data-nav="collection"><span data-icon="list"></span><span>收藏记录</span><small class="count" id="count-collection"></small></a>
+        </div>
+        <div class="nav-group"><div class="nav-label">系统</div>
+          <a href="#pipeline" data-nav="pipeline"><span data-icon="flow"></span><span>流水线</span><span class="running" id="running-dot" hidden></span></a>
+          <a href="#health" data-nav="health"><span data-icon="pulse"></span><span>健康</span><span class="attention" id="health-dot" hidden></span></a>
+        </div>
       </nav>
-      <div class="sidebar-bottom">
-        <a class="schedule-link" href="#schedule"><span class="dot"></span><span id="schedule-summary">正在读取自动安排…</span><span>›</span></a>
-        <a href="#account" data-nav="settings"><span data-icon="settings"></span>设置</a>
-        <small class="local-label"><span class="dot"></span>本机工作空间</small>
+      <div class="side-foot">
+        <a class="sched-card" href="#pipeline" id="schedule-card"><span class="row1"><span class="pulse off"></span><span>正在读取自动安排…</span></span></a>
+        <div class="side-tools" id="side-tools">
+          <a href="#settings" data-nav="settings"><span data-icon="settings"></span>设置</a>
+          <button type="button" data-action="theme" aria-label="切换明暗"><span data-icon="moon"></span>外观</button>
+        </div>
       </div>
     </aside>
     <div class="workspace">
-      <div id="notice" role="status" aria-live="polite" hidden></div>
+      <header class="topbar" id="topbar" hidden>
+        <div class="greet"><b id="greet-word">你好</b><span id="greet-date"></span></div>
+        <button type="button" class="search-trigger" data-action="palette"><span data-icon="search"></span>搜索笔记、收藏、作品 ID…<span class="kbd">⌘K</span></button>
+        <button type="button" class="btn primary" id="top-run" data-action="manual-run"><span data-icon="play"></span>运行一轮</button>
+      </header>
       <main id="main" aria-label="页面内容"><div class="empty">正在读取…</div></main>
     </div>
     <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+    <div class="palette" id="palette" role="dialog" aria-label="搜索" hidden>
+      <div class="palette-in"><span data-icon="search"></span><input id="palette-input" placeholder="搜索笔记、收藏、作品 ID，或输入页面名…" autocomplete="off" aria-label="搜索"><span class="kbd">esc</span></div>
+      <div class="palette-res" id="palette-results"></div>
+    </div>
+    <div class="scrim" id="scrim" hidden></div>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
   </div>
 </body>
 </html>

@@ -24,7 +24,11 @@ export const fmt = value => {
   return Number.isNaN(date.getTime())?'时间未知':date.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
 };
 export const bytes = value => value===null||value===undefined?'未知':value>=1024**3?`${(value/1024**3).toFixed(1)} GiB`:`${(value/1024**2).toFixed(1)} MiB`;
-export const duration = value => Number(value)>0?`${Math.floor(value/60)}:${String(Math.floor(value%60)).padStart(2,'0')}`:'时长未知';
+export const duration = value => {
+  const n=Number(value);if(!(n>0))return '时长未知';
+  const h=Math.floor(n/3600),m=Math.floor(n%3600/60),s=String(Math.floor(n%60)).padStart(2,'0');
+  return h?`${h}:${String(m).padStart(2,'0')}:${s}`:`${m}:${s}`;
+};
 export const titleOf = item => item.display_title||item.title||item.id;
 // 只拆出程序生成的转写附录；原始 TXT 和保存的 Markdown 都不改写。
 export function splitNoteContent(source) {
@@ -57,4 +61,20 @@ export function runSummary(run) {
   if(Object.keys(r.pausedTypes||{}).length)return {label:'部分类型暂停',tone:'warn',detail:Object.entries(r.pausedTypes).map(([key,value])=>`${typeLabel(key)}：${value}`).join('；')};
   if(r.scanWarning)return {label:'扫描受阻，已继续待办',tone:'warn',detail:r.scanWarning};
   return {label:r.mode==='baseline'?'已建立历史基线':'已完成',tone:'green',detail:r.mode==='baseline'?'首次运行建立参照，历史收藏不会自动进入处理队列。':''};
+}
+/** 原作品链接，与 scripts/platforms.mjs 的 sourceUrl 一致；服务器模式也能直接在浏览器打开。 */
+export function sourceLink(item) {
+  const id=String(item?.id||''),platform=item?.platform||(/^BV/.test(id)?'bilibili':/^x\d/.test(id)?'x':'douyin');
+  if(platform==='bilibili')return `https://www.bilibili.com/video/${encodeURIComponent(id)}`;
+  if(platform==='x')return `https://x.com/i/status/${encodeURIComponent(id.slice(1))}`;
+  return `https://www.douyin.com/${item?.media_type==='gallery'?'note':'video'}/${encodeURIComponent(id)}`;
+}
+/** 账本 decay 档位：none / slow 视为常青，fast / event 有时效。 */
+export const evergreen = decay => decay==='none'||decay==='slow';
+export const decayLabel = decay => decay?(evergreen(decay)?'常青':'时效性'):'';
+/** X 原帖的整理状态：有笔记哈希才算整理成笔记，否则只存了原帖。 */
+export function postState(item) {
+  if(item?.prompt_hash)return {label:'已整理成笔记',tone:'green'};
+  if(item?.note_path)return {label:'只存原帖',tone:''};
+  return {label:item?.status==='failed'?'处理失败':'排队整理',tone:item?.status==='failed'?'danger':'blue'};
 }

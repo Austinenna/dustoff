@@ -14,6 +14,7 @@ import { processingActions } from './item-actions.mjs';
 import { localPath, under, atomicWrite, readPolicy, treeBytes } from './policy.mjs';
 import { PLATFORMS, platformOfId, validItemId } from './platforms.mjs';
 import { intentsById } from './intent-store.mjs';
+import { readHistory, codeVersion } from './run-history.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const savedVideoWhere = conversion => `COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (processing_mode='video' OR (processing_mode IS NULL AND status='saved') OR (${conversion}=1 AND processing_mode='note'))`;
@@ -152,6 +153,7 @@ export function createStore(home = DUST_HOME) {
       if(params.platform&&params.platform!=='all'){if(!PLATFORMS[params.platform])throw new HttpError(400,'平台无效');where.push('platform=?');values.push(params.platform);}
       if(params.galleries==='1')where.push("media_type='gallery' AND status='saved' AND media_path IS NOT NULL AND COALESCE(media_deleted,0)=0");
       else if(params.videos==='1')where.push(savedVideoWhere(conversion));
+      else if(params.posts==='1')where.push("media_type='post'");
       else if(params.results==='1') {where.push("COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
       else if(status==='baseline')where.push("skip_reason='baseline'");
       else if(status!=='all'){if(!['pending','downloaded','transcribed','extracted','saved','review','failed','skipped','removed'].includes(status))throw new HttpError(400,'状态无效');where.push('status=?');values.push(status);}
@@ -159,27 +161,97 @@ export function createStore(home = DUST_HOME) {
       const clause=where.join(' AND '),total=db.prepare(`SELECT count(*) n FROM items WHERE ${clause}`).get(...values).n,pages=Math.max(1,Math.ceil(total/size)),actual=Math.min(page,pages);
       const order=params.videos==='1'||params.galleries==='1'?'COALESCE(updated_at,collected_at,first_seen)':'COALESCE(extracted_at,transcribed_at,collected_at,first_seen)';
       const imageCount=columns.has('image_count')?'image_count':'NULL AS image_count',videoQuality=columns.has('video_quality')?'video_quality':'NULL AS video_quality';
-      const rows=db.prepare(`SELECT id,platform,title,author,status,media_type,${imageCount},${videoQuality},${conversion} AS delete_after_note,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr,retain_media FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
+      const rows=db.prepare(`SELECT id,platform,title,author,status,media_type,${imageCount},${videoQuality},${conversion} AS delete_after_note,skip_reason,duration_s,category,attempts,last_error,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,updated_at,processing_mode,routing_reason,routing_source,media_path,media_deleted,media_quality,needs_ocr,retain_media,decay,prompt_hash,routed_at,downloaded_at,saved_at FROM items WHERE ${clause} ORDER BY ${order} DESC,id DESC LIMIT ? OFFSET ?`).all(...values,size,(actual-1)*size);
       const previews=readPreviews(home);
       const inScope=has(db,'daily_queue')?db.prepare('SELECT 1 FROM daily_queue WHERE id=?'):null;
       const intents=intentsById(home);
-      return {items:rows.map(r=>({...r,...processingActions(r,!!inScope?.get(r.id)),pending_intents:intents.get(r.id)||null,routing_preview:previewFor(r,previews),display_title:displayTitle(r),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
+      return {items:rows.map(r=>({...r,...processingActions(r,!!inScope?.get(r.id)),pending_intents:intents.get(r.id)||null,routing_preview:previewFor(r,previews),display_title:displayTitle(r),...(params.posts==='1'?{gist:noteMeta(r).gist}:{}),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
     },{items:[],total:0,page:1,pages:1,size});
   }
-  function displayTitle(row) {
-    // 只读当前页笔记的开头，避免长正文和长视频文案撑满作品列表。
-    if(row.note_path&&extname(row.note_path)==='.md') {
-      let fd;
-      try {
-        fd=openSync(localPath(row.note_path),'r');
-        const buffer=Buffer.alloc(8192),count=readSync(fd,buffer,0,buffer.length,0);
-        const header=buffer.subarray(0,count).toString('utf8').match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
-        const value=header?.match(/^标题:\s*(.+)$/m)?.[1]?.trim();
-        if(value){const title=value.startsWith('"')?JSON.parse(value):value;if(typeof title==='string'&&title.trim())return title.trim();}
-      } catch { /* 文件缺失或用户改过元信息时，仍展示账本中的标题。 */ }
-      finally {if(fd!==undefined)closeSync(fd);}
+  // 笔记开头的元信息与摘要按路径和修改时间缓存；只读文件前 8 KiB，避免长正文撑大列表。
+  const metaCache=new Map();
+  function noteMeta(row) {
+    const empty={title:row.title||row.id,tags:[],gist:''};
+    if(!row.note_path||extname(row.note_path)!=='.md')return empty;
+    let fd;
+    try {
+      const path=localPath(row.note_path),mtime=statSync(path).mtimeMs,key=path,hit=metaCache.get(key);
+      if(hit&&hit.mtime===mtime)return {...hit.meta,title:hit.meta.title||empty.title};
+      fd=openSync(path,'r');
+      const buffer=Buffer.alloc(8192),count=readSync(fd,buffer,0,buffer.length,0);
+      const text=buffer.subarray(0,count).toString('utf8').replace(/\uFFFD+$/,'');
+      const match=text.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/),header=match?.[1]||'';
+      const field=name=>{const value=header.match(new RegExp('^'+name+':\\s*(.+)$','m'))?.[1]?.trim();if(!value)return null;try{return value.startsWith('"')||value.startsWith('[')?JSON.parse(value):value;}catch{return value;}};
+      const title=typeof field('标题')==='string'?field('标题').trim():'';
+      const tags=Array.isArray(field('标签'))?field('标签').filter(t=>typeof t==='string').map(t=>t.trim()).filter(Boolean).slice(0,12):[];
+      const body=(match?text.slice(match[0].length):text).split(/\r?\n/);
+      // 摘要取正文第一段文字：跳过标题、引用标记和列表符号，去掉加粗等标记。
+      const gist=(body.find(line=>line.trim()&&!/^\s*(#|---|\||!\[|```)/.test(line)&&!line.includes('⚠️'))||'').replace(/^\s*(?:>|[-*+]|\d+[.)])\s*/,'').replace(/\*\*|__|`/g,'').replace(/\[([^\]]+)\]\([^)]*\)/g,'$1').trim().slice(0,180);
+      const meta={title,tags,gist};
+      if(metaCache.size>5000)metaCache.clear();
+      metaCache.set(key,{mtime,meta});
+      return {...meta,title:title||empty.title};
+    } catch { return empty; } // 文件缺失或用户改过元信息时，仍展示账本中的标题。
+    finally {if(fd!==undefined)closeSync(fd);}
+  }
+  function displayTitle(row) { return noteMeta(row).title; }
+  // 知识库索引：全部笔记与文字稿的轻量信息，供浏览器按主题、标签、状态筛选。
+  function notesIndex() {
+    return readDb(db=>{
+      if(!has(db,'items'))return {items:[]};
+      const rows=db.prepare("SELECT id,platform,title,author,media_type,duration_s,category,decay,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,prompt_hash FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!='')) ORDER BY COALESCE(extracted_at,transcribed_at,collected_at,first_seen) DESC,id DESC LIMIT 5000").all();
+      return {items:rows.map(r=>{const m=noteMeta(r);return {id:r.id,platform:r.platform,title:m.title,author:r.author,media_type:r.media_type,duration_s:r.duration_s,category:r.category,decay:r.decay,tags:m.tags,gist:m.gist,has_note:!!r.note_path,has_text:!!r.text_path,archive_only:r.media_type==='post'&&!r.prompt_hash,at:r.extracted_at||r.transcribed_at||r.collected_at||r.first_seen,collected_at:r.collected_at||r.first_seen};})};
+    },{items:[]});
+  }
+  // 一批作品的摘要（素材箱、对外接口用），只读必要字段。
+  function summaries(ids) {
+    const list=[...new Set(ids.filter(validItemId))];if(!list.length)return new Map();
+    return readDb(db=>{
+      if(!has(db,'items'))return new Map();
+      const out=new Map();
+      for(let n=0;n<list.length;n+=200){
+        const part=list.slice(n,n+200);
+        for(const r of db.prepare(`SELECT id,platform,title,author,media_type,duration_s,category,decay,status,note_path,text_path,media_path,media_deleted,image_count,collected_at,first_seen,prompt_hash FROM items WHERE id IN (${part.map(()=>'?').join(',')})`).all(...part)){
+          const m=noteMeta(r);
+          out.set(r.id,{id:r.id,platform:r.platform,title:m.title,author:r.author,media_type:r.media_type||'video',duration_s:r.duration_s,category:r.category,decay:r.decay,status:r.status,tags:m.tags,gist:m.gist,has_note:!!r.note_path,has_media:!!r.media_path&&!r.media_deleted,image_count:r.image_count,collected_at:r.collected_at||r.first_seen,archive_only:r.media_type==='post'&&!r.prompt_hash});
+        }
+      }
+      return out;
+    },new Map());
+  }
+  // 选题建议用到的作品特征：分类来自账本，标签来自笔记开头。
+  function itemMeta(id) {
+    if(!validItemId(id))return null;
+    return readDb(db=>{if(!has(db,'items'))return null;const r=db.prepare('SELECT id,title,category,note_path FROM items WHERE platform=? AND id=?').get(platformOfId(id),String(id));return r?{category:r.category,tags:noteMeta(r).tags}:null;},null);
+  }
+  // 健康页：运行历史（runs/history.jsonl）与账本产出的汇总；不改变任何数据。
+  function insights({id}={}) {
+    const history=readHistory(home),recent=history.slice(-30);
+    const codes={0:0,1:0,2:0,5:0};for(const r of recent)codes[r.exit]=(codes[r.exit]||0)+1;
+    const seconds=recent.map(r=>r.seconds).filter(Number.isFinite);
+    const longest=recent.reduce((a,r)=>!a||r.seconds>a.seconds?r:a,null);
+    const weekAgo=Date.now()-7*86400_000,groups=new Map();
+    for(const r of history)if(Date.parse(r.started)>=weekAgo)for(const f of r.failures||[]){
+      // 同类错误归为一组：去掉作品 ID、数字和引号内的具体内容。
+      const key=String(f.error||'处理失败').replace(/\d{6,}/g,'').replace(/[“"'][^“"']*[”"']/g,'').replace(/\d+/g,'N').slice(0,60).trim()||'处理失败';
+      const g=groups.get(key)||{reason:redact(String(f.error||'处理失败').slice(0,160)),ids:new Set(),platforms:new Set(),count:0};
+      g.count++;if(f.id)g.ids.add(f.id);if(f.platform)g.platforms.add(f.platform);groups.set(key,g);
     }
-    return row.title||row.id;
+    const failures=[...groups.values()].map(g=>({reason:g.reason,items:g.ids.size,count:g.count,platforms:[...g.platforms],sample:[...g.ids].slice(0,3)})).sort((a,b)=>b.items-a.items||b.count-a.count).slice(0,8);
+    const days=[];const today=new Date();today.setHours(0,0,0,0);
+    for(let n=13;n>=0;n--){const d=new Date(today);d.setDate(d.getDate()-n);days.push({day:d.toLocaleDateString('sv-SE'),start:d.getTime()/1000});}
+    const output=readDb(db=>{
+      if(!has(db,'items'))return days.map(d=>({day:d.day,notes:0,saved:0}));
+      const notes=db.prepare("SELECT count(*) n FROM items WHERE extracted_at>=? AND extracted_at<? AND note_path IS NOT NULL"),saved=db.prepare("SELECT count(*) n FROM items WHERE saved_at>=? AND saved_at<?");
+      return days.map(d=>({day:d.day,notes:notes.get(d.start,d.start+86400).n,saved:saved.get(d.start,d.start+86400).n}));
+    },days.map(d=>({day:d.day,notes:0,saved:0})));
+    let lookup=null;
+    if(id){
+      if(!validItemId(id))throw new HttpError(400,'作品 ID 不正确');
+      let current=null;try{current=item(id);}catch{}
+      lookup={id,item:current&&{title:current.display_title,status:current.status,last_error:current.last_error,platform:current.platform},runs:history.filter(r=>r.failures?.some(f=>f.id===id)).slice(-20).reverse().map(r=>({run:r.run,started:r.started,version:r.version,exit:r.exit,errors:r.failures.filter(f=>f.id===id).map(f=>redact(String(f.error||'')))}))};
+    }
+    return {version:codeVersion(),total:history.length,recent:recent.map(r=>({run:r.run,started:r.started,exit:r.exit,seconds:r.seconds})),codes,avgSeconds:seconds.length?Math.round(seconds.reduce((a,b)=>a+b,0)/seconds.length):null,longest:longest&&{started:longest.started,seconds:longest.seconds},failures,output,lookup};
   }
   function pendingItems() {
     // 与 daily.mjs 的队列筛选、顺序相同；metadata 含下载信息，不发送给浏览器。
@@ -229,6 +301,7 @@ export function createStore(home = DUST_HOME) {
         out.platforms=Object.fromEntries(db.prepare("SELECT platform,count(*) n FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' GROUP BY platform").all().map(r=>[r.platform,r.n]));}
       const queuePlatform=has(db,'daily_queue')&&db.prepare('PRAGMA table_info(daily_queue)').all().some(c=>c.name==='platform')?'q.platform':"'douyin'";
       if(has(db,'daily_queue')&&has(db,'items'))out.pending=db.prepare(`SELECT count(*) n FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform=${queuePlatform} WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3`).get().n;
+      if(has(db,'items'))out.todayNew=Object.fromEntries(db.prepare("SELECT platform,count(*) n FROM items WHERE first_seen>=? AND COALESCE(skip_reason,'') NOT IN ('baseline','user_deleted') GROUP BY platform").all(midnight).map(r=>[r.platform,r.n]));
       if(has(db,'daily_usage')){out.usedToday=db.prepare('SELECT count(*) n FROM daily_usage WHERE day=?').get(day).n;
         if(db.prepare('PRAGMA table_info(daily_usage)').all().some(c=>c.name==='platform'))out.usedByPlatform=Object.fromEntries(db.prepare('SELECT platform,count(*) n FROM daily_usage WHERE day=? GROUP BY platform').all(day).map(r=>[r.platform,r.n]));}
       if(has(db,'daily_state')){const r=db.prepare("SELECT value FROM daily_state WHERE name='baseline:bilibili'").get();if(r)out.biliState=JSON.parse(r.value);}
@@ -261,5 +334,5 @@ export function createStore(home = DUST_HOME) {
     delete totals.biliState;delete totals.xState;
     return {...totals,bilibili,x,day,policy:p,lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:notes.items,recentVideos:videos.items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
   }
-  return {home,settings,saveSettings,overview,listItems,pendingItems,item,document,fileFor,gallery,galleryFile,runs,runDetail,tail,redact,cfg,policy};
+  return {home,settings,saveSettings,overview,listItems,pendingItems,notesIndex,itemMeta,summaries,insights,item,document,fileFor,gallery,galleryFile,runs,runDetail,tail,redact,cfg,policy};
 }
