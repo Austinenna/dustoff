@@ -608,11 +608,12 @@ if (isMain) {
   } else if (cmd === 'requeue') {
     if (!a1 || !validItemId(a1)) { console.error('请指定一个启用范围内的作品 ID，不再支持批量重置状态'); process.exitCode=2; }
     else {
-      const { retryItem } = await import('./daily.mjs');
-      const { createStage } = await import('./stage.mjs');
-      const lock = createStage({name:'ledger',dustHome:DUST_HOME,notify:false,record:false});
-      lock.acquireLock();
-      try { console.log(`恢复到 ${retryItem(a1)} 阶段`); } finally { lock.releaseLock(); }
+      // 不能在这里顶层 await：daily.mjs 又静态引用本模块，本模块未执行完时它会一直等，进程卡死后退出（退出码 13）。
+      Promise.all([import('./daily.mjs'), import('./stage.mjs')]).then(([{ retryItem }, { createStage }]) => {
+        const lock = createStage({name:'ledger',dustHome:DUST_HOME,notify:false,record:false});
+        lock.acquireLock();
+        try { console.log(`恢复到 ${retryItem(a1)} 阶段`); } finally { lock.releaseLock(); }
+      }).catch(e => { console.error(e.message); process.exitCode = 1; });
     }
   } else {
     console.error('未知命令。可用: stats | list | show | import | sweep | reconcile | requeue | requeue-silent');

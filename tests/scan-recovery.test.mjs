@@ -124,3 +124,17 @@ test('定时服务把退出码 2、5 视为正常结束',async()=>{
   try{assert.match(createLinuxScheduler({home,command:()=>''}).render({time:'10:00',intervalHours:12}).service,/^SuccessExitStatus=2 5$/m);}
   finally{rmSync(home,{recursive:true,force:true});}
 });
+
+test('命令行 ledger.mjs requeue 能恢复失败条目，不因循环引用卡死',()=>isolated(`
+  import assert from 'node:assert/strict';
+  import {execFileSync,spawnSync} from 'node:child_process';
+  const {acceptScan,setPurpose}=await import('./scripts/daily.mjs');
+  const {db,markFailed}=await import('./scripts/ledger.mjs');
+  acceptScan({ok:true,logged_in:true,truncated:false,items:[{aweme_id:'100',duration_s:1}]});
+  acceptScan({ok:true,logged_in:true,truncated:false,items:[{aweme_id:'1',duration_s:1},{aweme_id:'100',duration_s:1}]});
+  setPurpose('1','video');for(let i=0;i<3;i++)markFailed('1','测试失败','douyin',3);
+  assert.equal(db().prepare("SELECT status FROM items WHERE id='1'").get().status,'failed');
+  const r=spawnSync(process.execPath,['scripts/ledger.mjs','requeue','1'],{encoding:'utf8',env:process.env,timeout:20000});
+  assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/恢复到 pending 阶段/);
+  const row=db().prepare("SELECT status,attempts FROM items WHERE id='1'").get();assert.equal(row.status,'pending');assert.equal(row.attempts,0);
+`));
