@@ -10,19 +10,27 @@
 //     play_urls:[最低码率档], play_urls_hq:[原 play_addr], gear, size_bytes,
 //     url_expires_at, cover }
 // 失败时 stderr 打印 "ERROR: ..." 且退出码非 0。
+//   作品已失效（删除/不可见）：stdout 输出 { ok:false, unavailable:true, message }，退出码 0。
+//   详情接口返回空内容（被风控拦截）：退出码 7，调用方本轮暂停抖音、不计这条的失败次数。
 //
 // 说明: play_urls 内含签名且有时效（约数小时），拿到后应尽快下载，不要隔天复用。
+// 使用扫描收藏的同一份登录资料：不带登录的临时浏览器会被风控拦下（详情接口返回空内容）。
+// 调用方持有流水线锁，与扫描、扫码登录串行，不会同时占用这份资料。
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requestSignal, localPath } from './policy.mjs';
+import { DUST_HOME, makeCfg } from './config.mjs';
 import { galleryImages, videoOptions, pickGear, isGallery, expiryOf } from './lib.mjs';
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const CHROME = process.env.DUST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PORT = Number(process.env.DUST_CDP_PORT || 9333);
+const LOGIN_PROFILE = localPath(makeCfg()('DUST_PROFILE', join(DUST_HOME, 'chrome-profile')));
+const BLOCKED_EXIT = 7;
+class Blocked extends Error {}
 
 const input = process.argv[2];
 if (!input) { console.error('usage: node get_meta.mjs <douyin url>'); process.exit(2); }
@@ -77,10 +85,11 @@ function cdp(ws) {
   return { send, on: fn => listeners.push(fn) };
 }
 
-let chrome, profile;
+let chrome, profile, tempProfile = false;
 const cleanup = () => {
   try { chrome && chrome.kill('SIGKILL'); } catch {}
-  try { profile && rmSync(profile, { recursive: true, force: true }); } catch {}
+  // 只删自己建的临时资料，登录资料保留。
+  try { tempProfile && profile && rmSync(profile, { recursive: true, force: true }); } catch {}
 };
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
@@ -105,7 +114,8 @@ function emit(obj, code = 0, done = null) {
 (async () => {
   const videoUrl = await resolveVideoUrl(input);
 
-  profile = mkdtempSync(join(tmpdir(), 'dy-cdp-'));
+  if (existsSync(LOGIN_PROFILE)) profile = LOGIN_PROFILE;
+  else { profile = mkdtempSync(join(tmpdir(), 'dy-cdp-')); tempProfile = true; console.error('提示：未找到登录资料，用临时浏览器读取，可能被风控拦截'); }
   chrome = spawn(CHROME, [
     '--headless=new', `--remote-debugging-port=${PORT}`,
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
@@ -121,11 +131,11 @@ function emit(obj, code = 0, done = null) {
   await send('Network.enable', {}, sessionId);
   await send('Page.enable', {}, sessionId);
 
-  let detailReqId = null;
+  let detailReqId = null, detailStatus = null;
   on(m => {
     if (m.method === 'Network.responseReceived' &&
         m.params.response.url.includes('aweme/v1/web/aweme/detail')) {
-      detailReqId = m.params.requestId;
+      detailReqId = m.params.requestId; detailStatus = m.params.response.status;
     }
   });
 
@@ -141,11 +151,18 @@ function emit(obj, code = 0, done = null) {
       } catch {}
     }
   }
-  if (!body) throw new Error('未截获 aweme/detail 响应（视频可能已删除/私密，或页面结构变化）');
+  // 有详情请求却始终拿不到内容：被风控拦下（实测不带登录时 HTTP 200、内容为空）。
+  if (!body) throw detailReqId ? new Blocked(`详情接口返回空内容（HTTP ${detailStatus}），疑似被风控拦截`) : new Blocked('页面没有发出详情请求，疑似被风控拦截或页面结构变化');
 
-  const j = JSON.parse(body);
+  let j;
+  try { j = JSON.parse(body); } catch { throw new Error('详情接口返回的不是 JSON'); }
   const a = j.aweme_detail;
-  if (!a) throw new Error('响应内无 aweme_detail');
+  // 作品被删除或设为不可见时，接口正常返回但没有作品内容，附带过滤说明。
+  if (!a || a.status?.is_delete) {
+    const reason = j.filter_detail?.detail_msg || j.filter_detail?.filter_reason || j.status_msg || (a?.status?.is_delete ? '作品已删除' : '接口未返回作品内容');
+    emit({ ok: false, unavailable: true, message: String(reason).slice(0, 200), status_code: j.status_code ?? null }, 0, () => { ws.close(); cleanup(); });
+    return;
+  }
   const v = a.video || {};
   // 只要内容不要原件，所以默认给最低码率档（实测 0.73MB vs play_addr 2.39MB）。
   // play_urls_hq 保留原来的 play_addr，需要高清时可以用。
@@ -177,4 +194,4 @@ function emit(obj, code = 0, done = null) {
     source_url: videoUrl,
   };
   emit(out, 0, () => { ws.close(); cleanup(); });
-})().catch(e => { console.error('ERROR:', e.message); cleanup(); process.exit(1); });
+})().catch(e => { console.error('ERROR:', e.message); cleanup(); process.exit(e instanceof Blocked ? BLOCKED_EXIT : 1); });

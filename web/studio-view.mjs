@@ -11,7 +11,7 @@ export function intentLabel(list) {
   const parts = list.map(i => i.action === 'discard' ? '放弃处理' : i.action === 'purpose' ? ({note:'知识笔记',video:'视频',review:'待确认'})[i.value] || i.value : `画质 ${QUALITY_LABELS[i.value] || '默认'}`);
   return `已记下：${parts.join(' · ')}，本轮结束后生效`;
 }
-export const REASONS = {too_long_for_asr:'没有字幕且超过转写时长上限',video_deleted:'已手动删除视频',user_discarded:'已放弃处理',user_deleted:'已删除记录',baseline:'历史基线，不自动处理',gallery:'图集将在下次运行恢复处理',too_long:'超过时长限制',insufficient_text:'文字材料不足，原稿和素材保留',need_ocr:'旧记录：文字材料不足',no_url:'缺少下载地址'};
+export const REASONS = {too_long_for_asr:'没有字幕且超过转写时长上限',video_deleted:'已手动删除视频',user_discarded:'已放弃处理',user_deleted:'已删除记录',baseline:'历史基线，不自动处理',gallery:'图集将在下次运行恢复处理',too_long:'超过时长限制',insufficient_text:'文字材料不足，原稿和素材保留',need_ocr:'旧记录：文字材料不足',no_url:'缺少下载地址',unavailable:'作品已失效（删除或不可见）'};
 export const SETTINGS = {
   account:['DUST_WARN_DAYS','DUST_BILI_ENABLED','DUST_BILI_START_DATE','DUST_BILI_FOLDERS','DUST_BILI_EXCLUDE_FOLDERS','DUST_BILI_FOLDER_PURPOSES','DUST_BILI_SUBTITLE_AI','DUST_BILI_AUTO_ROUTE','DUST_BILI_MAX_QUALITY'],
   models:['DUST_ROUTER_BASE','DUST_ROUTER_MODEL','DUST_ROUTER_KEY','DUST_ASR_BASE','DUST_ASR_MODEL','DUST_ASR_KEY','DUST_LLM_BASE','DUST_LLM_MODEL','DUST_LLM_KEY','DUST_LLM_EFFORT','DUST_LLM_MAX_TOKENS','DUST_ASR_CONTEXT','DUST_REQUEST_TIMEOUT_S','DUST_DASHSCOPE_KEY'],

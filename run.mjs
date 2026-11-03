@@ -20,25 +20,34 @@ import { classifyItem, PURPOSES } from './scripts/routing.mjs';
 import { downloadGallery } from './scripts/gallery.mjs';
 import { downloadOne } from './scripts/download.mjs';
 import { cleanConvertedVideos } from './scripts/video-to-note.mjs';
+import { appendHistory, codeVersion } from './scripts/run-history.mjs';
 const scripts = join(dirname(fileURLToPath(import.meta.url)), 'scripts');
 const fresh = id => itemRow(id);
 // 抖音沿用原来的用途键（note / video …），其他平台加前缀，暂停和熔断互不影响。
 const typeKey = (platform, kind) => platform === 'douyin' ? kind : `${platform}:${kind}`;
 const typeLabel = key => { const [p, k] = key.includes(':') ? key.split(':') : ['douyin', key]; return `${p === 'douyin' ? '' : platformInfo(p).label}${PURPOSES[k]?.label || '用途判断'}`; };
+/** 子脚本失败 → 错误。退出码 7 表示被抖音风控拦截：只暂停抖音本轮，不计这条作品的失败次数。 */
+export function childError(name, code, lastError = '', timedOut = false) {
+  if (!timedOut && code === 7) return Object.assign(new PauseError(`抖音读取被风控拦截：${lastError || '详情接口返回空内容'}，本轮暂停抖音，下轮重试`), { scope: 'platform', platform: 'douyin' });
+  const e = new Error(timedOut ? `${name} 读取超时` : `${name} 失败（退出码 ${code}）${lastError ? `：${lastError}` : ''}`);
+  e.code = code === 4 ? 4 : 1;
+  return e;
+}
 async function script(name, args, env, log) {
   return new Promise((resolve, reject) => {
     const timeout = deadlineMs(name === 'get_collection.mjs' ? 15 * 60_000 : 90_000);
     const p = spawn(process.execPath, [join(scripts, name), ...args], { env: { ...process.env, ...env }, stdio: ['ignore','pipe','pipe'] });
-    let out = '', timedOut = false;
+    let out = '', timedOut = false, lastError = '';
     const timer = setTimeout(() => { timedOut = true; p.kill('SIGTERM'); }, timeout);
     const stop = () => p.kill('SIGTERM');
     process.once('exit', stop);
     p.stdout.on('data', d => { out += d; });
-    p.stderr.on('data', d => log(String(d).trim()));
+    // 子脚本把原因写在 stderr 的 "ERROR: …" 行；带进错误信息，失败记录里就能直接看到原因。
+    p.stderr.on('data', d => { const text = String(d).trim(); log(text); const m = text.match(/ERROR:\s*(.+)/); if (m) lastError = m[1].slice(0, 200); });
     p.on('error', e => { clearTimeout(timer); process.removeListener('exit',stop); reject(e); });
     p.on('close', code => {
       clearTimeout(timer); process.removeListener('exit',stop);
-      if (timedOut || code !== 0) { const e = new Error(timedOut ? '浏览器读取超时' : `元数据脚本失败，退出码 ${code}`); e.code = code === 4 ? 4 : 1; reject(e); return; }
+      if (timedOut || code !== 0) { reject(childError(name, code, lastError, timedOut)); return; }
       try { resolve(JSON.parse(out)); } catch { reject(new Error('元数据输出不完整')); }
     });
   });
@@ -54,6 +63,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
   const scanCount = Number(value('--scan') ?? POLICY.scan);
   if (!Number.isInteger(limit) || limit < 1 || limit > 50 || !Number.isInteger(scanCount) || scanCount < 1 || scanCount > 100) throw new Error('--limit 必须为 1–50，--scan 必须为 1–100');
   process.env.DUST_DEADLINE_MS = String(Date.now() + POLICY.runMs);
+  const startedAt = Date.now();
   const stage = createStage({ name: 'run', dustHome: DUST_HOME, notify: makeCfg()('DUST_NOTIFY','1') !== '0', keepRuns: Number(makeCfg()('DUST_KEEP_RUNS',30)), record: !dry });
   const { log } = stage;
   stage.acquireLock();
@@ -77,6 +87,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       log(`恢复 ${value('--retry')} 到 ${retryItem(value('--retry'))} 阶段`);
     }
     if (has('--status')) { console.log(JSON.stringify({ baseline: old, pending: pendingQueue().length, usedToday: usage(), usedTodayByPlatform: { douyin: usage(undefined, 'douyin'), bilibili: usage(undefined, 'bilibili'), x: usage(undefined, 'x') }, policy: POLICY }, null, 2)); return summary; }
+    log(`版本 ${codeVersion()} · 进程 ${process.pid}`);
     log(`日常限制：${POLICY.daily} 条/日，${POLICY.seconds} 秒，${POLICY.bytes / 1024 ** 3} GiB 媒体，至少 ${POLICY.free / 1024 ** 3} GiB 空闲；外接盘停用`);
     if (POLICY.x.enabled) log(`X 限制：${POLICY.x.daily} 条/日（全部平台合计 ${POLICY.totalDaily} 条），正文 ${POLICY.x.noteChars} 字以上另出笔记，视频转写单条 ${POLICY.x.asrSeconds / 60} 分钟`);
     if (POLICY.bilibili.enabled) log(`B站限制：${POLICY.bilibili.daily} 条/日（全部平台合计 ${POLICY.totalDaily} 条），单条 ${POLICY.bilibili.seconds / 60} 分钟，无字幕转写单条 ${POLICY.bilibili.asrSeconds / 60} 分钟、每日 ${POLICY.bilibili.dailyAsrSeconds / 60} 分钟`);
@@ -208,6 +219,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
           if (row.status === 'pending') {
             if (!item.fetched_at || Date.now()/1000-item.fetched_at > 1800 || !item.images?.length || item.images.some(image=>!image.urls?.length)) {
               const meta = await runScript('get_meta.mjs', [`https://www.douyin.com/note/${id}`], {}, log);
+              if (meta.unavailable) { markSkipped(id, 'unavailable'); summary.skipped++; log(`作品已失效 ${id}：${meta.message}`); continue; }
               if (!meta.ok || String(meta.aweme_id) !== id || !meta.is_gallery) throw new Error('刷新图集元数据失败或作品不匹配');
               item = {...meta,fetched_at:Math.floor(Date.now()/1000)};
               importScan([item]);
@@ -221,6 +233,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
           // 排队地址跨天会失效；即使扫描停在更靠前的边界，也能按 ID 单独刷新。
           if (!item.fetched_at || Date.now()/1000 - item.fetched_at > 1800 || mediaDecision(item) === 'unknown_duration' || !item.play_urls?.length || (PURPOSES[row.processing_mode]?.quality === 'high' && !item.video_options?.high)) {
             const meta = await runScript('get_meta.mjs', [`https://www.douyin.com/video/${id}`], {}, log);
+            if (meta.unavailable) { markSkipped(id, 'unavailable'); summary.skipped++; log(`作品已失效 ${id}：${meta.message}`); continue; }
             if (!meta.ok || String(meta.aweme_id) !== id) throw new Error('刷新元数据失败或作品 ID 不匹配');
             item = { ...meta, fetched_at: Math.floor(Date.now()/1000) };
             importScan([item]);
@@ -266,7 +279,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
         }
         if (e.code === 4 && platform !== 'douyin') { summary.pausedPlatforms[platform] = e.message; log(`${e.message}；继续其他平台`); continue; }
         markFailed(id, e.message, platform, 3);
-        summary.failures.push({ id, error:e.message });
+        summary.failures.push({ id, platform, kind, error:e.message });
         log(`失败 ${id}：${e.message}`);
         consecutive[key] = (consecutive[key] || 0) + 1;
         if (consecutive[key] >= 3) {
@@ -305,10 +318,15 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       if (summary.scanWarning) stage.notify('dustoff 扫描未完成', `已继续处理已有待办；${summary.scanWarning}`);
       if (summary.review) stage.notify('dustoff 用途待确认', `${summary.review} 条收藏请在作品详情选择用途`);
       log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，保存图集 ${summary.galleries}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || (Object.keys(summary.pausedTypes).length ? '部分类型暂停，其他类型已继续' : summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
-      if (summary.failures.length) process.exitCode = 1;
-      else if (summary.paused && !summary.quotaPaused) process.exitCode = 5;
-      else if (Object.keys(summary.pausedTypes).length || Object.keys(summary.pausedPlatforms).length) process.exitCode = 5;
-      else if (summary.scanWarning) process.exitCode = 1;
+      // 退出码：整轮异常已在上方 catch 置为 1（或登录 4）；本轮跑完但有条目失败、扫描受阻记 2，
+      // 暂停记 5。定时服务把 2、5 视为正常结束，systemd 的 failed 只留给真正的异常。
+      if (!process.exitCode) {
+        if (summary.failures.length) process.exitCode = 2;
+        else if (summary.paused && !summary.quotaPaused) process.exitCode = 5;
+        else if (Object.keys(summary.pausedTypes).length || Object.keys(summary.pausedPlatforms).length) process.exitCode = 5;
+        else if (summary.scanWarning) process.exitCode = 2;
+      }
+      appendHistory(DUST_HOME, stage.runId, summary, process.exitCode || 0, startedAt);
     }
     } finally { stage.releaseLock(); }
   }

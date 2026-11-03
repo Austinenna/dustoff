@@ -48,7 +48,7 @@ test('正常运行遇到扫描缺页、边界不匹配或扫描进程错误，�
       assert.ok(result.scanWarning);assert.equal(result.paused,null);assert.deepEqual(result.failures,[]);assert.equal(result.saved,1);assert.equal(result.processed,1);assert.equal(refreshed,1);
       const row=db().prepare('SELECT * FROM items WHERE id=?').get(id);assert.equal(row.status,'saved');assert.equal(row.routing_source,'manual');assert.ok(existsSync(row.media_path));
       assert.deepEqual(baseline(),before);assert.equal(db().prepare("SELECT id FROM items WHERE id='999'").get(),undefined);assert.equal(pendingQueue().length,0);
-      assert.equal(process.exitCode,1);process.exitCode=0; // 扫描仍需提醒，下载成果已经成功。
+      assert.equal(process.exitCode,2);process.exitCode=0; // 扫描受阻记 2（运行记录里提醒），下载成果已经成功，不算服务失败。
     }
     assert.equal(downloads,3);
   }finally{await new Promise(r=>server.close(r));}
@@ -77,3 +77,50 @@ test('耗尽整轮时限不降级继续，仍保留待办',()=>isolated(`
   const result=await main([],{runScript:async()=>{throw new PauseError('本轮达到执行时间上限');}});
   assert.equal(result.scanWarning,null);assert.equal(result.processed,0);assert.equal(result.paused,'本轮达到执行时间上限');assert.equal(pendingQueue().length,1);process.exitCode=0;
 `));
+
+test('刷新元数据：作品已失效直接跳过不算失败；被风控拦截只暂停抖音、不计失败次数；运行历史记下原因',()=>isolated(`
+  import assert from 'node:assert/strict';
+  import {execFileSync} from 'node:child_process';
+  const {acceptScan,setPurpose}=await import('./scripts/daily.mjs');
+  const {db}=await import('./scripts/ledger.mjs');
+  const {main,childError}=await import('./run.mjs');
+  const {readHistory,codeVersion}=await import('./scripts/run-history.mjs');
+  const {PauseError}=await import('./scripts/policy.mjs');
+  const seed={aweme_id:'100',duration_s:1};
+  acceptScan({ok:true,logged_in:true,truncated:false,items:[seed]});
+  acceptScan({ok:true,logged_in:true,truncated:false,items:[{aweme_id:'1',desc:'已删除',duration_s:1},{aweme_id:'2',desc:'被拦截',duration_s:1},{aweme_id:'3',desc:'其他错误',duration_s:1},seed]});
+  for(const id of ['1','3'])setPurpose(id,'video');
+  setPurpose('2','review');
+  const empty=()=>({ok:true,logged_in:true,truncated:false,items:[seed]});
+  // 子脚本退出码映射：7 → 只暂停抖音；其他带上 ERROR 行里的原因。
+  const blocked=childError('get_meta.mjs',7,'详情接口返回空内容（HTTP 200）');
+  assert.ok(blocked instanceof PauseError);assert.equal(blocked.scope,'platform');assert.equal(blocked.platform,'douyin');
+  assert.equal(childError('get_meta.mjs',1,'页面结构变化').message,'get_meta.mjs 失败（退出码 1）：页面结构变化');
+  const result=await main([],{runScript:async(name,args)=>{
+    if(name==='get_collection.mjs')return empty();
+    const id=args[0].split('/').pop();
+    if(id==='1')return {ok:false,unavailable:true,message:'作品已删除'};
+    if(id==='3')throw childError('get_meta.mjs',1,'页面结构变化');
+    throw childError('get_meta.mjs',7,'详情接口返回空内容（HTTP 200）');
+  }});
+  const row=id=>db().prepare('SELECT * FROM items WHERE id=?').get(id);
+  assert.equal(row('1').status,'skipped');assert.equal(row('1').skip_reason,'unavailable');assert.equal(row('1').attempts,0);
+  assert.equal(result.failures.length,1);assert.equal(result.failures[0].id,'3');assert.equal(result.failures[0].platform,'douyin');assert.match(result.failures[0].error,/页面结构变化/);
+  assert.equal(row('3').attempts,1);assert.equal(process.exitCode,2);process.exitCode=0;
+  // 第二轮：被风控拦截 → 抖音本轮暂停，这条仍是待办且失败次数为 0。
+  setPurpose('2','video');
+  const second=await main([],{runScript:async(name)=>{if(name==='get_collection.mjs')return empty();throw childError('get_meta.mjs',7,'详情接口返回空内容（HTTP 200）');}});
+  assert.match(second.pausedPlatforms.douyin,/风控拦截/);assert.deepEqual(second.failures,[]);assert.equal(row('2').status,'pending');assert.equal(row('2').attempts,0);
+  assert.equal(process.exitCode,5);process.exitCode=0;
+  const h=readHistory();assert.equal(h.length,2);assert.equal(h[0].exit,2);assert.equal(h[0].version,codeVersion());
+  assert.equal(h[0].failures[0].id,'3');assert.equal(h[1].exit,5);assert.match(h[1].pausedPlatforms.douyin,/风控/);
+  const out=execFileSync(process.execPath,['scripts/run-history.mjs','--id','3'],{encoding:'utf8',env:process.env});
+  assert.match(out,/失败 3（douyin\\/video）：get_meta.mjs 失败（退出码 1）：页面结构变化/);
+`));
+
+test('定时服务把退出码 2、5 视为正常结束',async()=>{
+  const {createLinuxScheduler}=await import('../scripts/schedule-linux.mjs');
+  const home=realpathSync(mkdtempSync(join(tmpdir(),'dustoff-unit-')));
+  try{assert.match(createLinuxScheduler({home,command:()=>''}).render({time:'10:00',intervalHours:12}).service,/^SuccessExitStatus=2 5$/m);}
+  finally{rmSync(home,{recursive:true,force:true});}
+});

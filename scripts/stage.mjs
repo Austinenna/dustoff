@@ -1,6 +1,6 @@
 // dustoff / stage.mjs
 // 共享运行骨架：所有正式入口共用 pipeline 互斥锁，各自保存有限的运行记录。
-// 退出码：0 完成 / 1 失败 / 3 已有任务 / 4 登录失效 / 5 资源暂停 / 6 配置错误。
+// 退出码：0 完成 / 1 异常 / 2 跑完但有条目失败或扫描受阻 / 3 已有任务 / 4 登录失效 / 5 暂停 / 6 配置错误。
 
 import {
   mkdirSync, existsSync, readFileSync, writeFileSync,

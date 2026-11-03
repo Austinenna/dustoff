@@ -62,6 +62,18 @@ B站接口可用本机账号只读预览（不写账本、不推进扫描位置�
 node scripts/sources/bilibili/index.mjs --dry-run
 ```
 
+## 排查
+
+每轮运行的日志在数据目录的 `runs/<时间>-<进程>-run/run.log`（开头记有代码版本），结果在同目录 `result.json`。另有一份跨轮次的摘要 `runs/history.jsonl`（最近 2000 轮），记下版本、退出码、各项计数，以及每条失败的作品、平台、类型和原因：
+
+```sh
+node scripts/run-history.mjs              # 最近 20 轮
+node scripts/run-history.mjs --failures   # 只看有失败、暂停或扫描受阻的轮次
+node scripts/run-history.mjs --id <作品ID>  # 某条作品在哪几轮失败、原因
+```
+
+退出码：0 完成；1 整轮异常；2 跑完但有条目失败或扫描受阻；5 暂停（额度、空间、平台风控）。定时服务把 2、5 视为正常结束，systemd 显示 failed 只代表真正的异常。
+
 ## 文档与发布
 
 `docs/` 是本地私有文档目录，不纳入 Git；编辑器 `*.code-workspace` 也只留本机，程序不读取它。
