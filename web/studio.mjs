@@ -97,7 +97,7 @@ async function ensureLibrary(force=false){if(!state.library||force){state.librar
 function overviewPage(){return `<div class="page" id="today">${empty('正在读取…')}</div>`;}
 async function loadToday(){
   const epoch=pageEpoch;
-  const [index,insights,review,galleries]=await Promise.all([ensureIndex(true),api('insights'),api('items?'+query({status:'review',size:3})),api('items?'+query({galleries:1,size:3}))]);
+  const [index,insights,review,galleries]=await Promise.all([ensureIndex(true),api('insights'),api('items?'+query({status:'review',size:4})),api('items?'+query({galleries:1,size:3}))]);
   if(epoch!==pageEpoch)return;state.insights=insights;
   const o=state.overview,s=o.scheduler,p=o.policy,last=runSummary(o.lastRun),r=o.lastRun?.result||{};
   const weekAgo=Date.now()/1000-7*86400,notes=index.filter(n=>n.has_note&&!n.archive_only),weekNotes=notes.filter(n=>n.at>=weekAgo).length,unread=notes.filter(n=>!n.read_at);
@@ -107,6 +107,7 @@ async function loadToday(){
   const used=o.usedToday,total=p.totalDaily||p.daily,ratio=Math.min(1,used/Math.max(1,total)),C=2*Math.PI*22;
   const outputs=insights.output.map(d=>d.notes);
   const resurface=pickResurface(notes);
+  const warn=alerts();
   const recent=[...o.recentVideos,...galleries.items].sort((a,b)=>(b.updated_at||0)-(a.updated_at||0)).slice(0,6);
   $('#today').innerHTML=`
   <section class="hero">
@@ -130,16 +131,13 @@ async function loadToday(){
     <a class="stage" href="#pipeline"><span class="eyebrow"><b>3</b>排队整理</span><strong>${o.pending}</strong><small>保存视频 · 转写 · 整理</small><span class="lanes">${paused.map(([k])=>chip(`<span class="dot"></span>${esc(PLATFORM_LABELS[k]||k)}暂停中`,'amber')).join('')||(busy()?chip('<span class="dot"></span>正在运行','green'):'')}</span></a>
     <a class="stage" href="#notes"><span class="eyebrow"><b>4</b>变成知识</span><strong>${o.notes}</strong><small>笔记 · 本周 +${weekNotes}</small>${spark(outputs)}</a>
   </section>
+  ${warn.length?`<section class="card alert-strip">${warn.join('')}</section>`:''}
   <div class="cols">
     <div class="stack">
       <section><div class="sec-head"><h2>新到的知识</h2><span class="sub">最近整理完成</span><a class="more" href="#notes">全部 ${notes.length} 篇 ›</a></div>
         <div class="fresh">${notes.slice(0,4).map(n=>`<button type="button" class="card fresh-card" data-action="read" data-id="${esc(n.id)}"><span class="meta">${pf(n.platform,false)}${n.category?`<span style="color:${catColor(n.category)}">● ${esc(n.category)}</span>`:''}<span>· ${esc(fmt(n.at))}</span>${n.read_at?'':'<span class="unread" style="margin-left:auto" title="未读"></span>'}</span><h3>${esc(n.title)}</h3>${n.gist?`<p>${esc(n.gist)}</p>`:''}<span class="foot">${n.tags.slice(0,3).map(t=>chip('#'+esc(t),'outline')).join('')}</span></button>`).join('')||empty('整理完成的知识笔记会显示在这里')}</div></section>
     </div>
-    <div class="stack">
-      <section class="card card-pad"><div class="sec-head"><h2>等你决定</h2><span class="sub">${o.review} 条</span><a class="more" href="#pending">逐条处理 ›</a></div>${review.items.map(i=>`<div class="decide-row">${thumbOf(i)}<div class="t"><b>${esc(titleOf(i))}</b><small>${esc(PLATFORM_LABELS[i.platform]||'')} · ${esc(kindOf(i))}</small></div>${i.pending_intents?`<small>${esc(intentLabel(i.pending_intents)).slice(0,8)}</small>`:`<div class="mini-choice"><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="note">笔记</button><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="video">视频</button></div>`}</div>`).join('')||'<p class="muted" style="font-size:13px">暂时没有需要你决定的收藏。</p>'}</section>
-      <section class="card card-pad"><div class="sec-head"><h2>需要留意</h2></div>${alerts().join('')}</section>
-      <section class="card card-pad"><div class="sec-head"><h2>来源</h2><a class="more" href="#account">管理 ›</a></div>${sourceRows()}</section>
-    </div>
+    <section class="card card-pad decide-card"><div class="sec-head"><h2>等你决定</h2><span class="sub">${o.review} 条</span><a class="more" href="#pending">逐条处理 ›</a></div>${review.items.map(i=>`<div class="decide-row">${thumbOf(i)}<div class="t"><b>${esc(titleOf(i))}</b><small>${esc(PLATFORM_LABELS[i.platform]||'')} · ${esc(kindOf(i))}</small></div>${i.pending_intents?`<small>${esc(intentLabel(i.pending_intents)).slice(0,8)}</small>`:`<div class="mini-choice"><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="note">笔记</button><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="video">视频</button></div>`}</div>`).join('')||'<p class="muted" style="font-size:13px">暂时没有需要你决定的收藏。</p>'}</section>
   </div>
   <div class="stack today-rest">
       ${resurface?`<section class="card resurface"><div class="l"><span class="eyebrow" style="color:var(--accent)">重温 · ${esc(fmt(resurface.collected_at))} 收藏${resurface.read_at?'':' · 还没读过'}</span><h3>${esc(resurface.title)}</h3>${resurface.gist?`<blockquote>${esc(resurface.gist)}</blockquote>`:''}<div class="row">${button('继续读','read',`data-id="${esc(resurface.id)}"`,'sm')}${button('加入素材箱','add-material',`data-id="${esc(resurface.id)}" data-kind="note"`,'quiet sm')}${button('换一篇','resurface-next','','quiet sm')}</div></div>
@@ -196,14 +194,7 @@ function alerts(){
   if(o.failed)out.push(item('red','alert',`${o.failed} 条处理失败`,'查看原因，可以恢复为待办','#collection','data-action="failed-items"'));
   if(o.scheduler.error||o.scheduler.warning)out.push(item('amber','clock','自动安排需要处理',o.scheduler.error||o.scheduler.warning,'#schedule'));
   if(o.storage.available!=null&&o.storage.available<o.policy.free*1.5)out.push(item('amber','alert','磁盘空间偏低',`可用 ${bytes(o.storage.available)}`,'#storage'));
-  return out.length?out:[`<div class="alert green"><span class="ic">${ic('check',15)}</span><span><b>一切正常</b><small>登录、额度和上一轮运行都没有问题</small></span></div>`];
-}
-function sourceRows(){
-  const o=state.overview,label=s=>s.online==='verified'?['已连接','green']:s.online==='login_required'||s.level==='expired'?['需要登录','danger']:['未确认',''];
-  const rows=[['douyin',...label(o.session),remainingLabel(o.session)]];
-  rows.push(['bilibili',...(o.bilibili.enabled?label(o.bilibili.session):['未启用','']),o.bilibili.enabled?`今日 ${o.bilibili.usedToday}/${o.bilibili.daily}`:'开启后只收启用之后的新收藏']);
-  rows.push(['x',...(!o.x.enabled?['未启用','']:!o.x.connected?['未连接','warn']:o.x.online==='login_required'?['需要连接','danger']:['已连接','green']),o.x.username?'@'+o.x.username:'官方接口']);
-  return rows.map(([p,l,t,d])=>`<div class="source-row">${pf(p)}<small>${esc(d)}</small>${tag(l,t)}</div>`).join('');
+  return out;
 }
 function mediaCard(i,{big=false,uniform=false}={}){
   const badge=i.media_type==='gallery'?`${i.image_count||'多'} 张`:duration(i.duration_s);

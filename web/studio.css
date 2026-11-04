@@ -224,6 +224,12 @@ textarea{resize:vertical}
 .alert b{font-weight:500;font-size:13px;display:block}
 .alert small{display:block}
 .alert .go{margin-left:auto;color:var(--muted);align-self:center}
+/* 今日页：等你决定与左栏等高，空时提示居中 */
+.decide-card{display:flex;flex-direction:column}
+.decide-card>p.muted{margin:auto;text-align:center}
+/* 今日页：有问题时才出现的提醒条 */
+.alert-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0 24px;padding:6px 20px;margin-bottom:20px}
+.alert-strip .alert,.alert-strip .alert:first-of-type{border-top:0;padding:12px 0}
 .source-row{display:flex;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .source-row:first-of-type{border-top:0}
 .source-row small{margin-left:auto;text-align:right}
