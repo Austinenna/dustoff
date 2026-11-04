@@ -102,6 +102,21 @@ export function playAddrUrls(aweme) {
 export const isGallery = aweme =>
   (aweme && aweme.aweme_type === 68) || !!(aweme && Array.isArray(aweme.images) && aweme.images.length);
 
+/**
+ * 抖音“文章”类作品（aweme_type 163 / media_type 43）：没有真正的视频，只有一段背景音乐和一个方形占位文件；
+ * 正文以 Markdown 放在 article_info.article_content（JSON 字符串）里。不是文章或没有正文时返回 null。
+ */
+export function articleOf(aweme) {
+  if (!aweme || (aweme.aweme_type !== 163 && aweme.media_type !== 43)) return null;
+  let content = aweme.article_info?.article_content;
+  if (typeof content === 'string') { try { content = JSON.parse(content); } catch { return null; } }
+  const raw = String(content?.markdown || content?.long_article_abstract || '').trim();
+  if (!raw) return null;
+  const markdown = raw.replace(/<br\s*\/?>/gi, '').replace(/\n{3,}/g, '\n\n').trim();
+  const title = String(aweme.desc || '').trim() || markdown.split('\n')[0].replace(/[#*]/g, '').trim().slice(0, 60);
+  return { title, markdown };
+}
+
 /** 保留图集原顺序和每张图的备用地址，不用封面代替正文图片。 */
 export function galleryImages(aweme) {
   return (Array.isArray(aweme?.images) ? aweme.images : []).map(image => ({

@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requestSignal, localPath } from './policy.mjs';
 import { DUST_HOME, makeCfg } from './config.mjs';
-import { galleryImages, videoOptions, pickGear, isGallery, expiryOf } from './lib.mjs';
+import { galleryImages, videoOptions, pickGear, isGallery, expiryOf, articleOf } from './lib.mjs';
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const CHROME = process.env.DUST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -193,5 +193,8 @@ function emit(obj, code = 0, done = null) {
     cover: (v.cover && v.cover.url_list && v.cover.url_list[0]) || null,
     source_url: videoUrl,
   };
+  // 文章类作品按文字帖处理：带上正文，不当作视频下载。
+  const article = articleOf(a);
+  if (article) Object.assign(out, { media_type: 'post', is_article: true, article_title: article.title, article_markdown: article.markdown, duration_s: null });
   emit(out, 0, () => { ws.close(); cleanup(); });
 })().catch(e => { console.error('ERROR:', e.message); cleanup(); process.exit(e instanceof Blocked ? BLOCKED_EXIT : 1); });

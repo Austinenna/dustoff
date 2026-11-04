@@ -170,6 +170,25 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       ...x.deps,
     };
     const processors = { bilibili: [processBilibili, biliDeps], x: [processX, xDeps] };
+    // 抖音“文章”类作品：没有真正的视频，详情里就有正文，按文字帖直接整理笔记，原文附在笔记后。
+    const processArticle = async (id, item) => {
+      let row = fresh(id);
+      if (row.processing_mode !== 'note') { markRouting(id, { purpose: 'note', reason: '抖音文章：直接用正文整理笔记', source: 'rule' }); row = fresh(id); }
+      if (row.status !== 'transcribed') {
+        const text = [item.article_title, item.article_markdown].filter(Boolean).join('\n\n'), textPath = join(ASR_CONF.TEXT_DIR, `${id}.txt`);
+        atomicWrite(textPath, text);
+        markTranscribed(id, { text_source: 'article', text_chars: text.length, text_path: textPath, audio_seconds: null });
+        row = fresh(id); summary.text++;
+      }
+      if (downloadOnly || skipNotes) return;
+      if (!NOTES_CONF.API_KEY) throw new Error('未配置 LLM Key');
+      const result = await noteOne({ ...row, extra_context: '这是作者发布的图文文章，不是语音转写；原文是作者亲手写的文字，不需要纠错。' });
+      if (result.skipped) { markSkipped(id, result.reason); summary.skipped++; return; }
+      const note = writeNote(row, result.note, { dir: NOTES_CONF.NOTES_DIR });
+      summary.transcriptLayouts.push({ id, ...note.transcript });
+      markExtracted(id, { text_source: 'article', text_chars: row.text_chars, note_path: note.file, category: result.note.分类, decay: note.decay, retain_media: false, prompt_hash: HASH });
+      summary.notes++; log(`抖音文章 ${id}：已整理笔记`);
+    };
     const queue = pendingQueue().filter(r => (!downloadOnly || r.status === 'pending') && (!value('--retry') || r.id === value('--retry')));
     for (const candidate of queue) {
       if (summary.processed >= limit) break;
@@ -207,6 +226,16 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
           log(`抖音当天已达 ${POLICY.daily} 条，其他平台继续`); continue;
         }
         summary.processed++; touched.add(id);
+        if (row.media_type === 'post' || item.is_article || Number(item.aweme_type) === 163) {
+          if (!item.is_article) {
+            const meta = await runScript('get_meta.mjs', [`https://www.douyin.com/video/${id}`], {}, log);
+            if (meta.unavailable) { markSkipped(id, 'unavailable'); summary.skipped++; log(`作品已失效 ${id}：${meta.message}`); continue; }
+            if (!meta.ok || String(meta.aweme_id) !== id) throw new Error('刷新元数据失败或作品 ID 不匹配');
+            item = { ...meta, fetched_at: Math.floor(Date.now()/1000) };
+            importScan([item]); updateQueued(id, item); row = fresh(id);
+          }
+          if (item.is_article) { await processArticle(id, item); consecutive.note = 0; log(`完成 ${id}，本轮 ${summary.processed} 条`); continue; }
+        }
         if (kind === 'routing') {
           const decision = await classifyItem(item);
           consecutive.routing = 0;
@@ -242,6 +271,8 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
             importScan([item]);
             db().prepare('UPDATE daily_queue SET metadata=? WHERE id=?').run(JSON.stringify(item), id);
           }
+          // 刷新后仍拿不到时长的作品无法执行时长上限，标为跳过，不再连续失败拖累同类型的其他条目。
+          if (mediaDecision(item) === 'unknown_duration') { markSkipped(id, 'unknown_duration'); summary.skipped++; log(`跳过 ${id}：拿不到可靠时长`); continue; }
           const result = await downloadOne(item, { purpose:row.processing_mode });
           importDownload([result], 'douyin', { countFailures:false });
           row = fresh(id);
