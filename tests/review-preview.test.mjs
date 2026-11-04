@@ -94,3 +94,17 @@ test('B站待确认在运行收尾预下载并占当天额度；笔记优先字�
   assert.equal(again.previews||0,0);
   process.exitCode=0;
 `, { DUST_BILI_ENABLED: '1', DUST_BILI_START_DATE: '2026-11-01', DUST_BILI_INTERVAL_MS: '0' }));
+
+test('转写接受三个平台的作品 ID：X 与 B站视频选知识笔记后不会被 ID 校验拦下', () => isolated(`
+  import assert from 'node:assert/strict';
+  import {join} from 'node:path';
+  import {mkdirSync,writeFileSync} from 'node:fs';
+  const {transcribeOne}=await import('./extract.mjs');
+  const {MEDIA}=await import('./scripts/policy.mjs');
+  for(const id of ['x2090488396326011010','BV1xx411c7mD','7667932294249925930']){
+    const dir=join(MEDIA,id);mkdirSync(dir,{recursive:true});const path=join(dir,'video.mp4');writeFileSync(path,'不是真正的视频');
+    const row={id,platform:id.startsWith('x')?'x':id.startsWith('BV')?'bilibili':'douyin',processing_mode:'note',media_type:'video',duration_s:5,media_path:path,has_audio:1};
+    await assert.rejects(transcribeOne(row,join(process.env.DUST_HOME,'tmp-media')),e=>!/ID 不合法/.test(e.message));
+  }
+  await assert.rejects(transcribeOne({id:'../x',processing_mode:'note',media_type:'video',duration_s:5,media_path:join(MEDIA,'x2090488396326011010','video.mp4'),has_audio:1},join(process.env.DUST_HOME,'tmp-media')),/ID 不合法/);
+`));

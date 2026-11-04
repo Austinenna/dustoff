@@ -10,6 +10,7 @@ import { inScope, reserveDaily } from './scripts/daily.mjs';
 import { spawnSync, spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, cpSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
+import { validItemId } from './scripts/platforms.mjs';
 import { tmpdir } from 'node:os';
 import { makeCfg, DUST_HOME, CONF_FILE, expand } from './scripts/config.mjs';
 import { claim, markTranscribed, markFailed, markMediaDeleted, cleanable,
@@ -199,7 +200,8 @@ async function transcribeOne(item, tmpRoot) {
   if (!mp4 || !existsSync(mp4)) throw new PermanentError('媒体文件不存在（外接盘没挂载？）');
   if (item.has_audio === 0) throw new PermanentError('文件无音轨，需要重下');
 
-  if (!/^\d+$/.test(String(item.id))) throw new Error('作品 ID 不合法');
+  // 抖音是纯数字，X 带 x 前缀，B站是 BV 号；都按平台格式校验，避免拼进临时目录时越界。
+  if (!validItemId(item.id)) throw new Error('作品 ID 不合法');
   const work = localPath(join(tmpRoot, item.id));
   if (!under(work, TEMP)) throw new Error('ASR 临时目录必须在预算目录内');
   mkdirSync(work, { recursive: true });
