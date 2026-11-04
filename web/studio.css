@@ -226,14 +226,15 @@ textarea{resize:vertical}
 .source-row:first-of-type{border-top:0}
 .source-row small{margin-left:auto;text-align:right}
 .media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:22px 16px}
-.media-card{text-align:left;display:flex;flex-direction:column;gap:8px;min-width:0}
+.media-card{text-align:left;display:flex;flex-direction:column;gap:8px;min-width:0;width:100%}
 .media-card .cover{aspect-ratio:3/4;transition:transform .25s,box-shadow .25s}
 .media-card:hover .cover{transform:translateY(-3px);box-shadow:var(--shadow-lg)}
-.media-card b{font-weight:500;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.media-card b{font-weight:500;font-size:13px;line-height:1.45;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .media-card small{display:flex;gap:6px;align-items:center}
-.masonry{columns:4 220px;column-gap:16px}
-.masonry .media-card{break-inside:avoid;margin-bottom:20px}
-.masonry .media-card .cover{aspect-ratio:4/5}
+.wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));grid-auto-rows:4px;column-gap:16px;grid-auto-flow:dense}
+.wall .media-card{align-self:start}
+.wall .media-card .cover{aspect-ratio:4/5}
+.wall .media-card.big b{font-size:14.5px}
 
 /* ---------- 收件箱 ---------- */
 .inbox{display:grid;grid-template-columns:320px minmax(0,1fr);gap:20px;align-items:start}

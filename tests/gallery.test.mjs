@@ -52,7 +52,7 @@ test('图集整组保存：坏内容回退、部分失败续跑、独立浏览�
     const gallery=readGallery(manifest,'1');assert.deepEqual(gallery.images.map(i=>i.file),['001.png','002.png']);assert.ok(!readFileSync(manifest,'utf8').includes(base));
     const before=requests.length;await main(['--no-scan']);assert.equal(requests.length,before);
     const opened=[];app=createConsole({home:process.env.DUST_HOME,scheduler:{status:()=>({loaded:true})},openFile:async args=>opened.push(args)});const url=await app.listen(0);
-    assert.equal(app.store.overview().galleries,1);assert.equal(app.store.overview().videos,0);assert.equal(app.store.listItems({galleries:'1',q:'两张'}).total,1);assert.equal(app.store.listItems({results:'1'}).total,0);
+    assert.equal(app.store.overview().galleries,1);assert.equal(app.store.overview().videos,0);assert.equal(app.store.listItems({galleries:'1',q:'两张'}).total,1);assert.equal(app.store.listItems({galleries:'1'}).items[0].cover_ratio,0.667);assert.equal(app.store.listItems({results:'1'}).total,0);
     assert.equal(app.store.item('1').can_change_purpose,false);
     const data=await(await fetch(url+'/api/gallery?id=1')).json();assert.equal(data.images.length,2);assert.ok(!JSON.stringify(data).includes(base));
     const picture=await fetch(url+'/api/gallery-image?id=1&index=1');assert.equal(picture.headers.get('Content-Type'),'image/png');assert.deepEqual(Buffer.from(await picture.arrayBuffer()),content);

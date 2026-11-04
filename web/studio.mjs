@@ -136,7 +136,7 @@ async function loadToday(){
         <div class="fresh">${notes.slice(0,4).map(n=>`<button type="button" class="card fresh-card" data-action="read" data-id="${esc(n.id)}"><span class="meta">${pf(n.platform,false)}${n.category?`<span style="color:${catColor(n.category)}">● ${esc(n.category)}</span>`:''}<span>· ${esc(fmt(n.at))}</span>${n.read_at?'':'<span class="unread" style="margin-left:auto" title="未读"></span>'}</span><h3>${esc(n.title)}</h3>${n.gist?`<p>${esc(n.gist)}</p>`:''}<span class="foot">${n.tags.slice(0,3).map(t=>chip('#'+esc(t),'outline')).join('')}</span></button>`).join('')||empty('整理完成的知识笔记会显示在这里')}</div></section>
       ${resurface?`<section class="card resurface"><div class="l"><span class="eyebrow" style="color:var(--accent)">重温 · ${esc(fmt(resurface.collected_at))} 收藏${resurface.read_at?'':' · 还没读过'}</span><h3>${esc(resurface.title)}</h3>${resurface.gist?`<blockquote>${esc(resurface.gist)}</blockquote>`:''}<div class="row">${button('继续读','read',`data-id="${esc(resurface.id)}"`,'sm')}${button('加入素材箱','add-material',`data-id="${esc(resurface.id)}" data-kind="note"`,'quiet sm')}${button('换一篇','resurface-next','','quiet sm')}</div></div>
         <div class="r"><div class="sec-head" style="margin-bottom:4px"><h2 style="font-size:13.5px">还没读过的</h2><span class="sub">${unread.length} 篇</span></div>${unread.slice(0,5).map(n=>`<button type="button" class="list-item" data-action="read" data-id="${esc(n.id)}"><span class="unread"></span><span>${esc(n.title)}</span><small>${esc(fmt(n.at))}</small></button>`).join('')||'<p class="muted" style="font-size:13px">都读过了。</p>'}</div></section>`:''}
-      <section><div class="sec-head"><h2>最近保存的视频与图集</h2><a class="more" href="#videos">媒体库 ›</a></div><div class="media-grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">${recent.map(mediaCard).join('')||empty('选择「保存视频」后，保留的视频会显示在这里')}</div></section>
+      <section><div class="sec-head"><h2>最近保存的视频与图集</h2><a class="more" href="#videos">媒体库 ›</a></div><div class="media-grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">${recent.map(i=>mediaCard(i)).join('')||empty('选择「保存视频」后，保留的视频会显示在这里')}</div></section>
     </div>
     <div class="stack">
       <section class="card card-pad"><div class="sec-head"><h2>等你决定</h2><span class="sub">${o.review} 条</span><a class="more" href="#pending">逐条处理 ›</a></div>${review.items.map(i=>`<div class="decide-row">${thumbOf(i)}<div class="t"><b>${esc(titleOf(i))}</b><small>${esc(PLATFORM_LABELS[i.platform]||'')} · ${esc(kindOf(i))}</small></div>${i.pending_intents?`<small>${esc(intentLabel(i.pending_intents)).slice(0,8)}</small>`:`<div class="mini-choice"><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="note">笔记</button><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="video">视频</button></div>`}</div>`).join('')||'<p class="muted" style="font-size:13px">暂时没有需要你决定的收藏。</p>'}</section>
@@ -177,9 +177,11 @@ function sourceRows(){
   rows.push(['x',...(!o.x.enabled?['未启用','']:!o.x.connected?['未连接','warn']:o.x.online==='login_required'?['需要连接','danger']:['已连接','green']),o.x.username?'@'+o.x.username:'官方接口']);
   return rows.map(([p,l,t,d])=>`<div class="source-row">${pf(p)}<small>${esc(d)}</small>${tag(l,t)}</div>`).join('');
 }
-function mediaCard(i){
+function mediaCard(i,{big=false}={}){
   const badge=i.media_type==='gallery'?`${i.image_count||'多'} 张`:duration(i.duration_s);
-  return `<button type="button" class="media-card" data-action="${i.media_type==='gallery'?'view-gallery':'play-video'}" data-id="${esc(i.id)}">${cover(i,{badge,pfb:true})}<b>${esc(titleOf(i))}</b><small>${esc(i.author||'未知作者')}${i.delete_after_note?' · 待转为笔记':i.note_path&&i.media_type!=='gallery'?' · 也有笔记':''}</small></button>`;
+  // 图集墙按第一张图的真实比例显示；过长、过扁的图收在 9:16 到 4:3 之间，大卡最高 4:5。
+  const ratio=i.cover_ratio>0?String(Math.min(4/3,Math.max(big?0.8:9/16,i.cover_ratio))):'';
+  return `<button type="button" class="media-card${big?' big':''}" data-action="${i.media_type==='gallery'?'view-gallery':'play-video'}" data-id="${esc(i.id)}">${cover(i,{badge,pfb:true,ratio})}<b>${esc(titleOf(i))}</b><small>${esc(i.author||'未知作者')}${i.delete_after_note?' · 待转为笔记':i.note_path&&i.media_type!=='gallery'?' · 也有笔记':''}</small></button>`;
 }
 
 // ── 收件箱：只放需要你决定的条目 ──
@@ -290,7 +292,25 @@ async function loadMedia(){
   if(epoch!==listEpoch||page!==pageEpoch)return;m.data=data;m.page=data.page;
   const none=m.q?'没有找到匹配的内容':m.tab==='video'?'还没有保留的视频，可在收藏记录中选择视频用途':m.tab==='gallery'?'还没有保存的图集':'还没有 X 书签';
   if(m.tab==='post')$('#media-list').innerHTML=data.items.length?`<div class="posts">${data.items.map(i=>{const s=postState(i);return `<article class="card post-card"><div class="who"><span class="avatar" style="background:hsl(${hue(i.author||i.id)} 40% 45%)">${esc((i.author||'X').slice(0,1))}</span><span><b>${esc(i.author||'未知作者')}</b><small>${esc(fmt(i.collected_at||i.first_seen))}</small></span><span style="margin-left:auto">${pf('x',false)}</span></div><h3>${esc(titleOf(i))}</h3>${i.gist&&i.gist!==titleOf(i)?`<p>${esc(i.gist)}</p>`:''}<div class="foot">${tag(s.label,s.tone)}${i.last_error?`<small class="cell-error">${esc(i.last_error).slice(0,80)}</small>`:''}<span style="margin-left:auto" class="row">${i.note_path?button('阅读','read',`data-id="${esc(i.id)}"`,'quiet sm'):''}${i.note_path?button('加入素材箱','add-material',`data-id="${esc(i.id)}" data-kind="post"`,'quiet sm'):''}${sourceA(i,'原帖')}</span></div></article>`;}).join('')}</div>${pagination(data,'media')}`:empty(none);
-  else $('#media-list').innerHTML=data.items.length?`<div class="${m.tab==='gallery'?'masonry':'media-grid'}">${data.items.map(mediaCard).join('')}</div>${pagination(data,'media')}`:empty(none);
+  else if(m.tab==='gallery'){$('#media-list').innerHTML=data.items.length?`<div class="wall">${wallCards(data.items)}</div>${pagination(data,'media')}`:empty(none);layoutWall();}
+  else $('#media-list').innerHTML=data.items.length?`<div class="media-grid">${data.items.map(i=>mediaCard(i)).join('')}</div>${pagination(data,'media')}`:empty(none);
+}
+// 图集墙：图多（9 张及以上）或横图的图集做成两列宽的大卡，相邻 4 张内只出一张，避免大卡扎堆。
+function wallCards(items){let last=-9;return items.map((i,n)=>{const big=(i.image_count>=9||i.cover_ratio>=1.2)&&n-last>4;if(big)last=n;return mediaCard(i,{big});}).join('');}
+// 网格每行 4px，按卡片实际高度算出占几行，形成高矮错落的瀑布流；空位由后面的卡片补上。
+const WALL_ROW=4,WALL_GAP=20;let wallObserver=null,wallWidth=0;
+function layoutWall(){
+  const wall=$('#media-list .wall');wallObserver?.disconnect();if(!wall)return;
+  const place=()=>{
+    const cards=[...wall.children],cols=getComputedStyle(wall).gridTemplateColumns.split(' ').length;
+    for(const c of cards)c.style.gridColumn=c.classList.contains('big')&&cols>1?'span 2':'';
+    const heights=cards.map(c=>c.getBoundingClientRect().height);
+    cards.forEach((c,n)=>{c.style.gridRowEnd=`span ${Math.ceil((heights[n]+WALL_GAP)/WALL_ROW)}`;});
+    wallWidth=wall.clientWidth;
+  };
+  place();
+  wallObserver=new ResizeObserver(()=>{if(wall.isConnected&&wall.clientWidth!==wallWidth)place();});wallObserver.observe(wall);
+  void document.fonts?.ready.then(()=>{if(wall.isConnected)place();});
 }
 let galleryData=null,galleryIndex=0;
 async function viewGallery(id){

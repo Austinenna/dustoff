@@ -165,8 +165,22 @@ export function createStore(home = DUST_HOME) {
       const previews=readPreviews(home);
       const inScope=has(db,'daily_queue')?db.prepare('SELECT 1 FROM daily_queue WHERE id=?'):null;
       const intents=intentsById(home);
-      return {items:rows.map(r=>({...r,...processingActions(r,!!inScope?.get(r.id)),pending_intents:intents.get(r.id)||null,routing_preview:previewFor(r,previews),display_title:displayTitle(r),...(params.posts==='1'?{gist:noteMeta(r).gist}:{}),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
+      return {items:rows.map(r=>({...r,...processingActions(r,!!inScope?.get(r.id)),pending_intents:intents.get(r.id)||null,routing_preview:previewFor(r,previews),display_title:displayTitle(r),...(params.posts==='1'?{gist:noteMeta(r).gist}:{}),...(params.galleries==='1'?{cover_ratio:coverRatio(r.media_path)}:{}),last_error:r.last_error?redact(r.last_error):null})),total,page:actual,pages,size};
     },{items:[],total:0,page:1,pages:1,size});
+  }
+  // 图集封面（第一张图）的宽高比，供图集墙按真实比例排版；清单按路径和修改时间缓存，读不到时返回 null。
+  const ratioCache=new Map();
+  function coverRatio(manifest) {
+    try {
+      const path=localPath(manifest),mtime=statSync(path).mtimeMs,hit=ratioCache.get(path);
+      if(hit&&hit.mtime===mtime)return hit.ratio;
+      if(statSync(path).size>1024**2)return null;
+      const first=JSON.parse(readFileSync(path,'utf8')).images?.[0];
+      const ratio=first?.width>0&&first?.height>0?Math.round(first.width/first.height*1000)/1000:null;
+      if(ratioCache.size>5000)ratioCache.clear();
+      ratioCache.set(path,{mtime,ratio});
+      return ratio;
+    } catch { return null; }
   }
   // 笔记开头的元信息与摘要按路径和修改时间缓存；只读文件前 8 KiB，避免长正文撑大列表。
   const metaCache=new Map();
