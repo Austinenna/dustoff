@@ -176,11 +176,11 @@ async function sliceAudio(src, out, start, end) {
 // ── ASR ──────────────────────────────────────────────────────────
 
 /** 带退避重试。限流和 5xx 值得再试，参数错不值得。 */
-async function asr(file, tries = 3) {
+async function asr(file, task, tries = 3) {
   let last;
   for (let i = 0; i < tries; i++) {
     try {
-      return await asrOnce(file, { ...ASR_CONFIG, context: CONTEXT, signal: requestSignal() });
+      return await asrOnce(file, { ...ASR_CONFIG, context: CONTEXT, signal: requestSignal(), task });
     } catch (e) {
       if (e instanceof PermanentError || e instanceof PauseError) throw e;
       last = e;
@@ -221,7 +221,7 @@ async function transcribeOne(item, tmpRoot) {
         piece = join(work, `c${i}.mp3`);
         await sliceAudio(audio, piece, s, e);
       }
-      const r = await asr(piece);
+      const r = await asr(piece, item.id);
       if (r.text) parts.push(r.text);
       // 切片的时间戳是相对片内的，得加回片头偏移，否则第二段会从 0 重新开始
       const off = Math.round(s * 1000);

@@ -35,6 +35,7 @@ import { claim, markExtracted, markSkipped, markFailed, staleNotes, db } from '.
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { pathToFileURL } from 'node:url';
 import { platformInfo, platformOfId } from './scripts/platforms.mjs';
+import { budgetError, usageTags } from './scripts/gateway.mjs';
 import { prepareTranscript, numberedTranscript, formatTranscript, verifyTranscript, transcriptMetadataPath, transcriptKey, readTranscriptMetadata, TRANSCRIPT_METADATA_DIR } from './scripts/transcript.mjs';
 
 // 原稿快照由程序持有，不允许模型通过 JSON 字段提供或替换。
@@ -205,7 +206,7 @@ async function askOnce(item, source) {
   const res = await fetch(BASE, {
     signal: requestSignal(),
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}`, ...usageTags(BASE, { category: 'note', task: item.id }) },
     body: JSON.stringify({
       model: MODEL,
       max_tokens: MAX_TOKENS,
@@ -221,6 +222,7 @@ async function askOnce(item, source) {
     }),
   });
   const body = await res.json().catch(() => ({}));
+  if (res.status === 402) throw budgetError(402, body);
   if (!res.ok) {
     const code = body?.error?.code, msg = body?.error?.message || res.statusText;
     // 参数错、模型名错、内容被拦：重试多少次都是同样的结果
@@ -530,6 +532,7 @@ async function main() {
         log(`  ✓ ${label} — 「${r.note.标题}」${r.note.分类}/${w.decay}` +
           `${r.missingContent ? ' ⚠️缺料' : ''}，¥${r.usage.yuan.toFixed(4)}，${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
+        if (e instanceof PauseError) { log(`\n${e.message}`); aborted = true; break; }
         stat.fail++;
         failures.push({ id: item.id, title: item.title, error: e.message });
         if (!TRIAL) {

@@ -328,3 +328,15 @@ test('用途覆盖接口、视频打开、状态筛选及本机网关设置',asy
     assert.equal((await fetch(app.url+'/api/document?id=18&kind=video')).status,400);
   }finally{await app.close();f.cleanup();}
 });
+test('控制台从网关读本月成本和单条作品费用，网关失败时返回说明',async()=>{
+  const f=fixture();writeFileSync(join(f.home,'dustoff.conf'),readFileSync(join(f.home,'dustoff.conf'),'utf8')+'DUST_ROUTER_BASE=http://127.0.0.1:8317/v1\nDUST_ROUTER_KEY=fixture-gateway-token\n');
+  const seen=[];let fail=false;
+  const app=await serve({home:f.home,gatewayFetch:async(url,options)=>{seen.push([new URL(url),options.headers.Authorization]);if(fail)throw new Error('down');return Response.json({currency:'CNY',total:{requests:1,cost:0.5,unpriced:1},groups:[],budget:{monthly_budget:30,month_spent:0.5,remaining:29.5,exceeded:false}});}});
+  try{
+    const c=await(await fetch(app.url+'/api/costs')).json();assert.equal(c.month.cost,0.5);assert.equal(c.month.unpriced,1);assert.equal(c.budget.remaining,29.5);
+    assert.ok(seen.every(([u,a])=>u.pathname==='/v1/usage'&&a==='Bearer fixture-gateway-token'));
+    await fetch(app.url+'/api/costs');assert.equal(seen.length,2,'一分钟内复用结果');
+    assert.equal((await(await fetch(app.url+'/api/item-cost?id=18')).json()).cost,0.5);assert.equal(seen.at(-1)[0].searchParams.get('task'),'18');
+    fail=true;const r=await fetch(app.url+'/api/item-cost?id=18');assert.equal(r.status,502);assert.ok(!JSON.stringify(await r.json()).includes('fixture-gateway-token'));
+  }finally{await app.close();f.cleanup();}
+});

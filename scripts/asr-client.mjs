@@ -1,6 +1,7 @@
 // 同步 DashScope ASR；网关保留原生请求和响应，只替换地址、模型别名与凭据。
 import { readFileSync } from 'node:fs';
 import { makeCfg } from './config.mjs';
+import { budgetError, usageTags } from './gateway.mjs';
 
 export const DASHSCOPE_ENDPOINT = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
 export class PermanentError extends Error {}
@@ -21,13 +22,13 @@ export function readAsrConfig(cfg = makeCfg()) {
   };
 }
 
-export async function asrOnce(file, { endpoint, key, model, lang, context = '', signal }) {
+export async function asrOnce(file, { endpoint, key, model, lang, context = '', signal, task, gateway }) {
   if (!key) throw new PermanentError('未配置 DUST_ASR_KEY（百炼直连也可使用 DUST_DASHSCOPE_KEY）');
   const res = await fetch(endpoint, {
     signal,
     redirect: 'error',
     method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...usageTags(endpoint, { category: 'asr', task }, gateway) },
     body: JSON.stringify({
       model,
       input: { messages: [
@@ -44,6 +45,8 @@ export async function asrOnce(file, { endpoint, key, model, lang, context = '', 
   if (res.status === 400 && /HAVE_NO_WORDS/i.test(`${body?.code || ''} ${body?.message || ''}`)) {
     return { text: '', seconds: 0, words: [] };
   }
+  // 402 是网关预算用完，不按普通 4xx 把作品标成永久失败。
+  if (res.status === 402) throw budgetError(402, body);
   if (!res.ok) {
     const msg = `HTTP ${res.status} ${body?.code || ''} ${body?.error?.message || body?.message || ''}`.trim().split(key).join('[已隐藏密钥]');
     if (res.status >= 400 && res.status < 500 && res.status !== 429) throw new PermanentError(msg);

@@ -18,12 +18,13 @@ import { sourceUrl } from './scripts/platforms.mjs';
 import { addIntent, listIntents } from './scripts/intent-store.mjs';
 import { CALLBACK_PATH, appConfig, exchangeCode, recordSession as recordXSession, saveToken, startAuthorization } from './scripts/sources/x/auth.mjs';
 import { createClient as createXClient } from './scripts/sources/x/client.mjs';
+import { costSummary, gatewayConfig, itemCost } from './scripts/gateway.mjs';
 const QUALITY_VALUES=['','64','80','116','120','0'];
 const ROOT=dirname(fileURLToPath(import.meta.url));
 // 登录类任务：抖音沿用原名，B 站加前缀；B 站任务在 console-session.mjs 中按平台参数分派。
 const LOGIN_KINDS=['login','session-check','login-window','bili-login','bili-session-check'],WINDOW_KINDS=['login','login-window','bili-login'];
 const encode=value=>JSON.stringify(value,(_,v)=>typeof v==='bigint'?Number(v):v);
-export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,xFetch=fetch,publicUrl=process.env.DUST_PUBLIC_URL||'',serverMode=process.env.DUST_SERVER_MODE==='1',openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
+export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,xFetch=fetch,gatewayFetch=fetch,publicUrl=process.env.DUST_PUBLIC_URL||'',serverMode=process.env.DUST_SERVER_MODE==='1',openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
   const external=publicUrl?new URL(publicUrl):null;
   if(external&&(external.protocol!=='https:'||external.username||external.password||external.search||external.hash||!/^\/[a-zA-Z0-9/_-]*$/.test(external.pathname)))throw new Error('公网地址必须为不含凭据、查询参数的 HTTPS 地址');
   const basePath=external?external.pathname.replace(/\/+$/,''):'';
@@ -36,6 +37,9 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   let active=null,lastAction=null,origin,auth=null,scheduleStartupWarning=null;
   const actionsDir=localPath(join(home,'console'));
   let nextBrowserRequest=0;
+  // 费用来自 AI 网关；一分钟内重复打开页面不再请求网关。
+  let costCache=null;
+  async function costs(){if(!costCache||Date.now()-costCache.at>60000){const value=costSummary({config:gatewayConfig(store.cfg()),fetchImpl:gatewayFetch});costCache={at:Date.now(),value};value.catch(()=>{if(costCache?.value===value)costCache=null;});}return costCache.value;}
   // X 授权：state 与 PKCE verifier 只留在本进程内存，10 分钟内单次有效。
   const xPending=new Map();
   const xApp=()=>appConfig(store.cfg());
@@ -278,6 +282,8 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/insights':result=store.insights({id:params.id});break;
         case '/api/tokens':result={tokens:library.tokens()};break;
         case '/api/runs':result={runs:store.runs()};break;
+        case '/api/costs':try{result=await costs();}catch(e){throw new HttpError(502,e.message);}break;
+        case '/api/item-cost':try{result=await itemCost(params.id,{config:gatewayConfig(store.cfg()),fetchImpl:gatewayFetch});}catch(e){throw new HttpError(502,e.message);}break;
         case '/api/log':result=params.kind==='scheduler'?{log:store.tail(join(home,'scheduler','latest-run.log'))}:params.kind==='console'?{log:store.tail(join(home,'console','latest-action.log'))}:store.runDetail(params.id);break;
         default:throw new HttpError(404,'接口不存在');
       } else switch(path){

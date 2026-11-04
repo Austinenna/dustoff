@@ -120,7 +120,7 @@ async function loadToday(){
       <div><div class="eyebrow">${busy()?'正在运行':'下一轮'}</div><div class="big">${busy()?'进行中':s.loaded?esc(hm(s.nextRun)):'—'}</div><small>${busy()?`开始于 ${esc(fmt(o.execution.startedAt))}`:s.loaded?`${esc(until(s.nextRun))} · 上一轮${o.lastRun?esc(last.label):'暂无'}`:'在流水线中开启自动整理'}</small></div>
       <div class="ring-row">
         <svg class="ring" viewBox="0 0 54 54"><circle cx="27" cy="27" r="22" stroke="var(--sunken)"/><circle cx="27" cy="27" r="22" stroke="var(--accent)" stroke-dasharray="${C}" stroke-dashoffset="${C*(1-ratio)}" transform="rotate(-90 27 27)" stroke-linecap="round"/><text x="27" y="31" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">${Math.round(ratio*100)}%</text></svg>
-        <dl class="kv"><dt>今日额度</dt><dd>${used} / ${total} 条</dd>${['douyin','bilibili','x'].filter(k=>k==='douyin'||o[k==='x'?'x':'bilibili']?.enabled).map(k=>`<dt>${PLATFORM_LABELS[k]}</dt><dd>${o.usedByPlatform?.[k]||0} / ${k==='douyin'?p.daily:k==='x'?o.x.daily:o.bilibili.daily}</dd>`).join('')}<dt>本月成本</dt><dd class="muted">待网关接入</dd></dl>
+        <dl class="kv"><dt>今日额度</dt><dd>${used} / ${total} 条</dd>${['douyin','bilibili','x'].filter(k=>k==='douyin'||o[k==='x'?'x':'bilibili']?.enabled).map(k=>`<dt>${PLATFORM_LABELS[k]}</dt><dd>${o.usedByPlatform?.[k]||0} / ${k==='douyin'?p.daily:k==='x'?o.x.daily:o.bilibili.daily}</dd>`).join('')}<dt>本月成本</dt><dd class="muted" data-cost="month">读取中…</dd></dl>
       </div>
     </div>
   </section>
@@ -144,6 +144,32 @@ async function loadToday(){
       <section class="card card-pad"><div class="sec-head"><h2>来源</h2><a class="more" href="#account">管理 ›</a></div>${sourceRows()}</section>
     </div>
   </div>`;
+  void fillMonthCost(epoch);
+}
+// ── 成本（AI 网关按单价估算，不是厂商账单）──
+const COST_LABELS={router:'用途判断',asr:'转写',note:'笔记'};
+function money(v){return !v?'¥0':v<0.01?'不到 ¥0.01':`¥${v.toFixed(2)}`;}
+// 未定价、用量未知的调用按 0 计，必须让人看到，不能和真的 0 元混在一起。
+function costCaveat(t){return [t.unpriced&&`未定价 ${t.unpriced} 次`,t.usage_unknown&&`用量未知 ${t.usage_unknown} 次`,t.usage_partial&&`用量不完整 ${t.usage_partial} 次`].filter(Boolean).join(' · ');}
+function budgetLine(b){return b?.monthly_budget==null?'未设月预算':b.exceeded?`月预算 ${money(b.monthly_budget)} 已用完`:`月预算 ${money(b.monthly_budget)}，剩 ${money(b.remaining)}`;}
+async function fillMonthCost(epoch){
+  const el=$('[data-cost="month"]');if(!el)return;
+  try{const c=await api('costs');if(epoch!==pageEpoch)return;const w=costCaveat(c.month);el.classList.toggle('muted',false);el.innerHTML=`${esc(money(c.month.cost))}${w?` <small class="muted">另有${esc(w)}</small>`:''}`;el.title=budgetLine(c.budget);}
+  catch(e){if(epoch===pageEpoch){el.textContent='暂时读不到';el.title=e.message;}}
+}
+async function fillCostCard(epoch){
+  const el=$('#cost-card');if(!el)return;
+  try{
+    const c=await api('costs');if(epoch!==pageEpoch)return;const w=costCaveat(c.month),b=c.budget;
+    const groups=c.month.groups.filter(g=>g.requests).map(g=>`${esc(COST_LABELS[g.key]||g.label||'未标记')} ${esc(money(g.cost))}`).join(' · ');
+    el.innerHTML=`<span class="eyebrow">本月成本 ${chip('由 AI 网关估算')}</span><strong>${esc(money(c.month.cost))}<small>${c.month.requests} 次调用</small></strong><span class="delta">今天 ${esc(money(c.today.cost))} · ${esc(budgetLine(b))}${groups?`<br>${groups}`:''}${w?`<br><span style="color:var(--amber)">${esc(w)}，按 0 计入</span>`:''}</span>`;
+    if(b?.exceeded)el.querySelector('strong').style.color='var(--red)';
+  }catch(e){if(epoch===pageEpoch)el.querySelector('.delta').textContent=`暂时读不到网关用量：${e.message}`;}
+}
+async function fillItemCost(id,epoch){
+  const el=dialog.querySelector('[data-cost="item"]');if(!el)return;
+  try{const c=await api('item-cost?'+query({id}));if(epoch!==dialogEpoch)return;const w=costCaveat(c);el.textContent=c.requests?`${money(c.cost)}（${c.groups.filter(g=>g.requests).map(g=>`${COST_LABELS[g.key]||g.label||'未标记'} ${money(g.cost)}`).join('，')}）${w?`；另有${w}`:''}`:'没有记录到模型调用';}
+  catch(e){if(epoch===dialogEpoch)el.textContent='暂时读不到';}
 }
 let resurfaceShift=0;
 function pickResurface(notes){
@@ -551,8 +577,9 @@ async function detail(id){
       ${i.media_type==='gallery'||i.media_type==='post'?'':`<section><h3 style="margin-bottom:6px">这条收藏用来做什么</h3><p class="muted" style="font-size:12.5px">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form id="purpose-form" style="margin-top:10px"><input type="hidden" name="id" value="${esc(id)}"><div class="purpose-options">${['note','video','review'].map(k=>`<label><input type="radio" name="purpose" value="${k}" ${i.processing_mode===k?'checked':''} ${i.can_change_purpose?'':'disabled'} required><span>${PURPOSES[k]}<small>${({note:'转写并整理笔记',video:'只保存高清原声视频',review:'暂不处理，等你确认'})[k]}</small></span></label>`).join('')}</div>${i.platform==='bilibili'&&i.can_change_purpose?`<div style="margin-top:10px">${qualityPicker(i)}</div>`:''}${i.can_change_purpose?`<div class="row" style="margin-top:10px"><button class="btn primary sm">保存用途</button><small>下一轮运行时处理；已有文件保留。</small></div>${i.pending_intents?`<p class="intent-note" style="margin-top:8px">${esc(intentLabel(i.pending_intents))}</p>`:''}`:'<p class="muted" style="font-size:12.5px;margin-top:8px">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}
       ${i.last_error?`<section class="callout danger"><b>上次未完成</b><p style="margin-top:4px">${esc(i.last_error)}</p>${i.status==='failed'?`<div style="margin-top:8px">${button('恢复为待办','retry',attrs,'sm')}</div>`:''}</section>`:''}
       ${i.can_discard||i.can_delete||i.skip_reason==='user_discarded'?`<section><h3 style="margin-bottom:6px">处理操作</h3><p class="muted" style="font-size:12.5px">${i.skip_reason==='user_discarded'?'已放弃处理。重新选择用途并保存即可恢复。':'放弃处理会停止自动处理，保留收藏记录和本地文件。'}${i.can_delete?' 删除记录会从列表移除，不取消原平台收藏。':''}</p><div class="row" style="margin-top:8px">${i.can_discard?button('放弃处理','discard-item',`data-id="${esc(id)}"`,'quiet sm danger'):''}${i.can_delete?button('删除记录','delete-item',attrs,'quiet sm danger'):''}</div></section>`:''}
-      <details><summary>作品信息</summary><dl class="kv" style="font-size:12.5px"><dt>来源</dt><dd>${esc(PLATFORM_LABELS[i.platform]||'抖音')}${i.folders?` · ${esc(JSON.parse(i.folders).join('、'))}`:''}</dd><dt>作品 ID</dt><dd class="mono">${esc(id)}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd></dl></details>
+      <details><summary>作品信息</summary><dl class="kv" style="font-size:12.5px"><dt>来源</dt><dd>${esc(PLATFORM_LABELS[i.platform]||'抖音')}${i.folders?` · ${esc(JSON.parse(i.folders).join('、'))}`:''}</dd><dt>作品 ID</dt><dd class="mono">${esc(id)}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd><dt>AI 费用</dt><dd data-cost="item">读取中…</dd></dl></details>
     </div>`;
+    void fillItemCost(id,epoch);
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('收藏详情')+empty(e.message);}
 }
 async function stopProcessing(action,id){
@@ -678,7 +705,7 @@ async function loadHealth(){
   <div class="grid3">
     <section class="card stat"><span class="eyebrow">最近 ${n||30} 轮</span><strong>${okRate===null?'—':okRate+'%'}<small>${okRate===null?'暂无记录':'完全完成'}</small></strong><span class="delta">${n?`完成 ${c[0]||0} · 有失败 ${c[2]||0} · 暂停 ${c[5]||0} · 异常 ${c[1]||0}`:'运行一次后开始累积'}</span></section>
     <section class="card stat"><span class="eyebrow">平均每轮</span><strong>${data.avgSeconds===null?'—':(data.avgSeconds/60).toFixed(1)}<small>分钟</small></strong><span class="delta">${data.longest?`最长 ${Math.round(data.longest.seconds/60)} 分钟（${esc(fmt(data.longest.started))}）`:'暂无记录'}</span></section>
-    <section class="card stat"><span class="eyebrow">本月成本 ${chip('由 AI 网关提供')}</span><strong style="color:var(--faint)">—</strong><span class="delta">网关接入用量统计后，这里显示转写、模型的花费与每篇笔记成本。</span></section>
+    <section class="card stat" id="cost-card"><span class="eyebrow">本月成本 ${chip('由 AI 网关估算')}</span><strong style="color:var(--faint)">—</strong><span class="delta">正在读取网关用量…</span></section>
   </div>
   <div class="grid2">
     <section class="card card-pad"><div class="sec-head"><h2>退出码</h2><span class="sub">定时服务把 2、5 视为正常结束</span></div>${n?`<div class="strip">${data.recent.map(r=>`<i style="height:${r.exit===0?60:r.exit===2?85:100}%;background:${colors[r.exit]||'var(--faint)'}" title="${esc(fmt(r.started))} · 退出码 ${r.exit}"></i>`).join('')}</div>`:empty('暂无运行历史')}<div class="legend"><span><i style="background:var(--accent)"></i>0 完成</span><span><i style="background:var(--amber)"></i>2 有条目失败或扫描受阻</span><span><i style="background:var(--blue)"></i>5 暂停（额度、空间、风控）</span><span><i style="background:var(--red)"></i>1 整轮异常</span></div></section>
@@ -692,6 +719,7 @@ async function loadHealth(){
     <section class="card card-pad"><div class="sec-head"><h2>今日额度</h2><span class="sub">各平台独立计数，同时受合计上限约束</span></div>${[['抖音',o.usedByPlatform?.douyin||0,o.policy.daily,'var(--dy)'],...(o.x.enabled?[['X',o.x.usedToday,o.x.daily,'var(--x)']]:[]),...(o.bilibili.enabled?[['B站',o.bilibili.usedToday,o.bilibili.daily,'var(--bili)']]:[]),['合计',o.usedToday,o.policy.totalDaily||o.policy.daily,'var(--accent)']].map(([l,u,m,c])=>`<div class="quota-row"><span>${l}</span><span class="meter"><i style="width:${Math.min(100,u/Math.max(1,m)*100)}%;background:${c}"></i></span><span class="num">${u} / ${m}</span></div>`).join('')}</section>
     <section class="card card-pad"><div class="sec-head"><h2>每日产出</h2><span class="sub">最近 14 天 · 绿色笔记，橙色视频和图集</span></div><div class="bars">${data.output.map((d,n)=>`<div title="${esc(d.day)} · 笔记 ${d.notes} · 保存 ${d.saved}"><i class="saved" style="height:${d.saved/maxOut*100}%"></i><i style="height:${d.notes/maxOut*100}%"></i><small>${n===data.output.length-1?'今':esc(d.day.slice(8))}</small></div>`).join('')}</div></section>
   </div>`;
+  void fillCostCard(epoch);
 }
 
 // ── 设置 ──

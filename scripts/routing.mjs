@@ -1,6 +1,7 @@
 // 下载前只判断用途；素材规格与保留规则由程序固定映射。
 import { makeCfg } from './config.mjs';
 import { deadlineMs } from './policy.mjs';
+import { budgetError, usageTags } from './gateway.mjs';
 export const PURPOSES = Object.freeze({
   note: { label:'知识笔记', quality:'low', retain:false, transcribe:true },
   video: { label:'视频', quality:'high', retain:true, transcribe:false },
@@ -48,17 +49,18 @@ export function parseRouting(content) {
   if (!['note','video','review'].includes(value?.purpose) || typeof value.reason !== 'string' || !value.reason.trim()) throw new Error('用途模型返回格式无效');
   return { purpose:value.purpose, reason:value.reason.trim().slice(0,200) };
 }
-export async function classifyItem(item, { config=routingConfig(), fetchImpl=fetch } = {}) {
+export async function classifyItem(item, { config=routingConfig(), fetchImpl=fetch, gateway } = {}) {
   if (item.is_gallery || item.media_type === 'gallery') return {purpose:'gallery',reason:'媒体格式为图集',model:null};
   if (!config.key) throw new Error('未配置用途模型密钥 DUST_ROUTER_KEY');
   const endpoint = chatEndpoint(config.base);
   let response;
   try {
     response = await fetchImpl(endpoint, { method:'POST', redirect:'error', signal:AbortSignal.timeout(deadlineMs(30000)),
-      headers:{'Content-Type':'application/json',Authorization:`Bearer ${config.key}`},
+      headers:{'Content-Type':'application/json',Authorization:`Bearer ${config.key}`,...usageTags(endpoint,{category:'router',task:item.id??item.aweme_id},gateway)},
       body:JSON.stringify({model:config.model,stream:false,temperature:0,max_tokens:1200,reasoning_effort:'low',
         messages:[{role:'system',content:ROUTING_PROMPT+(item.platform==='bilibili'?BILIBILI_ROUTING_NOTE:item.platform==='x'?X_ROUTING_NOTE:'')},{role:'user',content:JSON.stringify(routingInput(item))}]}) });
   } catch { throw new Error('用途模型连接失败或超时，请检查本机网关'); }
+  if (response.status === 402) throw budgetError(402, await response.json().catch(() => ({})));
   if (!response.ok) { await response.body?.cancel(); throw new Error(`用途模型 HTTP ${response.status}`); }
   try { return {...parseRouting((await response.json()).choices?.[0]?.message?.content),model:config.model}; }
   catch { throw new Error('用途模型返回格式无效，保留待办以便重试'); }
