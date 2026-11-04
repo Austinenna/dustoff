@@ -5,14 +5,17 @@ import { readFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:f
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DUST_HOME, makeCfg } from './scripts/config.mjs';
-import { POLICY, TEMP, PauseError, mediaDecision, localPath, atomicWrite, deadlineMs } from './scripts/policy.mjs';
-import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, queueSkippedGalleries, migratePurposes, ScanError, itemRow } from './scripts/daily.mjs';
+import { POLICY, TEMP, REVIEW_MEDIA, PauseError, mediaDecision, localPath, atomicWrite, deadlineMs } from './scripts/policy.mjs';
+import { baseline, acceptScan, pendingQueue, reserveDaily, usage, retryItem, queueSkippedGalleries, migratePurposes, ScanError, itemRow, updateQueued } from './scripts/daily.mjs';
+import { previewEligible } from './scripts/review-preview.mjs';
+import { fetchMeta as biliMeta, downloadVideo as biliVideo } from './scripts/sources/bilibili/content.mjs';
+import { downloadVideo as xVideo } from './scripts/sources/x/content.mjs';
 import { scanBilibili, processBilibili } from './scripts/sources/bilibili/index.mjs';
 import { createClient } from './scripts/sources/bilibili/client.mjs';
 import { scanX, processX } from './scripts/sources/x/index.mjs';
 import { platformInfo, validItemId } from './scripts/platforms.mjs';
 import { applyIntents, intentsById } from './scripts/intents.mjs';
-import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved } from './scripts/ledger.mjs';
+import { db, importScan, importDownload, markTranscribed, markSkipped, markExtracted, markFailed, markRouting, markSaved, recordPreview } from './scripts/ledger.mjs';
 import { createStage, EXIT } from './scripts/stage.mjs';
 import { transcribeOne, cleanMedia, CONF as ASR_CONF } from './extract.mjs';
 import { noteOne, writeNote, HASH, CONF as NOTES_CONF } from './notes.mjs';
@@ -152,7 +155,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       }
     }
     // 模型密钥在实际走到对应分支时检查，单纯保存视频无需 ASR/笔记密钥。
-    const consecutive = {}, quotaFull = {};
+    const consecutive = {}, quotaFull = {}, touched = new Set();
     let biliClient = null;
     const biliDeps = {
       client: () => biliClient ||= bilibili.client || createClient(),
@@ -185,7 +188,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
             if (usage() >= POLICY.totalDaily) { summary.paused = `当天累计已达 ${POLICY.totalDaily} 条`; summary.quotaPaused = true; break; }
             quotaFull[platform] = true; summary.quotaReached.push(platform); log(`${platformInfo(platform).label}当天已达 ${POLICY[platform].daily} 条，其他平台继续`); continue;
           }
-          summary.processed++;
+          summary.processed++; touched.add(id);
           const [processItem, deps] = processors[platform];
           await processItem({ candidate, summary, log, tmp, downloadOnly, skipNotes, deps });
           consecutive[typeKey(platform, fresh(id).processing_mode || kind)] = 0;
@@ -203,7 +206,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
           if (!POLICY.bilibili.enabled && !POLICY.x.enabled) { summary.paused = `当天累计已达 ${POLICY.daily} 条`; summary.quotaPaused = true; break; }
           log(`抖音当天已达 ${POLICY.daily} 条，其他平台继续`); continue;
         }
-        summary.processed++;
+        summary.processed++; touched.add(id);
         if (kind === 'routing') {
           const decision = await classifyItem(item);
           consecutive.routing = 0;
@@ -288,6 +291,66 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
         }
       }
     }
+    // 收件箱预下载：待确认的视频按“保存视频”的规格下载到暂存目录，用户在收件箱看完再决定。
+    // 本轮刚判为待确认的已占过额度；之前留下的每条另计当天额度，失败的 24 小时后再试。
+    const fetchPreview = async (row, item) => {
+      const id = row.id;
+      if (row.platform === 'bilibili') {
+        const client = biliDeps.client();
+        if (!item.pages?.length) {
+          item = { ...item, ...(await (biliDeps.meta || biliMeta)(client, id)), folders: item.folders, folder_ids: item.folder_ids, collected_at: item.collected_at, fetched_at: item.fetched_at, meta_at: Math.floor(Date.now() / 1000) };
+          importScan([item], 'bilibili');
+        }
+        const maxQuality = row.video_quality ?? POLICY.bilibili.maxQuality;
+        const result = await (biliDeps.video || biliVideo)(client, item, { maxQuality, root: REVIEW_MEDIA });
+        updateQueued(id, { ...item, preview_quality: maxQuality });
+        return result;
+      }
+      if (row.platform === 'x') return (xDeps.video || xVideo)(item, { purpose: 'video', root: REVIEW_MEDIA });
+      // 抖音排队地址跨天会失效，按 ID 刷新元数据。
+      if (!item.fetched_at || Date.now() / 1000 - item.fetched_at > 1800 || !item.play_urls?.length || !item.video_options?.high) {
+        const meta = await runScript('get_meta.mjs', [`https://www.douyin.com/video/${id}`], {}, log);
+        if (meta.unavailable) { markSkipped(id, 'unavailable'); summary.skipped++; log(`作品已失效 ${id}：${meta.message}`); return null; }
+        if (!meta.ok || String(meta.aweme_id) !== id) throw new Error('刷新元数据失败或作品 ID 不匹配');
+        item = { ...meta, fetched_at: Math.floor(Date.now() / 1000) };
+        importScan([item]); updateQueued(id, item);
+      }
+      const result = await downloadOne(item, { purpose: 'video', root: REVIEW_MEDIA });
+      if (!['done', 'cached'].includes(result.status)) throw new Error(`无法预下载（${result.status}）`);
+      return result;
+    };
+    if (!dry && !summary.paused) {
+      const reviews = db().prepare("SELECT i.id, q.metadata FROM daily_queue q JOIN items i ON i.id=q.id WHERE i.status='review' AND COALESCE(i.media_path,'')='' ORDER BY q.enqueued ASC").all();
+      for (const { id, metadata } of reviews) {
+        const row = fresh(id);
+        if (!previewEligible(row) || summary.pausedPlatforms[row.platform] || quotaFull[row.platform]) continue;
+        if (row.platform !== 'douyin' && !POLICY[row.platform]?.enabled) continue;
+        if (intentsById(DUST_HOME).has(id)) continue;
+        let item;
+        try { item = JSON.parse(metadata); } catch { continue; }
+        if (item.preview_failed_at && Date.now() / 1000 - item.preview_failed_at < 86400) continue;
+        if (!touched.has(id)) {
+          if (summary.processed >= limit) break;
+          if (!reserveDaily(id)) { if (usage() >= POLICY.totalDaily) break; quotaFull[row.platform] = true; continue; }
+          summary.processed++; touched.add(id);
+        }
+        try {
+          deadlineMs();
+          const result = await fetchPreview(row, item);
+          if (!result) continue;
+          recordPreview(id, result);
+          summary.previews = (summary.previews || 0) + 1;
+          log(`预下载 ${id}：已放进收件箱，等你决定用途`);
+        } catch (e) {
+          if (e instanceof PauseError) {
+            if (e.scope === 'platform') { summary.pausedPlatforms[row.platform] = e.message; log(`${e.message}；继续其他平台`); continue; }
+            summary.previewPaused = e.message; log(`预下载暂停：${e.message}`); break;
+          }
+          updateQueued(id, { ...item, preview_failed_at: Math.floor(Date.now() / 1000), preview_error: String(e.message).slice(0, 200) });
+          log(`预下载未完成 ${id}：${e.message}；条目仍在收件箱，24 小时后再试`);
+        }
+      }
+    }
     return summary;
   } catch(e) {
     summary.paused = e.message;
@@ -317,7 +380,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       if (Object.keys(summary.pausedPlatforms).length) stage.notify('dustoff 平台暂停', Object.values(summary.pausedPlatforms).join('；'));
       if (summary.scanWarning) stage.notify('dustoff 扫描未完成', `已继续处理已有待办；${summary.scanWarning}`);
       if (summary.review) stage.notify('dustoff 用途待确认', `${summary.review} 条收藏请在作品详情选择用途`);
-      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，保存图集 ${summary.galleries}，待确认 ${summary.review}，待办 ${summary.pending}，${summary.paused || (Object.keys(summary.pausedTypes).length ? '部分类型暂停，其他类型已继续' : summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
+      log(`结束：处理 ${summary.processed}，成稿 ${summary.notes}，保存视频 ${summary.saved}，保存图集 ${summary.galleries}，待确认 ${summary.review}${summary.previews ? `（预下载 ${summary.previews}）` : ''}，待办 ${summary.pending}，${summary.paused || (Object.keys(summary.pausedTypes).length ? '部分类型暂停，其他类型已继续' : summary.scanWarning ? '已有待办处理结束，新收藏扫描未完成' : '正常收尾')}`);
       // 退出码：整轮异常已在上方 catch 置为 1（或登录 4）；本轮跑完但有条目失败、扫描受阻记 2，
       // 暂停记 5。定时服务把 2、5 视为正常结束，systemd 的 failed 只留给真正的异常。
       if (!process.exitCode) {

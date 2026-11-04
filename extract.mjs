@@ -5,7 +5,7 @@
 // node extract.mjs [--limit 1] [--id ID] [--dry-run] [--clean-only]
 // 外接盘归档和文字备份代码保留但禁用，强制重转及旧外接参数当前拒绝执行。
 
-import { POLICY, MEDIA, SAVED_MEDIA, TEMP, localPath, under, storage, writeMedia, requestSignal, deadlineMs, atomicWrite, PauseError, mediaDecision, asrSecondsFor } from './scripts/policy.mjs';
+import { POLICY, MEDIA, SAVED_MEDIA, TEMP, REVIEW_MEDIA, localPath, under, storage, writeMedia, requestSignal, deadlineMs, atomicWrite, PauseError, mediaDecision, asrSecondsFor } from './scripts/policy.mjs';
 import { inScope, reserveDaily } from './scripts/daily.mjs';
 import { spawnSync, spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, cpSync, readdirSync } from 'node:fs';
@@ -409,12 +409,15 @@ function cleanMedia({ dryRun = false, limit = 10000 } = {}) {
     if (!inScope(row.id)) continue; // 当前启用范围以外的旧数据留给一次性清理操作
     try {
       const media = localPath(row.media_path), text = localPath(row.text_path || '');
-      if (!under(media, MEDIA) || !/\.(mp4|mov|webm|m4v|m4a)$/i.test(media)) { held++; continue; }
+      // 收件箱预下载后选了笔记的视频留在 .review 原地转写，整理完与缓存一样清理。
+      const preview = under(media, REVIEW_MEDIA);
+      if ((!under(media, MEDIA) && !preview) || !/\.(mp4|mov|webm|m4v|m4a)$/i.test(media)) { held++; continue; }
       if (!row.text_path || !existsSync(text)) { held++; continue; }
       const contents = readFileSync(text,'utf8');
       if (!contents.trim() || contents.length !== row.text_chars) { held++; continue; }
       if (dryRun) { bytes += row.media_bytes || 0; done.push(row.id); continue; }
       if (existsSync(media)) { const size = statSync(media).size; rmSync(media); bytes += size; }
+      if (preview && dirname(dirname(media)) === REVIEW_MEDIA) rmSync(dirname(media), { recursive: true, force: true });
       done.push(row.id);
     } catch(e) { failed++; log(`清理未完成 ${row.id}：${e.message}`); }
   }

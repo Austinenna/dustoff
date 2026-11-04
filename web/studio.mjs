@@ -37,6 +37,9 @@ const button=(label,action,attrs='',style='')=>serverMode&&['open','delete-video
 const empty=(text='暂无内容')=>`<div class="empty">${esc(text)}</div>`;
 const sourceA=(item,label='原作品')=>`<a class="btn quiet sm" href="${esc(sourceLink(item))}" target="_blank" rel="noopener noreferrer">${ic('ext',14)}${label}</a>`;
 const kindOf=i=>i.media_type==='gallery'?'图集':i.media_type==='post'?'帖子':duration(i.duration_s);
+const hasMedia=i=>!!i.media_path&&!i.media_deleted;
+// 没有视频文件时不放占位图，只显示平台图标。
+const thumbOf=i=>hasMedia(i)?cover(i,{cls:'thumb'}):`<span class="thumb-icon">${pf(i.platform,false)}</span>`;
 function hue(id){let h=0;for(const c of String(id))h=(h*31+c.charCodeAt(0))%360;return h;}
 const gradient=id=>{const h=hue(id);return `background:radial-gradient(120% 80% at 20% 10%,hsl(${(h+300)%360} 60% 70% / .7),transparent 60%),radial-gradient(90% 90% at 90% 100%,hsl(${(h+40)%360} 48% 32%),transparent 70%),linear-gradient(160deg,hsl(${h} 42% 52%),hsl(${(h+40)%360} 48% 32%))`;};
 // 封面：视频用控制台生成的封面，图集用第一张图；读不到时露出按作品 ID 生成的渐变底色。
@@ -136,7 +139,7 @@ async function loadToday(){
       <section><div class="sec-head"><h2>最近保存的视频与图集</h2><a class="more" href="#videos">媒体库 ›</a></div><div class="media-grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">${recent.map(mediaCard).join('')||empty('选择「保存视频」后，保留的视频会显示在这里')}</div></section>
     </div>
     <div class="stack">
-      <section class="card card-pad"><div class="sec-head"><h2>等你决定</h2><span class="sub">${o.review} 条</span><a class="more" href="#pending">逐条处理 ›</a></div>${review.items.map(i=>`<div class="decide-row">${cover(i,{cls:'thumb'})}<div class="t"><b>${esc(titleOf(i))}</b><small>${esc(PLATFORM_LABELS[i.platform]||'')} · ${esc(kindOf(i))}</small></div>${i.pending_intents?`<small>${esc(intentLabel(i.pending_intents)).slice(0,8)}</small>`:`<div class="mini-choice"><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="note">笔记</button><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="video">视频</button></div>`}</div>`).join('')||'<p class="muted" style="font-size:13px">暂时没有需要你决定的收藏。</p>'}</section>
+      <section class="card card-pad"><div class="sec-head"><h2>等你决定</h2><span class="sub">${o.review} 条</span><a class="more" href="#pending">逐条处理 ›</a></div>${review.items.map(i=>`<div class="decide-row">${thumbOf(i)}<div class="t"><b>${esc(titleOf(i))}</b><small>${esc(PLATFORM_LABELS[i.platform]||'')} · ${esc(kindOf(i))}</small></div>${i.pending_intents?`<small>${esc(intentLabel(i.pending_intents)).slice(0,8)}</small>`:`<div class="mini-choice"><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="note">笔记</button><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="video">视频</button></div>`}</div>`).join('')||'<p class="muted" style="font-size:13px">暂时没有需要你决定的收藏。</p>'}</section>
       <section class="card card-pad"><div class="sec-head"><h2>需要留意</h2></div>${alerts().join('')}</section>
       <section class="card card-pad"><div class="sec-head"><h2>来源</h2><a class="more" href="#account">管理 ›</a></div>${sourceRows()}</section>
     </div>
@@ -195,13 +198,14 @@ function renderInbox(){
   if(!i){$('#inbox').innerHTML=`<section class="card" style="padding:48px 24px;text-align:center;margin-bottom:20px"><h2 style="font-size:18px;font-weight:600">收件箱清空了</h2><p class="muted" style="margin-top:6px">需要你判断用途的收藏会出现在这里。</p></section>${queueLink}`;return;}
   const bili=i.platform==='bilibili';
   $('#inbox').innerHTML=`<div class="inbox">
-    <div class="card queue-list"><div class="nav-label" style="padding:6px 10px">待确认 · ${data.total}</div>${data.items.map(x=>`<button type="button" class="q-item" data-action="inbox-select" data-id="${esc(x.id)}" aria-pressed="${x.id===i.id}">${cover(x,{cls:'thumb'})}<span class="t"><b>${esc(titleOf(x))}</b><small>${esc(PLATFORM_LABELS[x.platform]||'')} · ${esc(x.author||'未知作者')} · ${esc(kindOf(x))}</small></span></button>`).join('')}${pagination(data,'inbox')}</div>
+    <div class="card queue-list"><div class="nav-label" style="padding:6px 10px">待确认 · ${data.total}</div>${data.items.map(x=>`<button type="button" class="q-item" data-action="inbox-select" data-id="${esc(x.id)}" aria-pressed="${x.id===i.id}">${thumbOf(x)}<span class="t"><b>${esc(titleOf(x))}</b><small>${esc(PLATFORM_LABELS[x.platform]||'')} · ${esc(x.author||'未知作者')} · ${esc(kindOf(x))}</small></span></button>`).join('')}${pagination(data,'inbox')}</div>
     <div class="stack">
-      <section class="card focus">${cover(i,{badge:kindOf(i),pfb:true})}<div class="body">
+      <section class="card focus ${hasMedia(i)?'':'nocover'}">${hasMedia(i)?`<button type="button" class="focus-media" data-action="play-video" data-id="${esc(i.id)}" aria-label="播放视频">${cover(i,{badge:kindOf(i),pfb:true})}<span class="play-badge">${ic('play',22)}</span></button>`:''}<div class="body">
         <div class="row">${pf(i.platform)}<small>· ${esc(i.author||'未知作者')}</small><span style="margin-left:auto">${sourceA(i)}</span></div>
         <h2>${esc(titleOf(i))}</h2>
         <div class="reason">${ic('spark',16)}<span><b style="font-weight:600">为什么需要你：</b>${esc(i.routing_reason||(bili?'B站新收藏默认由你确认用途和画质。':'需要你确认这条收藏的用途。'))}</span></div>
         ${i.pending_intents?`<p class="intent-note">${esc(intentLabel(i.pending_intents))}</p>`:''}
+        ${previewHint(i)}
         <div class="choices">
           <button type="button" class="choice" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="note"><span class="kbd">N</span><b>${ic('note')}知识笔记</b><small>${bili?'字幕优先，没有字幕再转写':'转写后整理成笔记'}</small></button>
           <button type="button" class="choice" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="video"><span class="kbd">V</span><b>${ic('video')}保存视频</b><small>${bili?'画质见下方':'保存高清原声'}</small></button>
@@ -212,6 +216,13 @@ function renderInbox(){
       </div></section>
       ${queueLink}
     </div></div>`;
+}
+// 收件箱条目的视频状态：已预下载可直接看；太长的决定后再下载；其余在下一轮预下载。
+function previewHint(i){
+  if(hasMedia(i)||i.media_type==='post')return hasMedia(i)?'<p class="muted" style="font-size:12.5px">视频已预下载，点左侧封面观看；选「保存视频」直接移进收藏，选「知识笔记」不用重新下载。</p>':'';
+  const s=Number(i.duration_s);
+  if(s>30*60)return '<p class="muted" style="font-size:12.5px">超过 30 分钟，没有预下载；决定后再下载。</p>';
+  return '<p class="muted" style="font-size:12.5px">视频会在下一轮运行时预下载，届时可以先看再决定。</p>';
 }
 function qualityPicker(i){
   const fallback=String(state.overview?.policy?.bilibili?.maxQuality??80),current=i.video_quality==null?'':String(i.video_quality);
@@ -333,8 +344,8 @@ async function playVideo(id){
       <aside class="info">
         <div class="info-main"><div class="meta-line">${pf(i.platform)}<span>${esc(i.author||'未知作者')}</span><span>${esc(kindOf(i))}</span><span>${esc(mediaLabel(i))}</span></div>
           <h2 title="${esc(titleOf(i))}">${esc(titleOf(i))}</h2><p id="video-message" role="status" aria-live="polite">正在载入视频…</p></div>
-        <div class="info-acts"><div class="row">${button(`${ic('bookmark',14)}加入素材箱`,'add-material',`data-id="${esc(id)}" data-kind="video"`,'primary sm')}${i.note_path||i.text_path?button(`${ic('note',14)}阅读笔记`,'read',`data-id="${esc(id)}"`,'sm'):''}${videoNoteButton(i)}</div>
-          <div class="row secondary">${sourceA(i)}${button('收藏详情','detail',`data-id="${esc(id)}"`,'quiet sm')}${button('兼容播放','prepare-video',`data-id="${esc(id)}"`,'quiet sm')}${button('外部播放器','open',`data-id="${esc(id)}" data-kind="video"`,'quiet sm')}${videoDeleteButton(i)}</div>${videoNoteHint(i)}</div>
+        <div class="info-acts"><div class="row">${i.status==='review'?`${button(`${ic('video',14)}保存视频`,'quick-purpose',`data-id="${esc(id)}" data-purpose="video"`,'primary sm')}${button(`${ic('note',14)}知识笔记`,'quick-purpose',`data-id="${esc(id)}" data-purpose="note"`,'sm')}`:`${button(`${ic('bookmark',14)}加入素材箱`,'add-material',`data-id="${esc(id)}" data-kind="video"`,'primary sm')}${i.note_path||i.text_path?button(`${ic('note',14)}阅读笔记`,'read',`data-id="${esc(id)}"`,'sm'):''}${videoNoteButton(i)}`}</div>
+          <div class="row secondary">${sourceA(i)}${button('收藏详情','detail',`data-id="${esc(id)}"`,'quiet sm')}${button('兼容播放','prepare-video',`data-id="${esc(id)}"`,'quiet sm')}${button('外部播放器','open',`data-id="${esc(id)}" data-kind="video"`,'quiet sm')}${i.status==='review'?'':videoDeleteButton(i)}</div>${i.status==='review'?'<p class="muted">收件箱预下载，还没有存进视频收藏。</p>':videoNoteHint(i)}</div>
       </aside></div>`;
     const v=dialog.querySelector('video');
     // 视频画面出来之前用按比例完整显示的封面占位，避免封面被拉伸裁切。
@@ -494,7 +505,10 @@ async function queueMutation(path,data){
     const current=state.overview.execution;
     if(current.lastAction?.startedAt===expected){
       if(current.lastAction.exitCode!==0)throw new Error('操作未完成，请在「流水线 → 运行记录 → 控制台操作」查看原因。');
-      notice(path==='purpose'?'用途已保存，下一轮运行时处理。':'已恢复为待办，下一轮运行时处理。');
+      let message=path==='purpose'?'用途已保存，下一轮运行时处理。':'已恢复为待办，下一轮运行时处理。';
+      // 收件箱预下载过的视频选“保存视频”会直接存好，选“知识笔记”下一轮不用重新下载。
+      if(path==='purpose'){try{const i=await api('item?'+query({id:data.id}));if(i.status==='saved')message='已存进视频收藏。';else if(i.status==='downloaded')message='用途已保存，下一轮直接用已下载的视频整理笔记。';}catch{}}
+      notice(message);
       await reloadList();if(dialog.open&&originalDrawer===dialogEpoch&&drawerId===data.id)await detail(data.id);return;
     }
   }
@@ -725,7 +739,7 @@ root.addEventListener('click',async event=>{
     else if(a==='manual-run')manualRun(b.dataset.noscan==='1');
     else if(a==='stop')await mutate('stop',{},'已发送停止请求，正在完成收尾。');
     else if(a==='retry')await queueMutation('retry',{id});
-    else if(a==='quick-purpose'){const q=root.querySelector(`[data-quality-for="${CSS.escape(id)}"]`);await queueMutation('purpose',{id,purpose:b.dataset.purpose,...(q&&b.dataset.purpose==='video'?{quality:q.value}:{})});}
+    else if(a==='quick-purpose'){const q=root.querySelector(`[data-quality-for="${CSS.escape(id)}"]`);if(dialog.open&&dialog.classList.contains('player-dialog'))dialog.close();await queueMutation('purpose',{id,purpose:b.dataset.purpose,...(q&&b.dataset.purpose==='video'?{quality:q.value}:{})});}
     else if(a==='inbox-select'){state.inbox.id=id;renderInbox();}
     else if(a==='open')await mutate('open',{kind:b.dataset.kind,id,fileKind:b.dataset.fileKind},'已在本机打开。');
     else if(a==='resurface-next'){resurfaceShift++;await loadToday();}

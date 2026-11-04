@@ -42,10 +42,10 @@ test('正常运行遇到扫描缺页、边界不匹配或扫描进程错误，�
       const id=ids[n];setPurpose(id,'video');let refreshed=0;
       const result=await main([], {runScript:async(name,args)=>{
         if(name==='get_collection.mjs')return cases[n]();
-        assert.equal(name,'get_meta.mjs');assert.ok(args[0].endsWith('/'+id));refreshed++;
+        assert.equal(name,'get_meta.mjs');if(!args[0].endsWith('/'+id))throw new Error('其他待确认条目的预下载不在本测试范围');refreshed++;
         return {ok:true,aweme_id:id,desc:'手动保存的视频',duration_s:1,play_urls:[url],video_options:{high:{gear:'high',urls:[url]},standard:{gear:'default',urls:[url]}}};
       }});
-      assert.ok(result.scanWarning);assert.equal(result.paused,null);assert.deepEqual(result.failures,[]);assert.equal(result.saved,1);assert.equal(result.processed,1);assert.equal(refreshed,1);
+      assert.ok(result.scanWarning);assert.equal(result.paused,null);assert.deepEqual(result.failures,[]);assert.equal(result.saved,1);assert.equal(result.processed,n===0?3:1);assert.equal(refreshed,1); // 第一轮另两条待确认尝试预下载（占额度），失败后 24 小时内不再试。
       const row=db().prepare('SELECT * FROM items WHERE id=?').get(id);assert.equal(row.status,'saved');assert.equal(row.routing_source,'manual');assert.ok(existsSync(row.media_path));
       assert.deepEqual(baseline(),before);assert.equal(db().prepare("SELECT id FROM items WHERE id='999'").get(),undefined);assert.equal(pendingQueue().length,0);
       assert.equal(process.exitCode,2);process.exitCode=0; // 扫描受阻记 2（运行记录里提醒），下载成果已经成功，不算服务失败。

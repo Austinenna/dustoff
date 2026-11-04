@@ -1,7 +1,8 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { localPath, under, SAVED_MEDIA } from './policy.mjs';
 import { PURPOSES } from './routing.mjs';
-import { db, importScan } from './ledger.mjs';
+import { db, importScan, markSaved } from './ledger.mjs';
+import { adoptPreview, dropPreview } from './review-preview.mjs';
 import { boundaryIndex } from './incremental.mjs';
 import { POLICY, mediaDecision, dailyLimitFor } from './policy.mjs';
 import { platformOfId } from './platforms.mjs';
@@ -134,7 +135,20 @@ export function setPurpose(id, purpose) {
     status=?,skip_reason=NULL,needs_ocr=?,delete_after_note=CASE WHEN ?='note' THEN delete_after_note ELSE 0 END,
     attempts=0,last_error=NULL,updated_at=? WHERE platform=? AND id=?`)
     .run(purpose,now,purpose==='review'?'review':'pending',0,purpose,now,row.platform,id);
-  if (purpose !== 'review') retryItem(id);
+  if (purpose !== 'review') {
+    // 收件箱预下载：保存视频时移进收藏目录并直接标为已保存；笔记原地转写。
+    // B站笔记优先用字幕，选了与预下载不同的画质也要重新下载，这两种情况不复用。
+    const current = itemRow(id);
+    let reusable = true;
+    if (current.platform === 'bilibili') {
+      let meta = {};
+      try { meta = JSON.parse(d.prepare('SELECT metadata FROM daily_queue WHERE id=?').get(id)?.metadata || '{}'); } catch {}
+      reusable = purpose === 'video' && Number(meta.preview_quality ?? POLICY.bilibili.maxQuality) === Number(current.video_quality ?? POLICY.bilibili.maxQuality);
+    }
+    const adopted = adoptPreview(current, purpose, { reusable });
+    retryItem(id);
+    if (adopted === 'saved' && itemRow(id).status === 'downloaded') markSaved(id);
+  }
   return purpose;
 }
 
@@ -145,6 +159,7 @@ export function discardItem(id) {
   if (row.skip_reason === 'user_discarded') return {discarded:true, alreadyDiscarded:true};
   if (!processingActions(row,inScope(id)).can_discard) throw new Error('只能放弃当前范围内尚未完成的处理任务');
   const now = Math.floor(Date.now()/1000);
+  dropPreview(row); // 放弃时删掉收件箱预下载的暂存文件。
   d.prepare("UPDATE items SET status='skipped',skip_reason='user_discarded',delete_after_note=0,updated_at=? WHERE platform=? AND id=?").run(now,row.platform,id);
   return {discarded:true};
 }
@@ -155,6 +170,7 @@ export function deleteItem(id) {
   if (!row) throw new Error('找不到这条作品');
   if (row.skip_reason === 'user_deleted') return {deleted:true, alreadyDeleted:true};
   if (!processingActions(row,inScope(id)).can_delete) throw new Error('只能删除当前范围内没有本地产物的待确认或已放弃记录');
+  dropPreview(row);
   d.exec('BEGIN IMMEDIATE');
   try {
     d.prepare('DELETE FROM daily_queue WHERE id=?').run(id);

@@ -27,7 +27,7 @@ export function downloadChoices(item, quality) {
   if (options) return [options[quality],options.standard].filter(g => g?.urls?.length);
   return [{gear:item.gear,urls:item.play_urls||[]},{gear:'play_addr',urls:item.play_urls_fallback||[]}];
 }
-export async function downloadOne(item, { purpose = 'note' } = {}) {
+export async function downloadOne(item, { purpose = 'note', root } = {}) {
   if(item.is_gallery||item.media_type==='gallery')return downloadGallery(item);
   const profile = PURPOSES[purpose];
   if (!profile?.quality) throw new Error('请先确认作品用途');
@@ -35,7 +35,7 @@ export async function downloadOne(item, { purpose = 'note' } = {}) {
   const decision = mediaDecision(item);
   if (decision === 'unknown_duration') throw new Error('缺少可靠时长，等待元数据刷新');
   if (decision) return { aweme_id: item.aweme_id, status: `skipped_${decision}` };
-  const dir = localPath(join(profile.retain ? SAVED_MEDIA : MEDIA, item.aweme_id)), mp4 = join(dir, 'video.mp4');
+  const dir = localPath(join(root || (profile.retain ? SAVED_MEDIA : MEDIA), item.aweme_id)), mp4 = join(dir, 'video.mp4');
   const part = join(dir, 'video.mp4.part');
   const marker = join(dir,'download.json');
   let selected;

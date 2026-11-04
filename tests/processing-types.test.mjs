@@ -81,7 +81,7 @@ test('知识笔记可复用收藏目录中的旧素材；视频和图集不能�
   assert.equal(cleanMedia().n,0);assert.ok(existsSync(file)); // 旧收藏目录不自动清理。
 `));
 
-test('三条笔记连续失败只暂停笔记；视频和图集继续成功，待确认不下载',()=>isolated(`
+test('三条笔记连续失败只暂停笔记；视频和图集继续成功，待确认预下载失败不影响条目',()=>isolated(`
   import assert from 'node:assert/strict';
   import {join} from 'node:path';
   import {mkdirSync,writeFileSync,readFileSync} from 'node:fs';
@@ -101,7 +101,10 @@ test('三条笔记连续失败只暂停笔记；视频和图集继续成功，�
   }
   setPurpose('7','review');let calls=0;
   globalThis.fetch=async(url)=>{assert.equal(url,'https://fixture.invalid/image');calls++;return new Response(readFileSync(image));};
-  const result=await main(['--no-scan']);
+  // 待确认的 7 会在收尾预下载：刷新元数据失败只记下时间，条目留在收件箱，不计失败。
+  let metaCalls=0;
+  const result=await main(['--no-scan'],{runScript:async name=>{assert.equal(name,'get_meta.mjs');metaCalls++;throw new Error('测试环境无网络');}});
+  assert.equal(metaCalls,1);assert.ok(JSON.parse(db().prepare("SELECT metadata FROM daily_queue WHERE id='7'").get().metadata).preview_failed_at);
   assert.equal(result.failures.length,3);assert.ok(result.pausedTypes.note);assert.equal(result.paused,null);
   assert.equal(result.saved,1);assert.equal(result.galleries,1);assert.equal(result.notes,0);assert.equal(calls,1);
   assert.equal(db().prepare("SELECT attempts FROM items WHERE id='4'").get().attempts,0);

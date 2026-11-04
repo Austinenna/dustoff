@@ -88,7 +88,7 @@ test('访问令牌：明文只返回一次，库里只存哈希，吊销后立�
     assert.match(t.token,/^dsk_[A-Za-z0-9_-]{32}$/);assert.equal(t.hint,t.token.slice(-4));
     assert.equal(JSON.stringify(lib.tokens()).includes(t.token),false);
     const raw=new DatabaseSync(lib.file,{readOnly:true});assert.equal(JSON.stringify(raw.prepare('SELECT * FROM api_tokens').all()).includes(t.token),false);raw.close();
-    assert.equal(lib.verifyToken(t.token).scope,'read');assert.equal(lib.verifyToken(t.token.slice(0,-1)+'x'),null);assert.equal(lib.verifyToken('Bearer x'),null);
+    assert.equal(lib.verifyToken(t.token).scope,'read');assert.equal(lib.verifyToken(t.token.slice(0,-1)+(t.token.endsWith('x')?'y':'x')),null);assert.equal(lib.verifyToken('Bearer x'),null);
     lib.revokeToken(t.id);assert.equal(lib.verifyToken(t.token),null);
   }finally{lib.close();f.cleanup();}
 });

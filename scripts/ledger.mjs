@@ -627,6 +627,15 @@ export function markRouting(id, decision) {
     status=CASE WHEN ?='review' THEN 'review' ELSE status END, needs_ocr=?,updated_at=? WHERE platform=? AND id=?`)
     .run(decision.purpose,decision.reason,decision.source||'model',decision.model??null,now(),decision.purpose,0,now(),platformOfId(id),id);
 }
+/** 收件箱预下载：只记录媒体文件，状态保持待确认。 */
+export function recordPreview(id, r) {
+  return db().prepare(`UPDATE items SET media_path=?,media_bytes=?,gear=?,has_audio=?,media_quality=?,media_deleted=0,downloaded_at=?,updated_at=?
+    WHERE platform=? AND id=? AND status='review'`).run(r.path, r.bytes ?? null, r.gear ?? null, r.has_audio === false ? 0 : 1, r.quality ?? 'high', now(), now(), platformOfId(id), id);
+}
+/** 预下载文件被移走或删除后，清掉账本里的媒体信息。 */
+export function clearMedia(id) {
+  return db().prepare('UPDATE items SET media_path=NULL,media_bytes=NULL,gear=NULL,media_quality=NULL,downloaded_at=NULL,updated_at=? WHERE platform=? AND id=?').run(now(), platformOfId(id), id);
+}
 export function markSaved(id) {
   return db().prepare("UPDATE items SET status='saved',skip_reason=NULL,saved_at=?,attempts=0,last_error=NULL,updated_at=? WHERE platform=? AND id=?")
     .run(now(),now(),platformOfId(id),id);

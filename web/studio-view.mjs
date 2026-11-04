@@ -39,6 +39,7 @@ export function splitNoteContent(source) {
   return {note:content.slice(0,start.index),formatted:content.slice(start.index+start[0].length,end.index)};
 }
 export function mediaLabel(item) {
+  if(item.status==='review'&&item.media_path&&!item.media_deleted)return '已预下载，待你决定';
   if(item.media_type==='post')return item.note_path?'原帖已保存':'原帖尚未保存';
   if(item.media_type==='gallery')return item.media_path&&!item.media_deleted?`已保存图集${item.image_count?' · '+item.image_count+' 张':''}`:'图片尚未保存';
   if(item.media_deleted)return item.skip_reason==='video_deleted'?'视频已删除':'视频已清理';

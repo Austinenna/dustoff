@@ -76,11 +76,11 @@ function probe(file) {
  * 下载推文里的第一段视频。note：最低码率到媒体缓存，供转写；video：最高码率到视频收藏目录。
  * 返回值可直接交给 importDownload。
  */
-export async function downloadVideo(item, { purpose }) {
+export async function downloadVideo(item, { purpose, root: target } = {}) {
   const clip = (item.media || []).find(m => m.type !== 'photo');
   const url = mediaUrl(purpose === 'note' ? clip?.low || clip?.url : clip?.url);
   if (!url) throw new Error('推文没有可下载的视频地址');
-  const retain = purpose !== 'note', root = retain ? SAVED_MEDIA : MEDIA;
+  const retain = purpose !== 'note', root = target || (retain ? SAVED_MEDIA : MEDIA);
   const dir = localPath(join(root, item.aweme_id)), out = join(dir, 'video.mp4');
   if (!under(out, root)) throw new Error('视频位置不在预算目录');
   const result = (p, extra) => ({ aweme_id: item.aweme_id, status: 'done', path: p, bytes: statSync(p).size, ...extra });

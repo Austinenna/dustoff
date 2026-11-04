@@ -70,7 +70,7 @@ test('旧账本结构无损升级；人工覆盖与清理仅作用于对应类�
   assert.equal(retryItem('1'),'downloaded'); // 保存视频不走旧文字的笔记阶段
 
 `));
-test('真实媒体下载与编排：视频高清独立保存、知识笔记低档、待确认不下载，重跑不重复调用',()=>isolated(`
+test('真实媒体下载与编排：视频高清独立保存、知识笔记低档、待确认按视频规格预下载，重跑不重复调用',()=>isolated(`
   import assert from 'node:assert/strict';
   import {createServer} from 'node:http';
   import {spawnSync} from 'node:child_process';
@@ -95,19 +95,19 @@ test('真实媒体下载与编排：视频高清独立保存、知识笔记低�
   const {db,markTranscribed}=await import('./scripts/ledger.mjs');
   const {main}=await import('./run.mjs');
   const {cleanMedia}=await import('./extract.mjs');
-  const {MEDIA,SAVED_MEDIA,atomicWrite}=await import('./scripts/policy.mjs');
+  const {MEDIA,SAVED_MEDIA,REVIEW_MEDIA,atomicWrite}=await import('./scripts/policy.mjs');
   try{
     acceptScan({ok:true,logged_in:true,truncated:false,items:[{aweme_id:'100',desc:'基线',duration_s:2}],fetched_at:Date.now()/1000});
     const items=['舞蹈','口播','演示','未知'].map((desc,i)=>({aweme_id:String(i+1),desc,duration_s:2,play_urls:[base+'/low/'+i],video_options:{low:{gear:'low',urls:[base+'/low/'+i]},high:{gear:'high',urls:[base+'/high/'+i]},standard:{gear:'default',urls:[base+'/standard/'+i]}}}));
     acceptScan({ok:true,logged_in:true,truncated:false,items:[...items,{aweme_id:'100',desc:'基线',duration_s:2}],fetched_at:Date.now()/1000});
     const summary=await main(['--no-scan','--download-only']);
     assert.deepEqual(summary.failures,[]);assert.equal(summary.saved,2);assert.equal(summary.review,1);
-    assert.deepEqual(new Set(requests),new Set(['/high/0','/low/1','/high/2']));
+    assert.deepEqual(new Set(requests),new Set(['/high/0','/low/1','/high/2','/high/3']));assert.equal(summary.previews,1);
     const one=db().prepare("SELECT * FROM items WHERE id='1'").get();
     assert.equal(one.status,'saved');assert.ok(one.media_path.startsWith(SAVED_MEDIA));assert.equal(one.has_audio,1);assert.equal(one.media_quality,'high');
-    assert.equal(db().prepare("SELECT status FROM items WHERE id='4'").get().status,'review');
+    const four=db().prepare("SELECT * FROM items WHERE id='4'").get();assert.equal(four.status,'review');assert.ok(four.media_path.startsWith(REVIEW_MEDIA+'/4/'));assert.equal(four.media_quality,'high');
     assert.equal(pendingQueue().length,1);
-    await main(['--no-scan','--download-only']);assert.equal(calls.length,4);assert.equal(requests.length,3);
+    await main(['--no-scan','--download-only']);assert.equal(calls.length,4);assert.equal(requests.length,4);
     const text=join(process.env.DUST_HOME,'text.txt');atomicWrite(text,'测试文字');
     markTranscribed('2',{text_source:'asr',text_chars:4,text_path:text});
     cleanMedia();assert.ok(existsSync(join(MEDIA,'2','video.mp4'))); // 仅转写成功不足以清理。
@@ -115,7 +115,9 @@ test('真实媒体下载与编排：视频高清独立保存、知识笔记低�
     cleanMedia();assert.ok(existsSync(join(MEDIA,'2','video.mp4'))); // 缺料的笔记保护素材。
     db().exec("UPDATE items SET retain_media=0 WHERE id='2'");
     cleanMedia();assert.ok(!existsSync(join(MEDIA,'2','video.mp4')));assert.ok(existsSync(join(SAVED_MEDIA,'3','video.mp4')));assert.ok(existsSync(one.media_path));
-    setPurpose('4','video');await main(['--no-scan','--skip-notes']);assert.equal(calls.length,4);assert.equal(db().prepare("SELECT status FROM items WHERE id='4'").get().status,'saved');
+    // 选保存视频：预下载移进收藏目录并直接标为已保存，不再下载。
+    setPurpose('4','video');const saved=db().prepare("SELECT * FROM items WHERE id='4'").get();assert.equal(saved.status,'saved');assert.equal(saved.media_path,join(SAVED_MEDIA,'4','video.mp4'));assert.ok(existsSync(saved.media_path));assert.ok(!existsSync(join(REVIEW_MEDIA,'4')));
+    await main(['--no-scan','--skip-notes']);assert.equal(calls.length,4);assert.equal(requests.length,4);
   }finally{await new Promise(r=>server.close(r));}
 `));
 test('视频收藏空间上限在写入中生效，失败后移除半成品且不占转写缓存',()=>isolated(`

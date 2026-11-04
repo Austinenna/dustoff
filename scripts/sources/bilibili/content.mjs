@@ -150,8 +150,8 @@ export function pickVideo(videos, maxQuality = 80) {
 }
 
 /** 视频用途：保存第 1 P 不超过画质上限的最高画质与原声，合并为 mp4。 */
-export async function downloadVideo(client, meta, { maxQuality = 80 } = {}) {
-  const dir = localPath(join(SAVED_MEDIA, meta.aweme_id)), out = join(dir, 'video.mp4');
+export async function downloadVideo(client, meta, { maxQuality = 80, root = SAVED_MEDIA } = {}) {
+  const dir = localPath(join(root, meta.aweme_id)), out = join(dir, 'video.mp4');
   if (!under(out, SAVED_MEDIA)) throw new Error('视频位置不在收藏目录');
   if (existsSync(out)) { try { probe(out, { video: true }); return result(meta, out, { gear: 'cached', quality: 'high' }); } catch { rmSync(out, { force: true }); } }
   mkdirSync(dir, { recursive: true });

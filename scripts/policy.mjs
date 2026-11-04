@@ -61,6 +61,10 @@ export const MEDIA = localPath(cfg('DUST_MEDIA', join(DUST_HOME, 'media')));
 export const TEMP = localPath(join(DUST_HOME, 'tmp-media'));
 export const SAVED_MEDIA = localPath(cfg('DUST_SAVED_MEDIA', join(DUST_HOME, 'saved-media')));
 if ([MEDIA,TEMP].some(p => p === SAVED_MEDIA || under(p,SAVED_MEDIA) || under(SAVED_MEDIA,p))) throw new Error('视频收藏目录必须与缓存和临时目录分开');
+// 收件箱预下载：放在视频收藏目录下的隐藏子目录，与收藏共用空间上限；用户决定后移出或删除。
+export const REVIEW_MEDIA = join(SAVED_MEDIA, '.review');
+// 超过这个时长的待确认视频不预下载，等用户决定后再下载。
+export const PREVIEW_MAX_SECONDS = 30 * 60;
 export function under(path, root) { const p = resolve(path), r = resolve(root); return p.startsWith(r + sep); }
 export function treeBytes(path) {
   if (!existsSync(path)) return 0;
