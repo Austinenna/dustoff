@@ -153,6 +153,7 @@ textarea{resize:vertical}
 .between{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .pagination{display:flex;justify-content:space-between;align-items:center;margin-top:16px;font-size:12.5px;color:var(--muted)}
 .pagination>div{display:flex;gap:8px;align-items:center}
+.load-more{display:flex;justify-content:center;align-items:center;gap:10px;min-height:56px;margin-top:8px}
 .cover{position:relative;overflow:hidden;border-radius:10px;background:var(--sunken);display:block}
 .cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .cover .badge{position:absolute;right:8px;bottom:8px;z-index:1;font-size:11px;font-weight:500;color:#fff;background:rgba(0,0,0,.45);backdrop-filter:blur(6px);padding:1px 7px;border-radius:6px;font-variant-numeric:tabular-nums}

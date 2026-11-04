@@ -286,17 +286,55 @@ function videosPage(){const m=state.media;return `<div class="page">${head('媒�
   <div class="toolbar"><div class="seg">${[['video','视频',state.overview.videos],['gallery','图集',state.overview.galleries||0],['post','X 原帖',state.overview.platforms?.x||0]].map(([v,l,c])=>`<button type="button" data-action="media-tab" data-value="${v}" aria-pressed="${m.tab===v}">${l} <small class="num">${c}</small></button>`).join('')}</div>
   ${m.tab==='post'?'':`<div class="seg">${[['all','全部平台'],['douyin','抖音'],['bilibili','B站'],['x','X']].map(([v,l])=>`<button type="button" data-action="media-platform" data-value="${v}" aria-pressed="${m.platform===v}">${l}</button>`).join('')}</div>`}
   ${searchField(m.q,'搜索标题、作者','media-search')}</div><div id="media-list">${empty('正在读取…')}</div></div>`;}
+// 媒体库滚动加载：先读第一批，滚到列表底部附近时接着读下一批并追加，不翻页。
+// 刷新（删除、转为笔记后）按已读到的批数重新读取，保持当前位置。
+const mediaQuery=(m,page)=>'items?'+query({[m.tab==='video'?'videos':m.tab==='gallery'?'galleries':'posts']:1,size:m.tab==='post'?20:24,q:m.q,page,platform:m.tab==='post'?'all':m.platform});
+let mediaObserver=null,mediaLoading=false;
 async function loadMedia(){
-  const epoch=++listEpoch,page=pageEpoch,m=state.media;
-  const data=await api('items?'+query({[m.tab==='video'?'videos':m.tab==='gallery'?'galleries':'posts']:1,size:m.tab==='post'?20:24,q:m.q,page:m.page,platform:m.tab==='post'?'all':m.platform}));
-  if(epoch!==listEpoch||page!==pageEpoch)return;m.data=data;m.page=data.page;
+  const epoch=++listEpoch,page=pageEpoch,m=state.media,pages=Math.max(1,m.page||1);
+  mediaObserver?.disconnect();mediaLoading=false;
+  let data,items=[];
+  for(let n=1;n<=pages;n++){data=await api(mediaQuery(m,n));if(epoch!==listEpoch||page!==pageEpoch)return;items=items.concat(data.items);if(n>=data.pages)break;}
+  m.items=items;m.data=data;m.page=Math.min(pages,data.pages);
   const none=m.q?'没有找到匹配的内容':m.tab==='video'?'还没有保留的视频，可在收藏记录中选择视频用途':m.tab==='gallery'?'还没有保存的图集':'还没有 X 书签';
-  if(m.tab==='post')$('#media-list').innerHTML=data.items.length?`<div class="posts">${data.items.map(i=>{const s=postState(i);return `<article class="card post-card"><div class="who"><span class="avatar" style="background:hsl(${hue(i.author||i.id)} 40% 45%)">${esc((i.author||'X').slice(0,1))}</span><span><b>${esc(i.author||'未知作者')}</b><small>${esc(fmt(i.collected_at||i.first_seen))}</small></span><span style="margin-left:auto">${pf('x',false)}</span></div><h3>${esc(titleOf(i))}</h3>${i.gist&&i.gist!==titleOf(i)?`<p>${esc(i.gist)}</p>`:''}<div class="foot">${tag(s.label,s.tone)}${i.last_error?`<small class="cell-error">${esc(i.last_error).slice(0,80)}</small>`:''}<span style="margin-left:auto" class="row">${i.note_path?button('阅读','read',`data-id="${esc(i.id)}"`,'quiet sm'):''}${i.note_path?button('加入素材箱','add-material',`data-id="${esc(i.id)}" data-kind="post"`,'quiet sm'):''}${sourceA(i,'原帖')}</span></div></article>`;}).join('')}</div>${pagination(data,'media')}`:empty(none);
-  else if(m.tab==='gallery'){$('#media-list').innerHTML=data.items.length?`<div class="wall">${wallCards(data.items)}</div>${pagination(data,'media')}`:empty(none);layoutWall();}
-  else $('#media-list').innerHTML=data.items.length?`<div class="media-grid">${data.items.map(i=>mediaCard(i)).join('')}</div>${pagination(data,'media')}`:empty(none);
+  if(!items.length){$('#media-list').innerHTML=empty(none);return;}
+  const box=m.tab==='post'?'posts':m.tab==='gallery'?'wall':'media-grid';
+  $('#media-list').innerHTML=`<div class="${box}">${mediaItems(0)}</div><div class="load-more" id="media-more"></div>`;
+  if(m.tab==='gallery')layoutWall();
+  watchMediaEnd();
+}
+function mediaItems(from){
+  const m=state.media,items=m.items;
+  if(m.tab==='post')return items.slice(from).map(postCard).join('');
+  if(m.tab==='gallery'){const big=wallBig(items);return items.slice(from).map((i,n)=>mediaCard(i,{big:big[from+n]})).join('');}
+  return items.slice(from).map(i=>mediaCard(i)).join('');
+}
+function postCard(i){const s=postState(i);return `<article class="card post-card"><div class="who"><span class="avatar" style="background:hsl(${hue(i.author||i.id)} 40% 45%)">${esc((i.author||'X').slice(0,1))}</span><span><b>${esc(i.author||'未知作者')}</b><small>${esc(fmt(i.collected_at||i.first_seen))}</small></span><span style="margin-left:auto">${pf('x',false)}</span></div><h3>${esc(titleOf(i))}</h3>${i.gist&&i.gist!==titleOf(i)?`<p>${esc(i.gist)}</p>`:''}<div class="foot">${tag(s.label,s.tone)}${i.last_error?`<small class="cell-error">${esc(i.last_error).slice(0,80)}</small>`:''}<span style="margin-left:auto" class="row">${i.note_path?button('阅读','read',`data-id="${esc(i.id)}"`,'quiet sm'):''}${i.note_path?button('加入素材箱','add-material',`data-id="${esc(i.id)}" data-kind="post"`,'quiet sm'):''}${sourceA(i,'原帖')}</span></div></article>`;}
+function watchMediaEnd(){
+  const m=state.media,more=$('#media-more');if(!more)return;
+  const done=m.page>=m.data.pages;
+  more.innerHTML=done?`<small>共 ${m.data.total} 条，已经到底了</small>`:'<small>正在加载更多…</small>';
+  if(done)return;
+  // 提前一屏开始读，滚动时基本看不到等待。
+  mediaObserver=new IntersectionObserver(entries=>{if(entries.some(e=>e.isIntersecting))void loadMoreMedia();},{rootMargin:'0px 0px 1200px 0px'});
+  mediaObserver.observe(more);
+}
+async function loadMoreMedia(){
+  const m=state.media;if(mediaLoading||m.page>=m.data.pages)return;
+  const epoch=listEpoch,page=pageEpoch;mediaLoading=true;mediaObserver?.disconnect();
+  try{
+    const data=await api(mediaQuery(m,m.page+1));if(epoch!==listEpoch||page!==pageEpoch)return;
+    // 读取期间有新收藏进来会让分页错位，按 ID 去重。
+    const seen=new Set(m.items.map(i=>i.id)),fresh=data.items.filter(i=>!seen.has(i.id)),from=m.items.length;
+    m.items=m.items.concat(fresh);m.data=data;m.page=data.page;
+    $('#media-list > :first-child').insertAdjacentHTML('beforeend',mediaItems(from));
+    if(m.tab==='gallery')layoutWall();
+    watchMediaEnd();
+  }catch(e){if(epoch===listEpoch){const more=$('#media-more');if(more)more.innerHTML=`<small>${esc(e.message)}</small>${button('重试','media-more','','quiet sm')}`;}}
+  finally{if(epoch===listEpoch)mediaLoading=false;}
 }
 // 图集墙：图多（9 张及以上）或横图的图集做成两列宽的大卡，相邻 4 张内只出一张，避免大卡扎堆。
-function wallCards(items){let last=-9;return items.map((i,n)=>{const big=(i.image_count>=9||i.cover_ratio>=1.2)&&n-last>4;if(big)last=n;return mediaCard(i,{big});}).join('');}
+function wallBig(items){let last=-9;return items.map((i,n)=>{const big=(i.image_count>=9||i.cover_ratio>=1.2)&&n-last>4;if(big)last=n;return big;});}
 // 网格每行 4px，按卡片实际高度算出占几行，形成高矮错落的瀑布流；空位由后面的卡片补上。
 const WALL_ROW=4,WALL_GAP=20;let wallObserver=null,wallWidth=0;
 function layoutWall(){
@@ -687,6 +725,8 @@ async function go(hash){
   if(route!==state.route){window.scrollTo({top:0,behavior:'instant'});}
   const epoch=++pageEpoch;++listEpoch;++docEpoch;++logEpoch;
   if(dialog.open)dialog.close();closePalette();
+  // 从别的页面回到媒体库时从第一批开始读，不把上次滚动加载过的批次全部重读。
+  if(route==='videos'&&route!==state.route)state.media.page=1;
   state.route=route;
   if(route==='videos'&&sub)state.media={...state.media,tab:sub,page:1};
   if(route==='settings'&&sub)state.settingsTab=sub;
@@ -771,10 +811,11 @@ root.addEventListener('click',async event=>{
     else if(a==='kb-step')kbStep(Number(b.dataset.step));
     else if(a==='kb-kind'){state.kb.kind=b.dataset.value;await loadDocument();}
     else if(a==='toggle-read'){const n=state.index.find(x=>x.id===id),read=!n.read_at;await api('read',{id,read});n.read_at=read?Date.now()/1000:null;renderNotes();notice(read?'已标为已读':'已标为未读');}
+    else if(a==='media-more')await loadMoreMedia();
     else if(a==='media-tab'){Object.assign(state.media,{tab:b.dataset.value,page:1});main.innerHTML=videosPage();await loadMedia();}
     else if(a==='media-platform'){Object.assign(state.media,{platform:b.dataset.value,page:1});main.innerHTML=videosPage();await loadMedia();}
     else if(a==='collection-filter'){Object.assign(state.collection,{status:b.dataset.value,page:1});main.innerHTML=collectionPage();await loadCollection();}
-    else if(a==='paginate'){const kind=b.dataset.kind,step=Number(b.dataset.step);if(kind==='runs'){state.runPage+=step;runRows();}else if(kind==='inbox'){state.inbox.page+=step;await loadPending();}else if(kind==='media'){state.media.page+=step;await loadMedia();}else{state.collection.page+=step;await loadCollection();}}
+    else if(a==='paginate'){const kind=b.dataset.kind,step=Number(b.dataset.step);if(kind==='runs'){state.runPage+=step;runRows();}else if(kind==='inbox'){state.inbox.page+=step;await loadPending();}else{state.collection.page+=step;await loadCollection();}}
     else if(a==='schedule-toggle'){await mutate('schedule',{action:b.dataset.value},b.dataset.value==='start'?'自动整理已开启。':'自动整理及登录自动启用已关闭。');$('#schedule-anchor').innerHTML=scheduleCard();schedulePreview();}
     else if(a==='log-kind'){state.logKind=b.dataset.value;runRows();await loadLog();}
     else if(a==='select-run'){state.runId=id;runRows();await loadLog();}
