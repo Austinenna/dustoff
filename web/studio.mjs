@@ -17,7 +17,8 @@ const state={route:'overview',overview:null,settings:null,index:null,library:nul
   media:{tab:'video',platform:'all',q:'',page:1},inbox:{id:null,page:1},
   collection:{q:'',status:'all',page:1,platform:'all'},materials:{topic:'all'},settingsTab:'models',
   runs:[],runId:null,logKind:'business',runPage:1,selection:'',lookup:''};
-let pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null,videoTimer;
+// keptUnread：刚手动标为未读、仍停留在这一篇时不再自动标已读；切到别的笔记后失效
+let keptUnread=null,pageEpoch=0,listEpoch=0,docEpoch=0,logEpoch=0,dialogEpoch=0,searchTimer,polling=false,drawerId=null,videoTimer;
 const $=s=>root.querySelector(s);
 const query=v=>new URLSearchParams(Object.entries(v).filter(([,x])=>x!==undefined&&x!==null)).toString();
 const busy=()=>!!state.overview?.execution.running;
@@ -294,6 +295,7 @@ function renderNotes(){
 }
 async function loadDocument(){
   const epoch=++docEpoch,k=state.kb,list=filtered(),n=state.index.find(x=>x.id===k.id);if(!n)return;
+  if(keptUnread!==n.id)keptUnread=null;
   const pos=list.findIndex(x=>x.id===n.id);
   const bar=formatted=>`<div class="reader-bar">${button(`${ic(k.list?'collapse':'expand',15)}${k.list?'收起列表':'展开列表'}`,'kb-list','title="收起或展开列表（[）"','quiet sm')}${k.list?'':`<span class="pager">${button(ic('up',14),'kb-step','data-step="-1" title="上一篇（K）" aria-label="上一篇"','quiet sm')}<small class="num">${pos+1} / ${list.length}</small>${button(ic('down',14),'kb-step','data-step="1" title="下一篇（J）" aria-label="下一篇"','quiet sm')}</span>`}
     ${n.has_note?`<div class="seg">${[['note','知识笔记'],...(formatted?[['formatted','格式化转写']]:[])].map(([v,l])=>`<button type="button" data-action="kb-kind" data-value="${v}" aria-pressed="${k.kind===v||(!formatted&&v==='note')}">${l}</button>`).join('')}</div>`:'<span style="margin-right:auto"></span>'}
@@ -305,7 +307,7 @@ async function loadDocument(){
     const kind=parts.formatted&&k.kind==='formatted'?'formatted':'note';
     const body=n.has_note?renderMarkdown(parts[kind],{headingOffset:1}):`<div class="raw">${esc(doc.content)}</div>`;
     $('#reader').innerHTML=bar(!!parts.formatted)+`<div class="article"><div class="kicker">${n.category?chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(n.category)}"></span>${esc(n.category)}`):''}${n.decay?chip(decayLabel(n.decay),evergreen(n.decay)?'green':'amber'):''}${n.has_note?'':chip('原始文字稿')}${n.archive_only?chip('只存原帖'):''}</div><h1>${esc(n.title)}</h1><div class="byline">${pf(n.platform)}<span>${esc(n.author||'未知作者')}</span>${n.duration_s?`<span>${esc(duration(n.duration_s))}</span>`:''}<span>收藏 ${esc(fmt(n.collected_at))}</span><span>整理 ${esc(fmt(n.at))}</span>${n.has_note?button('在文件夹中显示','open',`data-kind="folder" data-file-kind="note" data-id="${esc(n.id)}"`,'quiet sm'):''}</div><div class="prose">${body}</div>${n.tags.length?`<div class="tags">${n.tags.map(t=>chip('#'+esc(t),'outline')).join('')}</div>`:''}</div>`;
-    if(!n.read_at){api('read',{id:n.id,read:true}).then(()=>{n.read_at=Date.now()/1000;if(epoch!==docEpoch)return;document.querySelector(`.kb-item[data-id="${CSS.escape(n.id)}"] .unread`)?.remove();const t=$('#reader [data-action="toggle-read"]');if(t)t.innerHTML=`${ic('check',14)}标为未读`;}).catch(()=>{});}
+    if(!n.read_at&&keptUnread!==n.id){api('read',{id:n.id,read:true}).then(()=>{n.read_at=Date.now()/1000;if(epoch!==docEpoch)return;document.querySelector(`.kb-item[data-id="${CSS.escape(n.id)}"] .unread`)?.remove();const t=$('#reader [data-action="toggle-read"]');if(t)t.innerHTML=`${ic('check',14)}标为未读`;}).catch(()=>{});}
   }catch(e){if(epoch===docEpoch)$('#reader').innerHTML=bar(false)+empty(e.message);}
 }
 function kbStep(dir){const list=filtered();if(!list.length)return;const n=Math.max(0,list.findIndex(x=>x.id===state.kb.id));state.kb.id=list[(n+dir+list.length)%list.length].id;root.querySelectorAll('.kb-item').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.id===state.kb.id)));void loadDocument();}
@@ -842,7 +844,7 @@ root.addEventListener('click',async event=>{
     else if(a==='kb-list'){state.kb.list=!state.kb.list;renderNotes();}
     else if(a==='kb-step')kbStep(Number(b.dataset.step));
     else if(a==='kb-kind'){state.kb.kind=b.dataset.value;await loadDocument();}
-    else if(a==='toggle-read'){const n=state.index.find(x=>x.id===id),read=!n.read_at;await api('read',{id,read});n.read_at=read?Date.now()/1000:null;renderNotes();notice(read?'已标为已读':'已标为未读');}
+    else if(a==='toggle-read'){const n=state.index.find(x=>x.id===id),read=!n.read_at;await api('read',{id,read});n.read_at=read?Date.now()/1000:null;keptUnread=read?null:id;renderNotes();notice(read?'已标为已读':'已标为未读');}
     else if(a==='media-more')await loadMoreMedia();
     else if(a==='media-tab'){Object.assign(state.media,{tab:b.dataset.value,page:1});main.innerHTML=videosPage();await loadMedia();}
     else if(a==='media-platform'){Object.assign(state.media,{platform:b.dataset.value,page:1});main.innerHTML=videosPage();await loadMedia();}
