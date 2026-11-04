@@ -190,6 +190,7 @@ textarea{resize:vertical}
 .cols{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:20px}
 .stack{display:grid;gap:20px;align-content:start;min-width:0}
 .stack>*,.cols>*{min-width:0}
+.today-rest{margin-top:20px}
 .fresh{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .fresh-card{padding:18px;display:flex;flex-direction:column;gap:10px;text-align:left;transition:transform .2s,box-shadow .2s;min-height:200px}
 .fresh-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
@@ -234,8 +235,8 @@ textarea{resize:vertical}
 .media-card small{display:flex;gap:6px;align-items:center}
 .wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));grid-auto-rows:4px;column-gap:16px;grid-auto-flow:dense}
 .wall .media-card{align-self:start}
-/* 今日页：一排 5 张，标题固定占两行，作者名对齐 */
-.media-strip{grid-template-columns:repeat(5,minmax(0,1fr));gap:16px}
+/* 今日页：整行 6 张，标题固定占两行，作者名对齐 */
+.media-strip{grid-template-columns:repeat(6,minmax(0,1fr));gap:16px}
 .media-strip .media-card b{min-height:calc(2*1.45em)}
 .wall .media-card .cover{aspect-ratio:4/5}
 .wall .media-card.big b{font-size:14.5px}

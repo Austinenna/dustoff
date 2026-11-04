@@ -107,7 +107,7 @@ async function loadToday(){
   const used=o.usedToday,total=p.totalDaily||p.daily,ratio=Math.min(1,used/Math.max(1,total)),C=2*Math.PI*22;
   const outputs=insights.output.map(d=>d.notes);
   const resurface=pickResurface(notes);
-  const recent=[...o.recentVideos,...galleries.items].sort((a,b)=>(b.updated_at||0)-(a.updated_at||0)).slice(0,5);
+  const recent=[...o.recentVideos,...galleries.items].sort((a,b)=>(b.updated_at||0)-(a.updated_at||0)).slice(0,6);
   $('#today').innerHTML=`
   <section class="hero">
     <div class="card hero-main">
@@ -134,15 +134,17 @@ async function loadToday(){
     <div class="stack">
       <section><div class="sec-head"><h2>新到的知识</h2><span class="sub">最近整理完成</span><a class="more" href="#notes">全部 ${notes.length} 篇 ›</a></div>
         <div class="fresh">${notes.slice(0,4).map(n=>`<button type="button" class="card fresh-card" data-action="read" data-id="${esc(n.id)}"><span class="meta">${pf(n.platform,false)}${n.category?`<span style="color:${catColor(n.category)}">● ${esc(n.category)}</span>`:''}<span>· ${esc(fmt(n.at))}</span>${n.read_at?'':'<span class="unread" style="margin-left:auto" title="未读"></span>'}</span><h3>${esc(n.title)}</h3>${n.gist?`<p>${esc(n.gist)}</p>`:''}<span class="foot">${n.tags.slice(0,3).map(t=>chip('#'+esc(t),'outline')).join('')}</span></button>`).join('')||empty('整理完成的知识笔记会显示在这里')}</div></section>
-      ${resurface?`<section class="card resurface"><div class="l"><span class="eyebrow" style="color:var(--accent)">重温 · ${esc(fmt(resurface.collected_at))} 收藏${resurface.read_at?'':' · 还没读过'}</span><h3>${esc(resurface.title)}</h3>${resurface.gist?`<blockquote>${esc(resurface.gist)}</blockquote>`:''}<div class="row">${button('继续读','read',`data-id="${esc(resurface.id)}"`,'sm')}${button('加入素材箱','add-material',`data-id="${esc(resurface.id)}" data-kind="note"`,'quiet sm')}${button('换一篇','resurface-next','','quiet sm')}</div></div>
-        <div class="r"><div class="sec-head" style="margin-bottom:4px"><h2 style="font-size:13.5px">还没读过的</h2><span class="sub">${unread.length} 篇</span></div>${unread.slice(0,5).map(n=>`<button type="button" class="list-item" data-action="read" data-id="${esc(n.id)}"><span class="unread"></span><span>${esc(n.title)}</span><small>${esc(fmt(n.at))}</small></button>`).join('')||'<p class="muted" style="font-size:13px">都读过了。</p>'}</div></section>`:''}
-      <section><div class="sec-head"><h2>最近保存的视频与图集</h2><a class="more" href="#videos">媒体库 ›</a></div><div class="media-grid media-strip">${recent.map(i=>mediaCard(i,{uniform:true})).join('')||empty('选择「保存视频」后，保留的视频会显示在这里')}</div></section>
     </div>
     <div class="stack">
       <section class="card card-pad"><div class="sec-head"><h2>等你决定</h2><span class="sub">${o.review} 条</span><a class="more" href="#pending">逐条处理 ›</a></div>${review.items.map(i=>`<div class="decide-row">${thumbOf(i)}<div class="t"><b>${esc(titleOf(i))}</b><small>${esc(PLATFORM_LABELS[i.platform]||'')} · ${esc(kindOf(i))}</small></div>${i.pending_intents?`<small>${esc(intentLabel(i.pending_intents)).slice(0,8)}</small>`:`<div class="mini-choice"><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="note">笔记</button><button type="button" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="video">视频</button></div>`}</div>`).join('')||'<p class="muted" style="font-size:13px">暂时没有需要你决定的收藏。</p>'}</section>
       <section class="card card-pad"><div class="sec-head"><h2>需要留意</h2></div>${alerts().join('')}</section>
       <section class="card card-pad"><div class="sec-head"><h2>来源</h2><a class="more" href="#account">管理 ›</a></div>${sourceRows()}</section>
     </div>
+  </div>
+  <div class="stack today-rest">
+      ${resurface?`<section class="card resurface"><div class="l"><span class="eyebrow" style="color:var(--accent)">重温 · ${esc(fmt(resurface.collected_at))} 收藏${resurface.read_at?'':' · 还没读过'}</span><h3>${esc(resurface.title)}</h3>${resurface.gist?`<blockquote>${esc(resurface.gist)}</blockquote>`:''}<div class="row">${button('继续读','read',`data-id="${esc(resurface.id)}"`,'sm')}${button('加入素材箱','add-material',`data-id="${esc(resurface.id)}" data-kind="note"`,'quiet sm')}${button('换一篇','resurface-next','','quiet sm')}</div></div>
+        <div class="r"><div class="sec-head" style="margin-bottom:4px"><h2 style="font-size:13.5px">还没读过的</h2><span class="sub">${unread.length} 篇</span></div>${unread.slice(0,5).map(n=>`<button type="button" class="list-item" data-action="read" data-id="${esc(n.id)}"><span class="unread"></span><span>${esc(n.title)}</span><small>${esc(fmt(n.at))}</small></button>`).join('')||'<p class="muted" style="font-size:13px">都读过了。</p>'}</div></section>`:''}
+      <section><div class="sec-head"><h2>最近保存的视频与图集</h2><a class="more" href="#videos">媒体库 ›</a></div><div class="media-grid media-strip">${recent.map(i=>mediaCard(i,{uniform:true})).join('')||empty('选择「保存视频」后，保留的视频会显示在这里')}</div></section>
   </div>`;
   void fillMonthCost(epoch);
 }
@@ -205,7 +207,7 @@ function sourceRows(){
 }
 function mediaCard(i,{big=false,uniform=false}={}){
   const badge=i.media_type==='gallery'?`${i.image_count||'多'} 张`:duration(i.duration_s);
-  // 图集墙按第一张图的真实比例显示（今日页一排卡片统一 3:4，uniform）；过长、过扁的图收在 9:16 到 4:3 之间，大卡最高 4:5。
+  // 图集墙按第一张图的真实比例显示（今日页整行卡片统一 3:4，uniform）；过长、过扁的图收在 9:16 到 4:3 之间，大卡最高 4:5。
   const ratio=!uniform&&i.cover_ratio>0?String(Math.min(4/3,Math.max(big?0.8:9/16,i.cover_ratio))):'';
   return `<button type="button" class="media-card${big?' big':''}" data-action="${i.media_type==='gallery'?'view-gallery':'play-video'}" data-id="${esc(i.id)}">${cover(i,{badge,pfb:true,ratio})}<b>${esc(titleOf(i))}</b><small>${esc(i.author||'未知作者')}${i.delete_after_note?' · 待转为笔记':i.note_path&&i.media_type!=='gallery'?' · 也有笔记':''}</small></button>`;
 }
