@@ -202,12 +202,13 @@ function renderInbox(){
   $('#inbox').innerHTML=`<div class="inbox">
     <div class="card queue-list"><div class="nav-label" style="padding:6px 10px">待确认 · ${data.total}</div>${data.items.map(x=>`<button type="button" class="q-item" data-action="inbox-select" data-id="${esc(x.id)}" aria-pressed="${x.id===i.id}">${thumbOf(x)}<span class="t"><b>${esc(titleOf(x))}</b><small>${esc(PLATFORM_LABELS[x.platform]||'')} · ${esc(x.author||'未知作者')} · ${esc(kindOf(x))}</small></span></button>`).join('')}${pagination(data,'inbox')}</div>
     <div class="stack">
-      <section class="card focus ${hasMedia(i)?'':'nocover'}">${hasMedia(i)?`<button type="button" class="focus-media" data-action="play-video" data-id="${esc(i.id)}" aria-label="播放视频">${cover(i,{badge:kindOf(i),pfb:true})}<span class="play-badge">${ic('play',22)}</span></button>`:''}<div class="body">
+      <section class="card focus"><div class="body">
         <div class="row">${pf(i.platform)}<small>· ${esc(i.author||'未知作者')}</small><span style="margin-left:auto">${sourceA(i)}</span></div>
         <h2>${esc(titleOf(i))}</h2>
         <div class="reason">${ic('spark',16)}<span><b style="font-weight:600">为什么需要你：</b>${esc(i.routing_reason||(bili?'B站新收藏默认由你确认用途和画质。':'需要你确认这条收藏的用途。'))}</span></div>
         ${i.pending_intents?`<p class="intent-note">${esc(intentLabel(i.pending_intents))}</p>`:''}
         ${previewHint(i)}
+        ${hasMedia(i)?inlinePlayer(i):''}
         <div class="choices">
           <button type="button" class="choice" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="note"><span class="kbd">N</span><b>${ic('note')}知识笔记</b><small>${bili?'字幕优先，没有字幕再转写':'转写后整理成笔记'}</small></button>
           <button type="button" class="choice" data-action="quick-purpose" data-id="${esc(i.id)}" data-purpose="video"><span class="kbd">V</span><b>${ic('video')}保存视频</b><small>${bili?'画质见下方':'保存高清原声'}</small></button>
@@ -219,9 +220,18 @@ function renderInbox(){
       ${queueLink}
     </div></div>`;
 }
+// 预下载的视频直接嵌在决定区里，点封面就地播放，不再弹窗。
+function inlinePlayer(i){return `<div class="inline-player"><button type="button" class="inline-poster" data-action="inline-play" data-id="${esc(i.id)}" aria-label="播放视频"><img src="api/video-poster?id=${encodeURIComponent(i.id)}" alt=""><span class="play-badge">${ic('play',22)}</span>${i.duration_s?`<span class="badge">${esc(duration(i.duration_s))}</span>`:''}</button></div>`;}
+function playInline(box,id){
+  const v=document.createElement('video');v.controls=true;v.playsInline=true;v.preload='metadata';v.setAttribute('aria-label','视频');
+  restoreVideoAudio(v);
+  // 原片浏览器放不了时转到弹窗播放器，那里会生成兼容副本。
+  v.addEventListener('error',()=>{box.innerHTML=`<div class="inline-error"><span>这个视频浏览器无法直接播放</span>${button('兼容播放','play-video',`data-id="${esc(id)}"`,'sm')}</div>`;});
+  box.replaceChildren(v);v.src='api/video?'+query({id});void v.play().catch(()=>{});
+}
 // 收件箱条目的视频状态：已预下载可直接看；太长的决定后再下载；其余在下一轮预下载。
 function previewHint(i){
-  if(hasMedia(i)||i.media_type==='post')return hasMedia(i)?'<p class="muted" style="font-size:12.5px">视频已预下载，点左侧封面观看；选「保存视频」直接移进收藏，选「知识笔记」不用重新下载。</p>':'';
+  if(hasMedia(i)||i.media_type==='post')return hasMedia(i)?'<p class="muted" style="font-size:12.5px">视频已预下载，可以先看再决定；选「保存视频」直接移进收藏，选「知识笔记」不用重新下载。</p>':'';
   const s=Number(i.duration_s);
   if(s>30*60)return '<p class="muted" style="font-size:12.5px">超过 30 分钟，没有预下载；决定后再下载。</p>';
   return '<p class="muted" style="font-size:12.5px">视频会在下一轮运行时预下载，届时可以先看再决定。</p>';
@@ -801,6 +811,7 @@ root.addEventListener('click',async event=>{
     else if(a==='stop')await mutate('stop',{},'已发送停止请求，正在完成收尾。');
     else if(a==='retry')await queueMutation('retry',{id});
     else if(a==='quick-purpose'){const q=root.querySelector(`[data-quality-for="${CSS.escape(id)}"]`);if(dialog.open&&dialog.classList.contains('player-dialog'))dialog.close();await queueMutation('purpose',{id,purpose:b.dataset.purpose,...(q&&b.dataset.purpose==='video'?{quality:q.value}:{})});}
+    else if(a==='inline-play')playInline(b.closest('.inline-player'),id);
     else if(a==='inbox-select'){state.inbox.id=id;renderInbox();}
     else if(a==='open')await mutate('open',{kind:b.dataset.kind,id,fileKind:b.dataset.fileKind},'已在本机打开。');
     else if(a==='resurface-next'){resurfaceShift++;await loadToday();}
