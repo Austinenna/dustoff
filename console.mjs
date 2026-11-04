@@ -284,14 +284,12 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/settings':result=store.saveSettings(data);break;
         case '/api/video-prepare':result=media.prepare(data.id);break;
         case '/api/video-to-note': {
-          if(serverMode)throw new HttpError(409,'服务器模式暂不提供本地视频文件操作');
           start('video-to-note',data);const operation=active;
           const code=await new Promise(resolve=>operation.child.once('close',resolve));
           if(code!==0)throw new HttpError(code===3?409:400,operation.error||'未能加入待办，请查看控制台操作日志');
           result={queued:true};break;
         }
         case '/api/video-delete': {
-          if(serverMode)throw new HttpError(409,'服务器模式暂不提供本地视频文件操作');
           if(data.confirm!==true)throw new HttpError(400,'请先确认将视频移入废纸篓');
           start('video-delete',data);const operation=active;
           const code=await new Promise(resolve=>operation.child.once('close',resolve));

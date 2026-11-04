@@ -1,7 +1,7 @@
 // 调用方须持有 pipeline 锁。只处理账本指向的单个视频，保留文字和恢复记录。
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, lstatSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DUST_HOME, expand } from './config.mjs';
@@ -9,9 +9,25 @@ import { createStore, HttpError } from './console-store.mjs';
 import { atomicWrite, localPath } from './policy.mjs';
 
 const execute=promisify(execFile);
-export async function moveVideoToTrash(path) {
-  if(process.platform!=='darwin'||!existsSync('/usr/bin/trash'))throw new Error('当前系统不支持移入废纸篓，视频未删除');
-  await execute('/usr/bin/trash',['-s',path],{timeout:10000,maxBuffer:64*1024});
+export const TRASH_KEEP_DAYS=7;
+export const videoTrashDir=(home=DUST_HOME)=>join(home,'trash','videos');
+// macOS 用系统废纸篓；服务器没有废纸篓，移到数据目录下的回收站，保留几天后由运行收尾清除。
+export async function moveVideoToTrash(path,{home=DUST_HOME}={}) {
+  if(process.platform==='darwin'&&existsSync('/usr/bin/trash'))return void await execute('/usr/bin/trash',['-s',path],{timeout:10000,maxBuffer:64*1024});
+  const dir=videoTrashDir(home);mkdirSync(dir,{recursive:true});
+  const target=join(dir,`${Date.now()}-${basename(path)}`);
+  try {renameSync(path,target);}
+  catch(error) {if(error.code!=='EXDEV')throw error;copyFileSync(path,target);unlinkSync(path);}
+}
+
+export function purgeVideoTrash({home=DUST_HOME,days=TRASH_KEEP_DAYS,now=Date.now()}={}) {
+  const dir=videoTrashDir(home);if(!existsSync(dir))return 0;
+  let n=0;
+  for(const name of readdirSync(dir)) {
+    const path=join(dir,name);
+    try {if(now-statSync(path).mtimeMs>days*86400_000){rmSync(path,{recursive:true,force:true});n++;}} catch {}
+  }
+  return n;
 }
 
 export async function deleteLocalVideo({id,home=DUST_HOME,trashFile=moveVideoToTrash,afterNote=false}) {
@@ -38,7 +54,7 @@ export async function deleteLocalVideo({id,home=DUST_HOME,trashFile=moveVideoToT
     // 先验证数据库写入，再移动文件；事务提交前失败可回滚。恢复记录保留原始条目。
     db.prepare("UPDATE items SET media_deleted=1,status=?,skip_reason=?,needs_ocr=0,last_error=NULL,updated_at=? WHERE platform=? AND id=?")
       .run(row.status==='removed'?'removed':row.note_path?'extracted':'skipped',afterNote?null:'video_deleted',Math.floor(Date.now()/1000),item.platform,id);
-    await trashFile(source);
+    await trashFile(source,{home});
     if(existsSync(source))throw new Error('视频仍在原位置，未完成移入废纸篓');
     db.exec('COMMIT');
     transaction=false;

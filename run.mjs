@@ -23,6 +23,7 @@ import { classifyItem, PURPOSES } from './scripts/routing.mjs';
 import { downloadGallery } from './scripts/gallery.mjs';
 import { downloadOne } from './scripts/download.mjs';
 import { cleanConvertedVideos } from './scripts/video-to-note.mjs';
+import { purgeVideoTrash } from './scripts/delete-video.mjs';
 import { appendHistory, codeVersion } from './scripts/run-history.mjs';
 const scripts = join(dirname(fileURLToPath(import.meta.url)), 'scripts');
 const fresh = id => itemRow(id);
@@ -403,6 +404,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
           summary.failures.push(...summary.convertedCleanup.failures);
         } catch(e) { summary.failures.push({ error:`转换视频清理失败：${e.message}` }); }
       }
+      try { summary.trashPurged = purgeVideoTrash(); } catch(e) { log(`回收站清理未完成：${e.message}`); }
       summary.pending = pendingQueue().length; summary.usedToday = usage();
       atomicWrite(join(stage.runDir, 'result.json'), JSON.stringify(summary, null, 2));
       stage.pruneRuns();

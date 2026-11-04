@@ -33,7 +33,7 @@ const PF={douyin:['抖音','抖'],bilibili:['B站','B'],x:['X','𝕏']};
 const pf=(p,label=true)=>{const v=PF[p]||PF.douyin;return `<span class="pf ${PF[p]?p:'douyin'}"><i>${v[1]}</i>${label?v[0]:''}</span>`;};
 const tag=(value,tone='')=>`<span class="tag ${tone}">${esc(value)}</span>`;
 const chip=(html,tone='')=>`<span class="chip ${tone}">${html}</span>`;
-const button=(label,action,attrs='',style='')=>serverMode&&['open','delete-video','video-to-note'].includes(action)?'':`<button type="button" class="btn ${style}" data-action="${action}" ${attrs}>${label}</button>`;
+const button=(label,action,attrs='',style='')=>serverMode&&action==='open'?'':`<button type="button" class="btn ${style}" data-action="${action}" ${attrs}>${label}</button>`;
 const empty=(text='暂无内容')=>`<div class="empty">${esc(text)}</div>`;
 const sourceA=(item,label='原作品')=>`<a class="btn quiet sm" href="${esc(sourceLink(item))}" target="_blank" rel="noopener noreferrer">${ic('ext',14)}${label}</a>`;
 const kindOf=i=>i.media_type==='gallery'?'图集':i.media_type==='post'?'帖子':duration(i.duration_s);
@@ -179,7 +179,7 @@ function sourceRows(){
 }
 function mediaCard(i){
   const badge=i.media_type==='gallery'?`${i.image_count||'多'} 张`:duration(i.duration_s);
-  return `<button type="button" class="media-card" data-action="${i.media_type==='gallery'?'view-gallery':'play-video'}" data-id="${esc(i.id)}">${cover(i,{badge,pfb:true})}<b>${esc(titleOf(i))}</b><small>${esc(i.author||'未知作者')}${i.delete_after_note?' · 待转为笔记':i.note_path&&i.media_type!=='gallery'?' · 也有笔记':''}</small></button>`;
+  return `<button type="button" class="media-card" data-action="${i.media_type==='gallery'?'view-gallery':'play-video'}" data-id="${esc(i.id)}">${cover(i,{badge,pfb:true})}<b>${esc(titleOf(i))}</b><small>${esc(i.author||'未知作者')}${i.delete_after_note?' · 待提取知识':i.note_path&&i.media_type!=='gallery'?' · 也有笔记':''}</small></button>`;
 }
 
 // ── 收件箱：只放需要你决定的条目 ──
@@ -324,14 +324,15 @@ async function preparePlayback(id,epoch){
     await check();
   }catch(e){if(epoch===dialogEpoch){v.dataset.preparing='false';videoMessage(e.message);}}
 }
-function videoNoteLabel(i){return i.status==='extracted'?(i.retain_media?'内容不足，视频保留':'笔记已生成，待清理视频'):['failed','skipped'].includes(i.status)?'转换未完成，视频保留':'待转为笔记';}
-function videoNoteButton(i){if(i.media_deleted||i.media_type==='gallery')return '';if(i.delete_after_note&&i.processing_mode==='note')return `<span data-video-note-button>${button(esc(videoNoteLabel(i)),'','disabled','sm')}</span>`;return i.can_convert_to_note?`<span data-video-note-button>${button('转为笔记','video-to-note',`data-id="${esc(i.id)}" data-idle ${busy()?'disabled':''}`,'sm')}</span>`:'';}
+function videoNoteLabel(i){return i.status==='extracted'?(i.retain_media?'内容不足，视频保留':'笔记已生成，待清理视频'):['failed','skipped'].includes(i.status)?'转换未完成，视频保留':'待提取知识';}
+function videoNoteButton(i){if(i.media_deleted||i.media_type==='gallery')return '';if(i.delete_after_note&&i.processing_mode==='note')return `<span data-video-note-button>${button(esc(videoNoteLabel(i)),'','disabled','sm')}</span>`;return i.can_convert_to_note?`<span data-video-note-button>${button(`${ic('note',14)}提取知识`,'video-to-note',`data-id="${esc(i.id)}" data-idle ${busy()?'disabled':''}`,'sm')}</span>`:'';}
 function videoNoteHint(i){
-  if(serverMode||i.media_deleted||(!i.can_convert_to_note&&!i.delete_after_note))return '';
-  let text='使用本地视频整理笔记，成功后原视频自动移入废纸篓。';
-  if(i.delete_after_note){if(['failed','skipped'].includes(i.status)||i.retain_media)text='转换未完整完成，原视频已保留。可在收藏详情查看原因。';else if(i.status==='extracted')text='笔记已保存，原视频将在运行收尾时移入废纸篓；清理失败会在下次运行重试。';else text=state.overview?.scheduler.loaded?'已加入待办，下次定时运行时整理笔记，成功后原视频自动移入废纸篓。':'已加入待办。自动整理已关闭，请开启自动安排或手动运行；成功后原视频自动移入废纸篓。';}
+  if(i.media_deleted||(!i.can_convert_to_note&&!i.delete_after_note))return '';
+  let text=`使用${serverMode?'服务器上的':'本地'}视频整理笔记，成功后原视频自动移入${TRASH}。`;
+  if(i.delete_after_note){if(['failed','skipped'].includes(i.status)||i.retain_media)text='转换未完整完成，原视频已保留。可在收藏详情查看原因。';else if(i.status==='extracted')text=`笔记已保存，原视频将在运行收尾时移入${TRASH}；清理失败会在下次运行重试。`;else text=state.overview?.scheduler.loaded?`已加入待办，下次定时运行时整理笔记，成功后原视频自动移入${TRASH}。`:`已加入待办。自动整理已关闭，请开启自动安排或手动运行；成功后原视频自动移入${TRASH}。`;}
   return `<p class="muted" style="font-size:12.5px" data-video-note-hint>${esc(text)}</p>`;
 }
+const TRASH=serverMode?'回收站（7 天后自动清除）':'废纸篓';
 const videoDeleteButton=i=>i.media_type!=='gallery'&&i.media_path&&!i.media_deleted?button('删除视频','delete-video',`data-id="${esc(i.id)}" data-idle ${busy()?'disabled':''}`,'quiet sm danger'):'';
 async function playVideo(id){
   const epoch=++dialogEpoch;drawerId=null;
@@ -356,17 +357,17 @@ async function playVideo(id){
   }catch(e){if(epoch===dialogEpoch&&dialog.open){dialog.className='modal';dialog.innerHTML=dialogHead('视频暂不可播放')+empty(e.message);}}
 }
 async function deleteVideo(id){
-  if(!window.confirm('把这个视频移入废纸篓？笔记、文字稿和收藏记录会保留。'))return;
+  if(!window.confirm(`把这个视频移入${TRASH}？笔记、文字稿和收藏记录会保留。`))return;
   const epoch=dialogEpoch;stopVideo();
   try{await api('video-delete',{id,confirm:true});}catch(error){if(epoch===dialogEpoch&&dialog.open)await playVideo(id);throw error;}
   if(epoch===dialogEpoch&&dialog.open)dialog.close();
-  await refreshOverview();await reloadList();notice('视频已移入废纸篓，笔记、文字稿和收藏记录已保留。');
+  await refreshOverview();await reloadList();notice(`视频已移入${TRASH}，笔记、文字稿和收藏记录已保留。`);
 }
 async function queueVideoNote(id){
   const epoch=dialogEpoch;await api('video-to-note',{id});await refreshOverview();
   const i=await api('item?'+query({id}));
   if(dialog.open&&dialogEpoch===epoch){if(drawerId===id)await detail(id);else{const c=dialog.querySelector('[data-video-note-button]'),h=dialog.querySelector('[data-video-note-hint]');if(c)c.outerHTML=videoNoteButton(i);if(h)h.outerHTML=videoNoteHint(i);}}
-  await reloadList();notice(state.overview.scheduler.loaded?'已加入待办，下次定时运行时转为笔记。':'已加入待办。自动整理已关闭，请开启自动安排或手动运行。');
+  await reloadList();notice(state.overview.scheduler.loaded?'已加入待办，下次定时运行时提取知识。':'已加入待办。自动整理已关闭，请开启自动安排或手动运行。');
 }
 
 // ── 素材箱 ──
@@ -518,7 +519,7 @@ async function queueMutation(path,data){
 // ── 流水线：运行、队列、来源、自动安排、运行记录 ──
 function executionPanel(){
   const o=state.overview,e=o.execution,last=runSummary(o.lastRun),r=o.lastRun?.result;
-  const kinds={run:'本轮整理',retry:'恢复待办',purpose:'保存用途',discard:'放弃处理','delete-item':'删除记录',login:'扫码登录','session-check':'登录检查','bili-login':'B站扫码登录','bili-session-check':'B站登录检查',quality:'保存画质','apply-intents':'执行记下的操作','video-to-note':'转为笔记','video-delete':'删除视频'};
+  const kinds={run:'本轮整理',retry:'恢复待办',purpose:'保存用途',discard:'放弃处理','delete-item':'删除记录',login:'扫码登录','session-check':'登录检查','bili-login':'B站扫码登录','bili-session-check':'B站登录检查',quality:'保存画质','apply-intents':'执行记下的操作','video-to-note':'提取知识','video-delete':'删除视频'};
   if(e.running)return `<section class="card live active"><div class="row"><span class="pulse"></span><b style="font-weight:600">正在执行${esc(kinds[e.kind]||'任务')}</b><small>开始于 ${esc(fmt(e.startedAt))}${e.owned?'':' · 由其他入口启动'}</small><span style="margin-left:auto" class="row">${e.owned?button('停止本轮','stop','','sm'):''}<a class="btn quiet sm" href="#history">查看记录 ›</a></span></div><p class="muted" style="font-size:12.5px">可以离开这个页面，运行会在后台继续；结束后笔记、视频和图集会出现在对应栏目。</p></section>`;
   return `<section class="card live"><div class="row">${chip('<span class="dot"></span>空闲')}<b style="font-weight:600">${o.lastRun?`上一轮 ${esc(fmt(o.lastRun.modifiedAt))} · ${esc(last.label)}`:'还没有运行过'}</b>${last.detail&&o.lastRun?`<small>${esc(last.detail).slice(0,120)}</small>`:''}<span style="margin-left:auto" class="row">${button('只继续已有待办','manual-run','data-noscan="1" data-idle','sm')}${button(`${ic('play',14)}运行一轮`,'manual-run','data-idle','primary sm')}</span></div>
     ${r?`<div class="steps">${[['新收藏',r.added??'—','扫描到的新增'],['待确认',r.review??0,'交给你决定'],['保存媒体',(r.saved||0)+(r.galleries||0),`视频 ${r.saved||0} · 图集 ${r.galleries||0}`],['整理笔记',r.notes??0,`剩余待办 ${r.pending??'—'}`]].map(([l,v,s])=>`<div class="step"><small>${l}</small><strong>${esc(v)}</strong><small>${esc(s)}</small></div>`).join('')}</div>`:''}</section>`;

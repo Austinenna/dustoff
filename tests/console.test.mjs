@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createConsole } from '../console.mjs';
 import { createStore } from '../scripts/console-store.mjs';
 import { renderMarkdown } from '../web/markdown.mjs';
-import { deleteLocalVideo } from '../scripts/delete-video.mjs';
+import { deleteLocalVideo, moveVideoToTrash, purgeVideoTrash, videoTrashDir } from '../scripts/delete-video.mjs';
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
 function fixture(){
   const home=realpathSync(mkdtempSync(join(tmpdir(),'dustoff-console-')));
@@ -220,6 +220,20 @@ test('删除只移动对应视频，保留文字与恢复记录，停止自动�
     assert.equal(record.state,'trashed');assert.equal(record.item.status,'downloaded');assert.equal(record.item.media_deleted,0);
     assert.throws(()=>store.fileFor('1','video'),/视频已清理/);
   } finally {f.cleanup();}
+});
+
+test('服务器没有废纸篓时移到数据目录回收站，超过保留天数后清除',async()=>{
+  const home=realpathSync(mkdtempSync(join(tmpdir(),'dustoff-trash-'))),platform=Object.getOwnPropertyDescriptor(process,'platform');
+  try {
+    Object.defineProperty(process,'platform',{value:'linux'});
+    const file=join(home,'a.mp4');writeFileSync(file,'video');
+    await moveVideoToTrash(file,{home});
+    assert.equal(existsSync(file),false);
+    const [name]=readdirSync(videoTrashDir(home));assert.match(name,/^\d+-a\.mp4$/);
+    assert.equal(readFileSync(join(videoTrashDir(home),name),'utf8'),'video');
+    assert.equal(purgeVideoTrash({home}),0);
+    assert.equal(purgeVideoTrash({home,now:Date.now()+8*86400_000}),1);assert.equal(readdirSync(videoTrashDir(home)).length,0);
+  } finally {Object.defineProperty(process,'platform',platform);rmSync(home,{recursive:true,force:true});}
 });
 
 test('移入废纸篓失败不改账本；拒绝图集、符号链接和被其他收藏引用的视频',async()=>{
