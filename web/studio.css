@@ -547,6 +547,15 @@ dialog.drawer{margin:10px 10px 10px auto;height:calc(100dvh - 20px);max-height:n
 .j.err .b{background:var(--red-soft);color:var(--red)}
 .j.warn .b{background:var(--amber-soft);color:var(--amber)}
 .j b{font-size:13px;font-weight:500;display:block}
+.assets{border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.asset{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:4px 10px;padding:10px 12px}
+.asset+.asset{border-top:1px solid var(--line)}
+.asset-ic{display:grid;place-items:center;width:30px;height:30px;border-radius:8px;background:var(--sunken);color:var(--ink-2)}
+.asset-t b{display:block;font-size:13px;font-weight:600}
+.asset-t small{display:block;margin-top:1px;font-size:12px;color:var(--muted)}
+.asset-acts{display:flex;align-items:center;justify-content:flex-end;gap:6px}
+.asset-acts .btn.quiet{padding:0 6px}
+.asset-foot{grid-column:2/-1;display:grid;gap:6px;justify-items:start}
 .purpose-options{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .purpose-options label{display:flex;gap:8px;padding:10px;border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:13px}
 .purpose-options label:has(input:checked){border-color:var(--accent-line);background:var(--accent-soft)}
