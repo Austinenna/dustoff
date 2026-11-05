@@ -141,7 +141,10 @@ main{padding:30px 32px 80px;max-width:1440px;width:100%;margin:0 auto}
 .search [data-icon] svg{width:15px;height:15px;color:var(--muted)}
 input,select,textarea{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:13px;outline:0}
 input:focus,select:focus,textarea:focus{border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-soft)}
-input:disabled,select:disabled,textarea:disabled{background:var(--sunken);color:var(--muted)}
+input:disabled,select:disabled,textarea:disabled{background-color:var(--sunken);color:var(--muted)}
+/* 浏览器自带的箭头不听 padding、也改不了粗细，这里换成自己画的。灰色在浅色和深色下都看得清。 */
+select{appearance:none;-webkit-appearance:none;padding-right:30px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%238A8E86' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;background-size:12px 12px;cursor:pointer}
+select:disabled{cursor:default}
 input[type=checkbox],input[type=radio]{accent-color:var(--accent);width:16px;height:16px}
 textarea{resize:vertical}
 .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
@@ -503,7 +506,7 @@ details[open] summary{margin-bottom:10px}
 .fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px 16px}
 .field{display:grid;gap:5px;font-size:12px;color:var(--muted);align-content:start}
 .field.wide{grid-column:1/-1}
-.field input,.field select,.field textarea{width:100%;color:var(--ink);background:var(--surface-2)}
+.field input,.field select,.field textarea{width:100%;color:var(--ink);background-color:var(--surface-2)}
 .model-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:20px}
 .model-card{padding:20px;display:grid;gap:12px;align-content:start;min-width:0}
 .model-mark{width:34px;height:34px;border-radius:10px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-weight:600}
