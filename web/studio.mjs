@@ -881,7 +881,8 @@ root.addEventListener('input',event=>{
 });
 root.addEventListener('change',event=>{if(['collection-status','collection-platform'].includes(event.target.id)){state.collection[event.target.id==='collection-status'?'status':'platform']=event.target.value;state.collection.page=1;main.innerHTML=collectionPage();loadCollection().catch(e=>notice(e.message,true));}});
 root.addEventListener('submit',async event=>{
-  const form=event.target,formId=form.id;event.preventDefault();
+  // 表单里有 name="id" 的输入框时，表单的 id 属性会被这个输入框盖掉，只能用 getAttribute 取。
+  const form=event.target,formId=form.getAttribute('id');event.preventDefault();
   const submit=event.submitter||form.querySelector('button:not([type=button])');if(submit)submit.disabled=true;
   const data=new FormData(form),epoch=pageEpoch;
   try{

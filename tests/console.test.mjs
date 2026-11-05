@@ -121,6 +121,11 @@ test('自动开启定时失败时控制台可用、展示原因，并允许手�
   }finally{await app.close();f.cleanup();}
 });
 
+test('提交处理不读 form.id：表单里的 name="id" 输入框会盖掉这个属性',()=>{
+  const source=readFileSync(new URL('../web/studio.mjs',import.meta.url),'utf8');
+  assert.ok(source.includes('name="id"'));assert.doesNotMatch(source,/\bform\.id\b/);
+});
+
 test('紧凑前端默认入口及依赖均可加载，旧入口不参与运行',async()=>{
   const f=fixture(),app=await serve({home:f.home});
   try{
