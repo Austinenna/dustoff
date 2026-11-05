@@ -562,9 +562,8 @@ function topicDialog(id){
 function collectionPage(){
   const s=state.collection,o=state.overview,more=[...['downloaded','transcribed','extracted','skipped','removed'].map(k=>[k,STATUSES[k]]),['baseline','历史基线']];
   return `<div class="page">${head('收藏记录',`全部 ${o.total} 条收藏的处理账本 · 最近同步 ${esc(fmt(o.baseline?.scanned_at))}`,button('刷新','refresh'))}
-  <div class="toolbar"><div class="seg" role="group" aria-label="收藏平台">${[['all','全部'],...Object.entries(PLATFORM_LABELS)].map(([v,l])=>`<button type="button" data-action="collection-platform" data-value="${v}" aria-pressed="${s.platform===v}">${v==='all'?'':`<span class="platform-dot ${v}"></span>`}${l}</button>`).join('')}</div>
-  <div class="seg">${[['all',`全部 ${o.total}`],['review',`待确认 ${o.review}`],['failed',`失败 ${o.failed}`],['saved',`已保存 ${o.saved||0}`],['pending','排队']].map(([v,l])=>`<button type="button" data-action="collection-filter" data-value="${v}" aria-pressed="${s.status===v}">${l}</button>`).join('')}</div>
-  <select id="collection-status" class="select-quiet ${more.some(([k])=>k===s.status)?'on':''}" aria-label="更多状态"><option value="all">更多状态</option>${more.map(([k,l])=>`<option value="${k}" ${s.status===k?'selected':''}>${l}</option>`).join('')}</select>
+  <div class="toolbar"><div class="seg" role="group" aria-label="收藏平台">${[['all','全部平台'],...Object.entries(PLATFORM_LABELS)].map(([v,l])=>`<button type="button" data-action="collection-platform" data-value="${v}" aria-pressed="${s.platform===v}">${v==='all'?'':`<span class="platform-dot ${v}"></span>`}${l}</button>`).join('')}</div>
+  <div class="seg">${[['all',`全部 ${o.total}`],['review',`待确认 ${o.review}`],['failed',`失败 ${o.failed}`],['saved',`已保存 ${o.saved||0}`],['pending','排队']].map(([v,l])=>`<button type="button" data-action="collection-filter" data-value="${v}" aria-pressed="${s.status===v}">${l}</button>`).join('')}<select id="collection-status" class="seg-select ${more.some(([k])=>k===s.status)?'on':''}" aria-label="更多状态"><option value="all">更多状态</option>${more.map(([k,l])=>`<option value="${k}" ${s.status===k?'selected':''}>${l}</option>`).join('')}</select></div>
   ${searchField(s.q,'搜索标题、作者或作品 ID','collection-search')}</div><div id="collection-list">${empty('正在读取…')}</div></div>`;
 }
 async function loadCollection(){
