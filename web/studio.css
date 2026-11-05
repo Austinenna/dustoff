@@ -149,6 +149,11 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent);width:16px;hei
 textarea{resize:vertical}
 .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
 .toolbar .search{margin-left:auto;width:280px}
+.platform-dot{width:7px;height:7px;border-radius:50%;margin-right:2px}
+.platform-dot.douyin{background:var(--dy)}.platform-dot.bilibili{background:var(--bili)}.platform-dot.x{background:var(--x)}
+.select-quiet{height:34px;padding:0 24px 0 10px;border:0;border-radius:8px;background-color:transparent;background-position:right 7px center;font-weight:500;color:var(--ink-2);field-sizing:content}
+.select-quiet:hover{background-color:var(--sunken)}
+.select-quiet.on,.select-quiet.on:hover{background-color:var(--accent-soft);color:var(--accent)}
 .callout{padding:12px 14px;border-radius:10px;background:var(--amber-soft);color:var(--amber);font-size:13px;margin:12px 0}
 .callout.green{background:var(--accent-soft);color:var(--accent)}
 .callout.danger{background:var(--red-soft);color:var(--red)}

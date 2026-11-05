@@ -560,11 +560,11 @@ function topicDialog(id){
 
 // ── 收藏记录与详情 ──
 function collectionPage(){
-  const s=state.collection,o=state.overview;
+  const s=state.collection,o=state.overview,more=[...['downloaded','transcribed','extracted','skipped','removed'].map(k=>[k,STATUSES[k]]),['baseline','历史基线']];
   return `<div class="page">${head('收藏记录',`全部 ${o.total} 条收藏的处理账本 · 最近同步 ${esc(fmt(o.baseline?.scanned_at))}`,button('刷新','refresh'))}
   <div class="toolbar"><div class="seg">${[['all',`全部 ${o.total}`],['review',`待确认 ${o.review}`],['failed',`失败 ${o.failed}`],['saved',`已保存 ${o.saved||0}`],['pending','排队']].map(([v,l])=>`<button type="button" data-action="collection-filter" data-value="${v}" aria-pressed="${s.status===v}">${l}</button>`).join('')}</div>
-  <select id="collection-platform" aria-label="收藏平台"><option value="all">全部平台</option>${Object.entries(PLATFORM_LABELS).map(([k,l])=>`<option value="${k}" ${s.platform===k?'selected':''}>${l}</option>`).join('')}</select>
-  <select id="collection-status" aria-label="更多状态"><option value="all">更多状态</option>${Object.entries(STATUSES).map(([k,l])=>`<option value="${k}" ${s.status===k?'selected':''}>${l}</option>`).join('')}<option value="baseline" ${s.status==='baseline'?'selected':''}>历史基线</option></select>
+  <div class="seg" role="group" aria-label="收藏平台">${[['all','全部'],...Object.entries(PLATFORM_LABELS)].map(([v,l])=>`<button type="button" data-action="collection-platform" data-value="${v}" aria-pressed="${s.platform===v}">${v==='all'?'':`<span class="platform-dot ${v}"></span>`}${l}</button>`).join('')}</div>
+  <select id="collection-status" class="select-quiet ${more.some(([k])=>k===s.status)?'on':''}" aria-label="更多状态"><option value="all">更多状态</option>${more.map(([k,l])=>`<option value="${k}" ${s.status===k?'selected':''}>${l}</option>`).join('')}</select>
   ${searchField(s.q,'搜索标题、作者或作品 ID','collection-search')}</div><div id="collection-list">${empty('正在读取…')}</div></div>`;
 }
 async function loadCollection(){
@@ -872,6 +872,7 @@ root.addEventListener('click',async event=>{
     else if(a==='media-tab'){Object.assign(state.media,{tab:b.dataset.value,page:1});main.innerHTML=videosPage();await loadMedia();}
     else if(a==='media-platform'){Object.assign(state.media,{platform:b.dataset.value,page:1});main.innerHTML=videosPage();await loadMedia();}
     else if(a==='collection-filter'){Object.assign(state.collection,{status:b.dataset.value,page:1});main.innerHTML=collectionPage();await loadCollection();}
+    else if(a==='collection-platform'){Object.assign(state.collection,{platform:b.dataset.value,page:1});main.innerHTML=collectionPage();await loadCollection();}
     else if(a==='paginate'){const kind=b.dataset.kind,step=Number(b.dataset.step);if(kind==='runs'){state.runPage+=step;runRows();}else if(kind==='inbox'){state.inbox.page+=step;await loadPending();}else{state.collection.page+=step;await loadCollection();}}
     else if(a==='schedule-toggle'){await mutate('schedule',{action:b.dataset.value},b.dataset.value==='start'?'自动整理已开启。':'自动整理及登录自动启用已关闭。');$('#schedule-anchor').innerHTML=scheduleCard();schedulePreview();}
     else if(a==='log-kind'){state.logKind=b.dataset.value;runRows();await loadLog();}
@@ -902,7 +903,7 @@ root.addEventListener('input',event=>{
   if(input.id==='palette-input'){paletteIndex=0;renderPalette(input.value);}
   if(input.closest('#schedule-form'))schedulePreview();
 });
-root.addEventListener('change',event=>{if(['collection-status','collection-platform'].includes(event.target.id)){state.collection[event.target.id==='collection-status'?'status':'platform']=event.target.value;state.collection.page=1;main.innerHTML=collectionPage();loadCollection().catch(e=>notice(e.message,true));}});
+root.addEventListener('change',event=>{if(event.target.id==='collection-status'){state.collection.status=event.target.value;state.collection.page=1;main.innerHTML=collectionPage();loadCollection().catch(e=>notice(e.message,true));}});
 root.addEventListener('submit',async event=>{
   // 表单里有 name="id" 的输入框时，表单的 id 属性会被这个输入框盖掉，只能用 getAttribute 取。
   const form=event.target,formId=form.getAttribute('id');event.preventDefault();
