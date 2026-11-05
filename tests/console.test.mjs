@@ -32,11 +32,12 @@ test('笔记、视频、图集按处理类型独立展示；旧文字产物不�
   const f=fixture();
   try{
     const db=new DatabaseSync(join(f.home,'index.sqlite'));
-    db.exec("UPDATE items SET media_path='/saved.mp4',media_deleted=0,processing_mode='video',status='failed' WHERE id='1'; UPDATE items SET media_path='/removed.mp4',media_deleted=1,processing_mode='video' WHERE id='2'; UPDATE items SET media_path='/cache.mp4',media_deleted=0,processing_mode='note' WHERE id='3'; UPDATE items SET media_path='/saved2.mp4',media_deleted=0,processing_mode='video',status='saved' WHERE id='18';");
+    db.exec("UPDATE items SET media_path='/saved.mp4',media_deleted=0,processing_mode='video',status='failed',note_path=NULL WHERE id='1'; UPDATE items SET media_path='/removed.mp4',media_deleted=1,processing_mode='video' WHERE id='2'; UPDATE items SET media_path='/cache.mp4',media_deleted=0,processing_mode='note' WHERE id='3'; UPDATE items SET media_path='/saved2.mp4',media_deleted=0,processing_mode='video',status='saved' WHERE id='18';");
     db.close();const store=createStore(f.home),videos=store.listItems({videos:'1'}),o=store.overview();
     assert.deepEqual(videos.items.map(i=>i.id),['18','1']);
     assert.equal(store.listItems({videos:'1',q:'100%'}).total,0);
-    assert.equal(o.videos,2);assert.equal(o.notes,15);assert.equal(o.textOnly,0);
+    assert.equal(o.videos,2);assert.equal(o.notes,16);assert.equal(o.textOnly,0);
+    const kb=store.notesIndex().items.map(i=>i.id);assert.equal(kb.length,o.notes);assert.ok(kb.includes('2')); // 用途是视频但有笔记的仍算在知识库
     assert.equal(o.recentVideos.length,2);assert.equal(store.listItems({results:'1',q:'1'}).items.some(i=>i.id==='1'),false);
   }finally{f.cleanup();}
 });

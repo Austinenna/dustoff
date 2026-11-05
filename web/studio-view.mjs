@@ -43,7 +43,7 @@ export function mediaLabel(item) {
   if(item.media_type==='post')return item.note_path?'原帖已保存':'原帖尚未保存';
   if(item.media_type==='gallery')return item.media_path&&!item.media_deleted?`已保存图集${item.image_count?' · '+item.image_count+' 张':''}`:'图片尚未保存';
   if(item.media_deleted)return item.skip_reason==='video_deleted'?'视频已删除':'视频已清理';
-  if(item.media_path)return `${item.processing_mode==='video'?'已保留':'笔记素材仍在'}${item.media_quality==='high'?' · 高清':item.media_quality==='low'?' · 低清':''}`;
+  if(item.media_path)return `${item.processing_mode==='video'&&item.media_quality!=='low'?'已保留':'笔记素材仍在'}${item.media_quality==='high'?' · 高清':item.media_quality==='low'?' · 低清':''}`;
   return '未保存视频';
 }
 export function resultLabel(item) {

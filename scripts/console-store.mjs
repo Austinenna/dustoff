@@ -17,7 +17,9 @@ import { intentsById } from './intent-store.mjs';
 import { readHistory, codeVersion } from './run-history.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
-const savedVideoWhere = conversion => `COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND (processing_mode='video' OR (processing_mode IS NULL AND status='saved') OR (${conversion}=1 AND processing_mode='note'))`;
+const savedVideoWhere = conversion => `COALESCE(media_type,'video')!='gallery' AND media_path IS NOT NULL AND media_path!='' AND COALESCE(media_deleted,0)=0 AND ((processing_mode='video' AND NOT (media_quality='low' AND status!='saved' AND note_path IS NOT NULL AND note_path!='')) OR (processing_mode IS NULL AND status='saved') OR (${conversion}=1 AND processing_mode='note'))`;
+// 笔记也下载了视频后用途是 video，笔记本身仍算在知识库里。
+const hasNote="note_path IS NOT NULL AND note_path!=''",noteMode=`(COALESCE(processing_mode,'note') IN ('note','speech') OR (${hasNote}))`;
 const number = (label, group, fallback, min, max, step = 1) => ({ label, group, type:'number', fallback, min, max, step });
 const text = (label, group, fallback, type = 'text') => ({ label, group, type, fallback });
 export const FIELDS = {
@@ -154,7 +156,7 @@ export function createStore(home = DUST_HOME) {
       if(params.galleries==='1')where.push("media_type='gallery' AND status='saved' AND media_path IS NOT NULL AND COALESCE(media_deleted,0)=0");
       else if(params.videos==='1')where.push(savedVideoWhere(conversion));
       else if(params.posts==='1')where.push("media_type='post'");
-      else if(params.results==='1') {where.push("COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))");if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
+      else if(params.results==='1') {where.push(`COALESCE(media_type,'video')!='gallery' AND ${noteMode} AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!=''))`);if(status==='notes')where.push("note_path IS NOT NULL AND note_path!=''");else if(status==='text')where.push("(note_path IS NULL OR note_path='')");}
       else if(status==='baseline')where.push("skip_reason='baseline'");
       else if(status!=='all'){if(!['pending','downloaded','transcribed','extracted','saved','review','failed','skipped','removed'].includes(status))throw new HttpError(400,'状态无效');where.push('status=?');values.push(status);}
       if(search){where.push("(title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\' OR note_path LIKE ? ESCAPE '\\')");const q='%'+search.replace(/[\\%_]/g,'\\$&')+'%';values.push(q,q,q,q);}
@@ -213,7 +215,7 @@ export function createStore(home = DUST_HOME) {
   function notesIndex() {
     return readDb(db=>{
       if(!has(db,'items'))return {items:[]};
-      const rows=db.prepare("SELECT id,platform,title,author,media_type,duration_s,category,decay,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,prompt_hash FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' AND COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!='')) ORDER BY COALESCE(extracted_at,transcribed_at,collected_at,first_seen) DESC,id DESC LIMIT 5000").all();
+      const rows=db.prepare(`SELECT id,platform,title,author,media_type,duration_s,category,decay,note_path,text_path,extracted_at,transcribed_at,collected_at,first_seen,prompt_hash FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' AND COALESCE(media_type,'video')!='gallery' AND ${noteMode} AND ((note_path IS NOT NULL AND note_path!='') OR (text_path IS NOT NULL AND text_path!='')) ORDER BY COALESCE(extracted_at,transcribed_at,collected_at,first_seen) DESC,id DESC LIMIT 5000`).all();
       return {items:rows.map(r=>{const m=noteMeta(r);return {id:r.id,platform:r.platform,title:m.title,author:r.author,media_type:r.media_type,duration_s:r.duration_s,category:r.category,decay:r.decay,tags:m.tags,gist:m.gist,has_note:!!r.note_path,has_text:!!r.text_path,archive_only:r.media_type==='post'&&!r.prompt_hash,at:r.extracted_at||r.transcribed_at||r.collected_at||r.first_seen,collected_at:r.collected_at||r.first_seen};})};
     },{items:[]});
   }
@@ -284,8 +286,10 @@ export function createStore(home = DUST_HOME) {
     const inQueue=readDb(db=>has(db,'daily_queue')&&!!db.prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id),false);
     const canChange=row.media_type!=='gallery'&&row.media_type!=='post'&&inQueue&&!['baseline','gallery','too_long','user_deleted'].includes(row.skip_reason)&&row.status!=='removed';
     const canConvert=canChange&&!!row.media_path&&!row.media_deleted&&row.has_audio!==0&&Number(row.duration_s)>0&&Number(row.duration_s)<=(row.platform==='bilibili'?policy().bilibili.asrSeconds:policy().seconds)
-      &&(row.processing_mode==='video'||(row.processing_mode==null&&row.status==='saved'));
-    return JSON.parse(redact({...row,...processingActions(row,inQueue),pending_intents:intentsById(home).get(String(id))||null,routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,display_title:displayTitle(row)}));
+      &&!row.note_path&&(row.processing_mode==='video'||(row.processing_mode==null&&row.status==='saved'));
+    // 文章类作品没有视频；已经保留视频的不再显示。
+    const canDownload=canChange&&row.status==='extracted'&&!!row.note_path&&row.text_source!=='article'&&!(row.processing_mode==='video'&&row.media_path&&!row.media_deleted);
+    return JSON.parse(redact({...row,...processingActions(row,inQueue),pending_intents:intentsById(home).get(String(id))||null,routing_preview:previewFor(row,readPreviews(home)),can_change_purpose:canChange,can_convert_to_note:canConvert,can_download_video:canDownload,display_title:displayTitle(row)}));
   }
   function fileFor(id,kind) {const row=item(id),path=row[kind==='note'?'note_path':kind==='video'?'media_path':'text_path'];if(!['note','text','video'].includes(kind)||!path||(kind==='video'&&row.media_deleted))throw new HttpError(404,'尚未生成这份文件或视频已清理');const p=localPath(path);if(kind==='video'?!['.mp4','.mov','.webm','.m4v'].includes(extname(p)):extname(p)!==(kind==='note'?'.md':'.txt'))throw new HttpError(400,'产物格式不正确');if(!existsSync(p)||!statSync(p).isFile())throw new HttpError(404,'文件已移动或不存在，请核对账本路径');return p;}
   function gallery(id) {
@@ -311,7 +315,7 @@ export function createStore(home = DUST_HOME) {
     const midnight=new Date(date.getFullYear(),date.getMonth(),date.getDate()).getTime()/1000;
     const totals=readDb(db=>{
       const out={total:0,notes:0,todayNotes:0,pending:0,failed:0,usedToday:0,baseline:null,statuses:[]};
-      if(has(db,'items')){out.statuses=db.prepare("SELECT status,count(*) n FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' GROUP BY status").all();out.total=out.statuses.reduce((s,r)=>s+r.n,0);out.notes=out.statuses.find(r=>r.status==='extracted')?.n||0;out.failed=out.statuses.find(r=>r.status==='failed')?.n||0;out.todayNotes=db.prepare("SELECT count(*) n FROM items WHERE COALESCE(media_type,'video')!='gallery' AND COALESCE(processing_mode,'note') IN ('note','speech') AND extracted_at>=?").get(midnight).n;
+      if(has(db,'items')){out.statuses=db.prepare("SELECT status,count(*) n FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' GROUP BY status").all();out.total=out.statuses.reduce((s,r)=>s+r.n,0);out.notes=db.prepare(`SELECT count(*) n FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' AND (status='extracted' OR (processing_mode='video' AND ${hasNote}))`).get().n;out.failed=out.statuses.find(r=>r.status==='failed')?.n||0;out.todayNotes=db.prepare(`SELECT count(*) n FROM items WHERE COALESCE(media_type,'video')!='gallery' AND ${noteMode} AND extracted_at>=?`).get(midnight).n;
         out.platforms=Object.fromEntries(db.prepare("SELECT platform,count(*) n FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' GROUP BY platform").all().map(r=>[r.platform,r.n]));}
       const queuePlatform=has(db,'daily_queue')&&db.prepare('PRAGMA table_info(daily_queue)').all().some(c=>c.name==='platform')?'q.platform':"'douyin'";
       if(has(db,'daily_queue')&&has(db,'items'))out.pending=db.prepare(`SELECT count(*) n FROM daily_queue q JOIN items i ON i.id=q.id AND i.platform=${queuePlatform} WHERE i.status IN ('pending','downloaded','transcribed') AND i.attempts<3`).get().n;

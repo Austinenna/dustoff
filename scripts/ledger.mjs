@@ -432,6 +432,12 @@ export function markSkipped(id, reason, { needsOcr = false, platform = platformO
   `).run(reason || null, needsOcr ? 1 : 0, now(), platform, id);
 }
 
+/** 已有笔记的条目放弃下载视频：回到知识笔记，笔记和原有素材不动。 */
+export function restoreNote(id, error = null, platform = platformOfId(id)) {
+  return db().prepare(`UPDATE items SET status='extracted',processing_mode='note',skip_reason=NULL,attempts=0,last_error=?,updated_at=?
+    WHERE platform=? AND id=?`).run(error, now(), platform, id);
+}
+
 /** 记录一次失败。超过上限则转 failed，避免无限重试烧 API 额度。 */
 export function markFailed(id, error, platform = platformOfId(id), maxAttempts = 3) {
   const d = db();

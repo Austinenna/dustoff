@@ -23,6 +23,7 @@ import { classifyItem, PURPOSES } from './scripts/routing.mjs';
 import { downloadGallery } from './scripts/gallery.mjs';
 import { downloadOne } from './scripts/download.mjs';
 import { cleanConvertedVideos } from './scripts/video-to-note.mjs';
+import { settleNoteVideos } from './scripts/note-video.mjs';
 import { purgeVideoTrash } from './scripts/delete-video.mjs';
 import { appendHistory, codeVersion } from './scripts/run-history.mjs';
 const scripts = join(dirname(fileURLToPath(import.meta.url)), 'scripts');
@@ -395,6 +396,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       rmSync(tmp, { recursive:true, force:true });
       try { const r = applyIntents(DUST_HOME, { log }); if (r.applied || r.failed.length) summary.intentsAfter = r; }
       catch(e) { summary.failures.push({ error:`执行运行期间记下的操作失败：${e.message}` }); }
+      try { settleNoteVideos({ log }); } catch(e) { summary.failures.push({ error:`笔记视频收尾失败：${e.message}` }); }
       // 首次建基线不清理旧素材；日常收尾按独立转写成果判断资格。
       if (baseline() && !initializedThisRun) {
         try { summary.cleanup = cleanMedia({ dryRun:false }); }

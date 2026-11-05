@@ -421,6 +421,15 @@ function videoNoteHint(i){
   if(i.delete_after_note){if(['failed','skipped'].includes(i.status)||i.retain_media)text='转换未完整完成，原视频已保留。可在收藏详情查看原因。';else if(i.status==='extracted')text=`笔记已保存，原视频将在运行收尾时移入${TRASH}；清理失败会在下次运行重试。`;else text=state.overview?.scheduler.loaded?`已加入待办，下次定时运行时整理笔记，成功后原视频自动移入${TRASH}。`:`已加入待办。自动整理已关闭，请开启自动安排或手动运行；成功后原视频自动移入${TRASH}。`;}
   return `<p class="muted" style="font-size:12.5px" data-video-note-hint>${esc(text)}</p>`;
 }
+// 已有笔记时下载视频只是多留一份，笔记不变。
+const noteVideoQueued=i=>!!i.note_path&&i.processing_mode==='video'&&!['extracted','saved'].includes(i.status);
+function videoKeepButton(i){return i.can_download_video?button(i.media_quality==='high'&&!i.media_deleted?'保留高清视频':'下载高清视频','quick-purpose',`data-id="${esc(i.id)}" data-purpose="video" ${i.pending_intents?'disabled':''}`,'sm'):'';}
+function videoKeepHint(i){
+  const line=text=>`<p class="muted" style="font-size:12.5px;margin-top:6px">${esc(text)}</p>`;
+  if(noteVideoQueued(i))return line(i.status==='failed'?'高清视频下载未完成，笔记不受影响。':'已加入待办，下一轮下载高清视频，笔记继续留在知识库。');
+  if(!i.can_download_video)return '';
+  return `${i.platform==='bilibili'?`<div style="margin-top:8px">${qualityPicker(i)}</div>`:''}${i.pending_intents?`<p class="intent-note" style="margin-top:8px">${esc(intentLabel(i.pending_intents))}</p>`:line('下一轮运行时处理，笔记继续留在知识库。')}`;
+}
 const TRASH=serverMode?'回收站（7 天后自动清除）':'废纸篓';
 const videoDeleteButton=i=>i.media_type!=='gallery'&&i.media_path&&!i.media_deleted?button('删除视频','delete-video',`data-id="${esc(i.id)}" data-idle ${busy()?'disabled':''}`,'quiet sm danger'):'';
 async function playVideo(id){
@@ -554,8 +563,9 @@ async function loadCollection(){
 }
 function journey(i){
   const step=(done,title,at,cls='')=>`<div class="j ${done?cls:'todo'}"><span class="b">${done?ic(cls==='err'?'x':cls==='warn'?'alert':'check',12):''}</span><span><b>${title}</b><small>${at||''}</small></span></div>`;
-  const purpose=i.media_type==='gallery'?'图集':i.media_type==='post'?'X 原帖':PURPOSES[i.processing_mode];
-  return `<div class="journey">${step(true,'收藏进来',fmt(i.collected_at||i.first_seen))}${step(!!i.processing_mode||i.media_type==='gallery'||i.media_type==='post',i.status==='review'?'等你决定用途':`用途：${purpose||'尚未判断'}`,i.routing_source==='manual'?'你手动选择':i.routing_source==='model'?'模型判断':'',i.status==='review'?'warn':'')}${i.processing_mode==='video'||i.media_type==='gallery'?step(!!i.saved_at||i.status==='saved','保存媒体',fmt(i.saved_at)):step(!!i.transcribed_at,'转写成文字',fmt(i.transcribed_at))}${i.processing_mode==='video'||i.media_type==='gallery'?'':step(!!i.extracted_at,'整理成笔记',fmt(i.extracted_at))}${i.status==='failed'?step(true,'处理失败',i.last_error||'','err'):''}</div>`;
+  const both=i.processing_mode==='video'&&!!i.note_path,saving=i.processing_mode==='video'||i.media_type==='gallery';
+  const purpose=i.media_type==='gallery'?'图集':i.media_type==='post'?'X 原帖':both?'知识笔记和视频':PURPOSES[i.processing_mode];
+  return `<div class="journey">${step(true,'收藏进来',fmt(i.collected_at||i.first_seen))}${step(!!i.processing_mode||i.media_type==='gallery'||i.media_type==='post',i.status==='review'?'等你决定用途':`用途：${purpose||'尚未判断'}`,i.routing_source==='manual'?'你手动选择':i.routing_source==='model'?'模型判断':'',i.status==='review'?'warn':'')}${!saving||both?step(!!i.transcribed_at,'转写成文字',fmt(i.transcribed_at))+step(!!i.extracted_at,'整理成笔记',fmt(i.extracted_at)):''}${saving?step(i.status==='saved','保存媒体',fmt(i.saved_at)):''}${i.status==='failed'?step(true,'处理失败',i.last_error||'','err'):''}</div>`;
 }
 async function detail(id){
   drawerId=id;const epoch=++dialogEpoch;
@@ -568,23 +578,23 @@ async function detail(id){
       ${i.media_type==='post'?'':cover(i,{badge:kindOf(i),pfb:true,ratio:'16/9'})}
       <div><h2 class="title">${esc(titleOf(i))}</h2><p class="muted" style="font-size:12.5px;margin-top:4px">${esc(i.author||'未知作者')} · ${esc(PLATFORM_LABELS[i.platform]||'')} · ${esc(kindOf(i))}</p><div class="row" style="margin-top:10px">${tag(STATUSES[i.status]||i.status,i.status==='failed'?'danger':i.status==='review'?'warn':'')}${tag(mediaLabel(i))}</div></div>
       <section><h3 style="margin-bottom:10px">处理经过</h3>${journey(i)}</section>
-      <section><h3 style="margin-bottom:8px">留下的内容</h3><div class="row">${i.note_path||i.text_path?button('阅读','read',`data-id="${esc(id)}"`,'sm'):''}${i.media_path&&!i.media_deleted?button(i.media_type==='gallery'?'查看图集':'播放视频',i.media_type==='gallery'?'view-gallery':'play-video',`data-id="${esc(id)}"`,'sm'):''}${materialKind?button('加入素材箱','add-material',`data-id="${esc(id)}" data-kind="${materialKind}"`,'sm'):''}${sourceA(i)}${videoNoteButton(i)}${videoDeleteButton(i)}</div>${videoNoteHint(i)}${!i.note_path&&!i.text_path&&i.media_type!=='gallery'?'<p class="muted" style="font-size:12.5px;margin-top:6px">暂未生成文字内容。</p>':''}</section>
-      ${i.media_type==='gallery'||i.media_type==='post'?'':`<section><h3 style="margin-bottom:6px">这条收藏用来做什么</h3><p class="muted" style="font-size:12.5px">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form id="purpose-form" style="margin-top:10px"><input type="hidden" name="id" value="${esc(id)}"><div class="purpose-options">${['note','video','review'].map(k=>`<label><input type="radio" name="purpose" value="${k}" ${i.processing_mode===k?'checked':''} ${i.can_change_purpose?'':'disabled'} required><span>${PURPOSES[k]}<small>${({note:'转写并整理笔记',video:'只保存高清原声视频',review:'暂不处理，等你确认'})[k]}</small></span></label>`).join('')}</div>${i.platform==='bilibili'&&i.can_change_purpose?`<div style="margin-top:10px">${qualityPicker(i)}</div>`:''}${i.can_change_purpose?`<div class="row" style="margin-top:10px"><button class="btn primary sm">保存用途</button><small>下一轮运行时处理；已有文件保留。</small></div>${i.pending_intents?`<p class="intent-note" style="margin-top:8px">${esc(intentLabel(i.pending_intents))}</p>`:''}`:'<p class="muted" style="font-size:12.5px;margin-top:8px">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}
+      <section><h3 style="margin-bottom:8px">留下的内容</h3><div class="row">${i.note_path||i.text_path?button('阅读','read',`data-id="${esc(id)}"`,'sm'):''}${i.media_path&&!i.media_deleted?button(i.media_type==='gallery'?'查看图集':'播放视频',i.media_type==='gallery'?'view-gallery':'play-video',`data-id="${esc(id)}"`,'sm'):''}${materialKind?button('加入素材箱','add-material',`data-id="${esc(id)}" data-kind="${materialKind}"`,'sm'):''}${sourceA(i)}${videoNoteButton(i)}${videoKeepButton(i)}${videoDeleteButton(i)}</div>${videoNoteHint(i)}${videoKeepHint(i)}${!i.note_path&&!i.text_path&&i.media_type!=='gallery'?'<p class="muted" style="font-size:12.5px;margin-top:6px">暂未生成文字内容。</p>':''}</section>
+      ${i.media_type==='gallery'||i.media_type==='post'||['extracted','saved'].includes(i.status)||noteVideoQueued(i)?'':`<section><h3 style="margin-bottom:6px">这条收藏用来做什么</h3><p class="muted" style="font-size:12.5px">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form id="purpose-form" style="margin-top:10px"><input type="hidden" name="id" value="${esc(id)}"><div class="purpose-options">${['note','video','review'].map(k=>`<label><input type="radio" name="purpose" value="${k}" ${i.processing_mode===k?'checked':''} ${i.can_change_purpose?'':'disabled'} required><span>${PURPOSES[k]}<small>${({note:'转写并整理笔记',video:'只保存高清原声视频',review:'暂不处理，等你确认'})[k]}</small></span></label>`).join('')}</div>${i.platform==='bilibili'&&i.can_change_purpose?`<div style="margin-top:10px">${qualityPicker(i)}</div>`:''}${i.can_change_purpose?`<div class="row" style="margin-top:10px"><button class="btn primary sm">保存用途</button><small>下一轮运行时处理；已有文件保留。</small></div>${i.pending_intents?`<p class="intent-note" style="margin-top:8px">${esc(intentLabel(i.pending_intents))}</p>`:''}`:'<p class="muted" style="font-size:12.5px;margin-top:8px">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}
       ${i.last_error?`<section class="callout danger"><b>上次未完成</b><p style="margin-top:4px">${esc(i.last_error)}</p>${i.status==='failed'?`<div style="margin-top:8px">${button('恢复为待办','retry',attrs,'sm')}</div>`:''}</section>`:''}
-      ${i.can_discard||i.can_delete||i.skip_reason==='user_discarded'?`<section><h3 style="margin-bottom:6px">处理操作</h3><p class="muted" style="font-size:12.5px">${i.skip_reason==='user_discarded'?'已放弃处理。重新选择用途并保存即可恢复。':'放弃处理会停止自动处理，保留收藏记录和本地文件。'}${i.can_delete?' 删除记录会从列表移除，不取消原平台收藏。':''}</p><div class="row" style="margin-top:8px">${i.can_discard?button('放弃处理','discard-item',`data-id="${esc(id)}"`,'quiet sm danger'):''}${i.can_delete?button('删除记录','delete-item',attrs,'quiet sm danger'):''}</div></section>`:''}
+      ${i.can_discard||i.can_delete||i.skip_reason==='user_discarded'?`<section><h3 style="margin-bottom:6px">处理操作</h3><p class="muted" style="font-size:12.5px">${noteVideoQueued(i)?'取消后这条回到知识笔记，已有文件不动。':i.skip_reason==='user_discarded'?'已放弃处理。重新选择用途并保存即可恢复。':'放弃处理会停止自动处理，保留收藏记录和本地文件。'}${i.can_delete?' 删除记录会从列表移除，不取消原平台收藏。':''}</p><div class="row" style="margin-top:8px">${i.can_discard?button(noteVideoQueued(i)?'取消下载':'放弃处理',noteVideoQueued(i)?'cancel-video':'discard-item',`data-id="${esc(id)}"`,'quiet sm danger'):''}${i.can_delete?button('删除记录','delete-item',attrs,'quiet sm danger'):''}</div></section>`:''}
       <details><summary>作品信息</summary><dl class="kv" style="font-size:12.5px"><dt>来源</dt><dd>${esc(PLATFORM_LABELS[i.platform]||'抖音')}${i.folders?` · ${esc(JSON.parse(i.folders).join('、'))}`:''}</dd><dt>作品 ID</dt><dd class="mono">${esc(id)}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd><dt>AI 费用</dt><dd data-cost="item">读取中…</dd></dl></details>
     </div>`;
     void fillItemCost(id,epoch);
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('收藏详情')+empty(e.message);}
 }
-async function stopProcessing(action,id){
+async function stopProcessing(action,id,keepNote=false){
   if(action==='delete-item'&&!window.confirm('删除这条收藏记录？只会从列表移除，不会取消原平台收藏；此操作不可恢复。'))return;
-  if(action==='discard'&&!window.confirm('放弃处理这条收藏？记录和已有文件会保留，之后仍可重新选择用途。'))return;
+  if(action==='discard'&&!window.confirm(keepNote?'取消下载高清视频？笔记不受影响。':'放弃处理这条收藏？记录和已有文件会保留，之后仍可重新选择用途。'))return;
   const epoch=dialogEpoch,r=await api(action,{id});
-  if(r.deferred){await refreshOverview();await reloadList();notice('当前正在运行，已记下“放弃处理”，本轮结束后生效。');return;}
+  if(r.deferred){await refreshOverview();await reloadList();notice(`当前正在运行，已记下“${keepNote?'取消下载':'放弃处理'}”，本轮结束后生效。`);return;}
   if(dialog.open&&epoch===dialogEpoch&&drawerId===id){if(action==='delete-item')dialog.close();else await detail(id);}
   await refreshOverview();await reloadList();
-  notice(action==='discard'?'已放弃处理，记录和文件保留；可在收藏详情重新选择用途恢复。':'记录已从列表移除，再次扫描不会重新处理；原平台收藏保持不变。');
+  notice(keepNote?'已取消下载，笔记不受影响。':action==='discard'?'已放弃处理，记录和文件保留；可在收藏详情重新选择用途恢复。':'记录已从列表移除，再次扫描不会重新处理；原平台收藏保持不变。');
 }
 async function queueMutation(path,data){
   const r=await api(path,data);
@@ -598,7 +608,7 @@ async function queueMutation(path,data){
       if(current.lastAction.exitCode!==0)throw new Error('操作未完成，请在「流水线 → 运行记录 → 控制台操作」查看原因。');
       let message=path==='purpose'?'用途已保存，下一轮运行时处理。':'已恢复为待办，下一轮运行时处理。';
       // 收件箱预下载过的视频选“保存视频”会直接存好，选“知识笔记”下一轮不用重新下载。
-      if(path==='purpose'){try{const i=await api('item?'+query({id:data.id}));if(i.status==='saved')message='已存进视频收藏。';else if(i.status==='downloaded')message='用途已保存，下一轮直接用已下载的视频整理笔记。';}catch{}}
+      if(path==='purpose'){try{const i=await api('item?'+query({id:data.id}));if(i.status==='saved')message='已存进视频收藏。';else if(i.status==='pending'&&i.note_path)message='已加入待办，下一轮下载高清视频，笔记保留。';else if(i.status==='downloaded')message='用途已保存，下一轮直接用已下载的视频整理笔记。';}catch{}}
       notice(message);
       await reloadList();if(dialog.open&&originalDrawer===dialogEpoch&&drawerId===data.id)await detail(data.id);return;
     }
@@ -829,6 +839,7 @@ root.addEventListener('click',async event=>{
     else if(a==='delete-video')await deleteVideo(id);
     else if(a==='prepare-video')await preparePlayback(id,dialogEpoch);
     else if(a==='video-to-note')await queueVideoNote(id);
+    else if(a==='cancel-video')await stopProcessing('discard',id,true);
     else if(a==='discard-item'||a==='delete-item')await stopProcessing(a==='discard-item'?'discard':'delete-item',id);
     else if(a==='manual-run')manualRun(b.dataset.noscan==='1');
     else if(a==='stop')await mutate('stop',{},'已发送停止请求，正在完成收尾。');

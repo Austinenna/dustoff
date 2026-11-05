@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { localPath, under, SAVED_MEDIA } from './policy.mjs';
 import { PURPOSES } from './routing.mjs';
-import { db, importScan, markSaved } from './ledger.mjs';
+import { db, importScan, markSaved, restoreNote } from './ledger.mjs';
 import { adoptPreview, dropPreview } from './review-preview.mjs';
 import { boundaryIndex } from './incremental.mjs';
 import { POLICY, mediaDecision, dailyLimitFor } from './policy.mjs';
@@ -147,7 +147,8 @@ export function setPurpose(id, purpose) {
     }
     const adopted = adoptPreview(current, purpose, { reusable });
     retryItem(id);
-    if (adopted === 'saved' && itemRow(id).status === 'downloaded') markSaved(id);
+    // 高清文件已在收藏目录时直接算保存好，不占下一轮额度。
+    if (purpose === 'video' && itemRow(id).status === 'downloaded') markSaved(id);
   }
   return purpose;
 }
@@ -159,6 +160,7 @@ export function discardItem(id) {
   if (row.skip_reason === 'user_discarded') return {discarded:true, alreadyDiscarded:true};
   if (!processingActions(row,inScope(id)).can_discard) throw new Error('只能放弃当前范围内尚未完成的处理任务');
   const now = Math.floor(Date.now()/1000);
+  if (row.note_path && row.processing_mode === 'video') { restoreNote(id); return {discarded:true}; } // 只是取消下载视频，笔记不算放弃。
   dropPreview(row); // 放弃时删掉收件箱预下载的暂存文件。
   d.prepare("UPDATE items SET status='skipped',skip_reason='user_discarded',delete_after_note=0,updated_at=? WHERE platform=? AND id=?").run(now,row.platform,id);
   return {discarded:true};
