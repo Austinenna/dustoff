@@ -1,9 +1,15 @@
-# 运行时数据（默认在 ~/VideoKB/，但防止有人把 DUST_HOME 指到仓库里）
+# 运行时数据（默认在 ~/.dustoff/，但防止有人把 DUST_HOME 指到仓库里）
 .cache/
 .runs/
 .state/
 .chrome-profile/
 NEEDS_LOGIN
+
+# 登录凭据与本机配置
+cookies.json
+token.json
+dustoff.conf
+.env
 
 # 扫描/下载的中间产物与结果
 coll*.json
