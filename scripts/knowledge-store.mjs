@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { localPath } from './policy.mjs';
-import { DOMAINS, UNSORTED, noteBody, normName } from './knowledge-extract.mjs';
+import { DOMAINS, UNSORTED, missingNotes, noteBody, normName } from './knowledge-extract.mjs';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS docs (
@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS pages (
   source_hash TEXT,                 -- 写这一版时的笔记清单和各篇正文的哈希；和现在的不同就要重写
   prompt_hash TEXT, model TEXT, built_at INTEGER,
   changes TEXT NOT NULL DEFAULT '', -- 这一版相比上一版的变化；第一版为空
+  complete INTEGER,                 -- 1 每篇笔记都写到了；0 重写 3 次仍有漏的；空：早先写的，没做过这项检查
   failed_hash TEXT, attempts INTEGER NOT NULL DEFAULT 0, error TEXT);   -- failed_hash：写不出来的那一版笔记，笔记不变就不再试
 `;
 // 3 篇以上的主题才写综述：一两篇没有可合并的内容，写出来只是复述。
@@ -91,6 +92,7 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     // 早先建的库没有这几列。
     const cols = new Set(db.prepare('PRAGMA table_info(docs)').all().map(c => c.name));
     for (const [name, type] of [['domain_note', "TEXT NOT NULL DEFAULT ''"], ['classified_hash', 'TEXT'], ['domain_hash', 'TEXT']]) if (!cols.has(name)) db.exec(`ALTER TABLE docs ADD COLUMN ${name} ${type}`);
+    if (!db.prepare('PRAGMA table_info(pages)').all().some(c => c.name === 'complete')) db.exec('ALTER TABLE pages ADD COLUMN complete INTEGER');
     return db;
   }
   const one = (sql, ...args) => open().prepare(sql).get(...args);
@@ -346,14 +348,16 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
    */
   function pageBatches({ promptHash, stale = false, retryFailed = false } = {}) {
     return themes().filter(t => t.notes >= PAGE_MIN_NOTES).map(t => {
-      const notes = pageNotes(t.id), hash = sourceHash(notes), page = one('SELECT source_hash,prompt_hash,failed_hash,attempts,body FROM pages WHERE theme_id=?', t.id);
-      const fresh = page?.body && page.source_hash === hash && !(stale && page.prompt_hash !== (promptHash ?? null));
+      const notes = pageNotes(t.id), hash = sourceHash(notes), page = one('SELECT source_hash,prompt_hash,failed_hash,attempts,body,complete FROM pages WHERE theme_id=?', t.id);
+      // 早先写的综述没检查过有没有漏写笔记，漏了的重写一次。
+      const unchecked = page?.body && page.complete === null && missingNotes(JSON.parse(page.body), notes.length).length > 0;
+      const fresh = page?.body && page.source_hash === hash && !unchecked && !(stale && page.prompt_hash !== (promptHash ?? null));
       const gaveUp = !retryFailed && page?.failed_hash === hash && page.attempts >= 3;
       return fresh || gaveUp ? null : { ...t, notes, hash };
     }).filter(Boolean);
   }
   /** 写入一页综述，并记下和上一版相比多了、少了哪几篇笔记。 */
-  function savePage(themeId, body, { notes, hash, promptHash, model } = {}) {
+  function savePage(themeId, body, { notes, hash, promptHash, model, complete = true } = {}) {
     return tx(() => {
       if (!one('SELECT 1 FROM themes WHERE id=?', themeId)) return false;
       const old = one('SELECT body,items FROM pages WHERE theme_id=?', themeId), items = notes.map(n => n.item);
@@ -363,10 +367,10 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
         const added = notes.filter(n => !before.has(n.item)), removed = [...before].filter(i => !now_.has(i)).length;
         changes = [added.length && `新增 ${added.length} 篇：${added.slice(0, 3).map(n => `《${n.title}》`).join('')}${added.length > 3 ? ' 等' : ''}`, removed && `移出 ${removed} 篇`].filter(Boolean).join('；') || '有笔记的正文改过，已按新内容重写';
       }
-      run(`INSERT INTO pages(theme_id,body,items,source_hash,prompt_hash,model,built_at,changes) VALUES(?,?,?,?,?,?,?,?)
+      run(`INSERT INTO pages(theme_id,body,items,source_hash,prompt_hash,model,built_at,changes,complete) VALUES(?,?,?,?,?,?,?,?,?)
         ON CONFLICT(theme_id) DO UPDATE SET body=excluded.body,items=excluded.items,source_hash=excluded.source_hash,prompt_hash=excluded.prompt_hash,
-        model=excluded.model,built_at=excluded.built_at,changes=excluded.changes,failed_hash=NULL,attempts=0,error=NULL`,
-        themeId, JSON.stringify(body), JSON.stringify(items), hash, promptHash || null, model || null, now(), changes);
+        model=excluded.model,built_at=excluded.built_at,changes=excluded.changes,complete=excluded.complete,failed_hash=NULL,attempts=0,error=NULL`,
+        themeId, JSON.stringify(body), JSON.stringify(items), hash, promptHash || null, model || null, now(), changes, complete ? 1 : 0);
       return true;
     });
   }

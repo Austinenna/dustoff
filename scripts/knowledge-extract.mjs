@@ -322,7 +322,14 @@ export function cleanPage(data, count) {
   const picked = new Set();
   const notes = (list, max) => (Array.isArray(list) ? list : []).map(n => ({ note: n?.笔记, why: text(n?.理由, 200) }))
     .filter(n => Number.isInteger(n.note) && n.note >= 1 && n.note <= count && !picked.has(n.note) && picked.add(n.note)).slice(0, max);
-  return { intro: text(data.是什么, 500), sections, disputes: points(data.分歧, 6), stale: points(data.可能过期, 6), order: notes(data.阅读顺序, 6), skip: notes(data.可跳过, count) };
+  const page = { intro: text(data.是什么, 500), sections, disputes: points(data.分歧, 6), stale: points(data.可能过期, 6), order: notes(data.阅读顺序, 6), skip: notes(data.可跳过, count) };
+  return { ...page, missing: missingNotes(page, count) };
+}
+
+/** 既没被任何一条要点引用、也没列进「可跳过」的笔记编号。模型写几条就收尾时会漏掉笔记，开头说明里提了也不算。 */
+export function missingNotes(page, count) {
+  const used = new Set([...page.sections.flatMap(s => s.points.flatMap(p => p.refs)), ...page.skip.map(s => s.note)]);
+  return Array.from({ length: count }, (_, i) => i + 1).filter(n => !used.has(n));
 }
 
 /** 给一个主题写综述。notes: [{title, author, published, body}]，结果里的笔记编号是这个数组的下标加 1。 */

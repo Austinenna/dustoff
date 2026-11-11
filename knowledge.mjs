@@ -135,6 +135,7 @@ export async function themePass(kb, { config = knowledgeConfig(), fetchImpl = fe
 /**
  * 综述页：够篇数的主题里，还没有综述或笔记有变化的，把主题下全部笔记交给模型重写一页。
  * 每页失败后本轮内再试两次。被内容审核拒绝的记下来，这批笔记不变就不再试。
+ * 有笔记漏写（既不在要点里，也不在「可跳过」里）也重写，最多共写 3 次；3 次都不全就存最后一版，不再自动重写。
  */
 export async function pagePass(kb, { config = knowledgeConfig(), fetchImpl = fetch, concurrency = 2, stale = false, retryFailed = false, retryMs = 2000, today = new Date().toLocaleDateString('sv'), onLog = log } = {}) {
   const queue = kb.pageBatches({ promptHash: PAGE_HASH, stale, retryFailed }), result = { pages: 0, failed: 0, input: 0, output: 0 };
@@ -147,10 +148,12 @@ export async function pagePass(kb, { config = knowledgeConfig(), fetchImpl = fet
     } catch (e) { kb.markPageError(theme.id, theme.hash, `读不到笔记文件：${e.code || e.message}`); result.failed++; return; }
     for (let attempt = 1; ; attempt++) {
       try {
-        const { usage, ...body } = await writePage({ domain: theme.domain, name: theme.name, summary: theme.summary, notes, today }, { config, fetchImpl });
-        kb.savePage(theme.id, body, { notes, hash: theme.hash, promptHash: PAGE_HASH, model: config.model });
-        result.pages++; result.input += usage.input; result.output += usage.output;
-        onLog(`综述「${theme.name}」${notes.length} 篇，${body.sections.reduce((n, s) => n + s.points.length, 0)} 条要点`);
+        const { usage, missing, ...body } = await writePage({ domain: theme.domain, name: theme.name, summary: theme.summary, notes, today }, { config, fetchImpl });
+        result.input += usage.input; result.output += usage.output;
+        if (missing.length && attempt < 3) { onLog(`综述「${theme.name}」漏了笔记 ${missing.join('、')}，重写`); continue; }
+        kb.savePage(theme.id, body, { notes, hash: theme.hash, promptHash: PAGE_HASH, model: config.model, complete: !missing.length });
+        result.pages++;
+        onLog(`综述「${theme.name}」${notes.length} 篇，${body.sections.reduce((n, s) => n + s.points.length, 0)} 条要点${missing.length ? `；写了 ${attempt} 次仍漏了笔记 ${missing.join('、')}` : ''}`);
         return;
       } catch (e) {
         if (e instanceof PauseError) { stop = e; return; }

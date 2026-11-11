@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createKnowledge } from '../scripts/knowledge-store.mjs';
-import { CLASSIFY_HASH, EXTRACT_HASH, cleanClassification, cleanExtraction, cleanMerge, cleanPage, cleanThemes, noteBody, notePublished, normName } from '../scripts/knowledge-extract.mjs';
+import { CLASSIFY_HASH, EXTRACT_HASH, cleanClassification, cleanExtraction, cleanMerge, cleanPage, cleanThemes, missingNotes, noteBody, notePublished, normName } from '../scripts/knowledge-extract.mjs';
 import { extractPending, mergePass, pagePass, themePass } from '../knowledge.mjs';
 import { PauseError } from '../scripts/policy.mjs';
 
@@ -400,4 +400,38 @@ test('控制台综述页：返回综述和它引用的笔记；标记看过记�
     await post('/api/page-read', { id, read: false });
     assert.deepEqual((await (await fetch(url + '/api/knowledge')).json()).pageReads, {});
   } finally { await new Promise(r => app.server.close(r)); f.kb.close(); f.cleanup(); }
+});
+
+test('综述漏写笔记：既不在要点里也不在可跳过里就重写，最多写 3 次；早先写的综述漏了的补写一次', async () => {
+  assert.deepEqual(cleanPage({ 分节: [{ 要点: [{ 内容: '一', 出处: [1] }, { 内容: '二', 出处: [2] }] }], 可跳过: [{ 笔记: 3 }] }, 4).missing, [4]);
+  assert.deepEqual(missingNotes({ sections: [{ points: [{ refs: [1, 2] }] }], skip: [] }, 2), []);
+  const f = fixture();
+  try {
+    f.kb.syncDocs();
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
+    await themePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    const [theme] = f.kb.themes();
+    // 每次都漏掉第 3 篇：写 3 次后存下最后一版，记为不全，之后不再自动重写。
+    let n = 0;
+    const lazy = async (url, init) => JSON.parse(init.body).messages[0].content.includes('合写成一页综述')
+      ? (n++, reply({ 是什么: '说明', 分节: [{ 标题: '用法', 要点: [{ 内容: '一', 出处: [1] }, { 内容: '二', 出处: [2] }] }], 阅读顺序: [], 可跳过: [] })) : fakeModel()(url, init);
+    const lines = [];
+    const r = await pagePass(f.kb, { fetchImpl: lazy, retryMs: 0, onLog: l => lines.push(l) });
+    assert.deepEqual([n, r.pages, r.input], [3, 1, 30]);   // 3 次的用量都算上
+    assert.match(lines.at(-1), /写了 3 次仍漏了笔记 3/);
+    assert.equal(f.kb.pageBatches({}).length, 0);
+    // 第二次写就全了：只写 2 次。
+    const db = new DatabaseSync(join(f.home, 'knowledge.sqlite'));
+    db.prepare('DELETE FROM pages').run();
+    let m = 0;
+    const second = async (url, init) => JSON.parse(init.body).messages[0].content.includes('合写成一页综述') && ++m === 1 ? lazy(url, init) : fakeModel()(url, init);
+    await pagePass(f.kb, { ...quiet, fetchImpl: second, retryMs: 0 });
+    assert.deepEqual([m, db.prepare('SELECT complete FROM pages').get().complete], [2, 1]);
+    // 早先写的综述（complete 为空）：漏了笔记的会重写，没漏的不动。
+    db.prepare('UPDATE pages SET complete=NULL').run();
+    assert.equal(f.kb.pageBatches({}).length, 0);
+    db.prepare('UPDATE pages SET body=?').run(JSON.stringify({ intro: '', sections: [{ title: '', points: [{ text: '一', refs: [1] }] }], disputes: [], stale: [], order: [], skip: [] }));
+    assert.deepEqual(f.kb.pageBatches({}).map(t => t.id), [theme.id]);
+    db.close();
+  } finally { f.kb.close(); f.cleanup(); }
 });
