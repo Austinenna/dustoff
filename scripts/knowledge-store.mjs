@@ -1,4 +1,4 @@
-// 知识库索引 knowledge.sqlite：每篇笔记讲到的概念、概念之间的关系、待确认的合并建议。
+// 知识库索引 knowledge.sqlite：每篇笔记讲到的概念、概念之间的关系、待确认的合并建议，以及各大类下归纳出的主题。
 // 里面的内容全部由笔记和账本推导出来，删掉可以用 knowledge.mjs --rebuild 重建；
 // 用户的操作记录（已读等）不放这里，放 library.sqlite。
 import { DatabaseSync } from 'node:sqlite';
@@ -13,10 +13,12 @@ CREATE TABLE IF NOT EXISTS docs (
   item TEXT PRIMARY KEY,            -- 沿用账本和 library.sqlite 的作品 ID
   platform TEXT NOT NULL, kind TEXT NOT NULL,   -- kind: note 整理过的笔记 / post 只存了原帖
   title TEXT, author TEXT, collected_at INTEGER, decay TEXT, path TEXT NOT NULL,
+  gist TEXT NOT NULL DEFAULT '',    -- 正文第一段的开头，归纳主题时给模型看
   content_hash TEXT NOT NULL,       -- 当前笔记正文的哈希
   extracted_hash TEXT,              -- 上次抽取时的正文哈希；和 content_hash 不同就要重抽
   prompt_hash TEXT, model TEXT, extracted_at INTEGER,
   domain TEXT,                      -- 固定大类，由模型从列表里选
+  theme_checked INTEGER NOT NULL DEFAULT 0,   -- 所在大类归纳主题时有没有算上这篇
   attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS concepts (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
@@ -39,8 +41,21 @@ CREATE TABLE IF NOT EXISTS merges (
   id INTEGER PRIMARY KEY, a_norm TEXT NOT NULL, b_norm TEXT NOT NULL, pair TEXT NOT NULL UNIQUE, reason TEXT NOT NULL DEFAULT '',
   state TEXT NOT NULL DEFAULT 'pending',   -- pending 待确认 / merged 已合并 / kept 保持分开
   created_at INTEGER NOT NULL, decided_at INTEGER);
+-- 主题：一个大类下反复出现的题目，由模型看过该大类全部笔记后归纳。综述页按主题写。
+CREATE TABLE IF NOT EXISTS themes (
+  id INTEGER PRIMARY KEY, domain TEXT NOT NULL, name TEXT NOT NULL, norm TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL, UNIQUE (domain, norm));
+CREATE TABLE IF NOT EXISTS doc_themes (
+  theme_id INTEGER NOT NULL REFERENCES themes(id) ON DELETE CASCADE, item TEXT NOT NULL REFERENCES docs(item) ON DELETE CASCADE,
+  PRIMARY KEY (theme_id, item));
+CREATE INDEX IF NOT EXISTS idx_doc_themes_item ON doc_themes(item);
 `;
 const sha = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
+// 正文第一段文字的开头：跳过标题、分隔线和提示行，去掉加粗等标记。
+function gistOf(body) {
+  const line = body.split(/\r?\n/).find(l => l.trim() && !/^\s*(#|---|\||!\[|```)/.test(l) && !l.includes('⚠️')) || '';
+  return line.replace(/^\s*(?:>|[-*+]|\d+[.)])\s*/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').trim().slice(0, 100);
+}
 function headerTitle(source) {
   const value = source.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/)?.[1]?.match(/^标题:\s*(.+)$/m)?.[1]?.trim();
   if (!value) return '';
@@ -96,12 +111,15 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
         const old = one('SELECT content_hash FROM docs WHERE item=?', r.id);
         alive.add(r.id); stats.total++;
         if (!old) stats.added++; else if (old.content_hash !== hash) stats.changed++;
-        run(`INSERT INTO docs(item,platform,kind,title,author,collected_at,decay,path,content_hash) VALUES(?,?,?,?,?,?,?,?,?)
+        run(`INSERT INTO docs(item,platform,kind,title,author,collected_at,decay,path,gist,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(item) DO UPDATE SET platform=excluded.platform,kind=excluded.kind,title=excluded.title,author=excluded.author,
-          collected_at=excluded.collected_at,decay=excluded.decay,path=excluded.path,content_hash=excluded.content_hash`,
-          r.id, r.platform, kind, title, r.author, r.collected_at || r.first_seen, r.decay, path, hash);
+          collected_at=excluded.collected_at,decay=excluded.decay,path=excluded.path,gist=excluded.gist,content_hash=excluded.content_hash`,
+          r.id, r.platform, kind, title, r.author, r.collected_at || r.first_seen, r.decay, path, gistOf(body), hash);
       }
-      for (const { item } of all('SELECT item FROM docs')) if (!alive.has(item)) { run('DELETE FROM docs WHERE item=?', item); stats.removed++; }
+      for (const { item, domain } of all('SELECT item,domain FROM docs')) if (!alive.has(item)) {
+        run('DELETE FROM docs WHERE item=?', item); stats.removed++;
+        if (domain) run('UPDATE docs SET theme_checked=0 WHERE domain=?', domain);   // 少了一篇，这个大类的主题要重新归纳
+      }
       dropOrphans();
     });
     return stats;
@@ -138,6 +156,8 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
       const doc = one('SELECT content_hash FROM docs WHERE item=?', item);
       if (!doc) return false;
       run('DELETE FROM mentions WHERE item=?', item); run('DELETE FROM relations WHERE item=?', item);
+      // 重抽后大类可能变了：从原来的主题里拿掉，等所在大类重新归纳。
+      run('DELETE FROM doc_themes WHERE item=?', item);
       const ids = new Map();
       for (const c of concepts) {
         const id = conceptId(c); ids.set(c.norm, id);
@@ -148,7 +168,7 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
         const from = ids.get(r.from), to = ids.get(r.to);
         if (from && to && from !== to) run('INSERT OR IGNORE INTO relations(from_id,to_id,type,item) VALUES(?,?,?,?)', from, to, r.type, item);
       }
-      run('UPDATE docs SET domain=?,extracted_hash=?,prompt_hash=?,model=?,extracted_at=?,attempts=0,error=NULL WHERE item=?', domain, contentHash || doc.content_hash, promptHash || null, model || null, now(), item);
+      run('UPDATE docs SET domain=?,extracted_hash=?,prompt_hash=?,model=?,extracted_at=?,theme_checked=0,attempts=0,error=NULL WHERE item=?', domain, contentHash || doc.content_hash, promptHash || null, model || null, now(), item);
       return true;
     });
   }
@@ -231,6 +251,44 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   }
   function markMergeChecked(ids) { tx(() => { for (const id of ids) run('UPDATE concepts SET merge_checked=1 WHERE id=?', id); }); }
 
+  // ── 主题 ──
+  /** 有笔记还没参加过主题归纳的大类，连同该大类的全部笔记和已有主题。 */
+  function themeBatches() {
+    const domains = all('SELECT DISTINCT domain FROM docs WHERE domain IS NOT NULL AND extracted_hash IS NOT NULL AND theme_checked=0').map(r => r.domain);
+    return domains.map(domain => {
+      const notes = all('SELECT item,title,gist FROM docs WHERE domain=? AND extracted_hash IS NOT NULL ORDER BY collected_at, item', domain).map(d => {
+        const cs = all('SELECT c.name, m.role FROM mentions m JOIN concepts c ON c.id=m.concept_id WHERE m.item=? ORDER BY c.id', d.item);
+        return { ...d, topics: cs.filter(c => c.role === '主题').map(c => c.name), mentions: cs.filter(c => c.role !== '主题').map(c => c.name) };
+      });
+      return { domain, notes, themes: all('SELECT name,summary FROM themes WHERE domain=? ORDER BY id', domain) };
+    });
+  }
+  /** 写入一个大类的主题归纳结果。名称没变的主题保留原编号（以后的综述页挂在编号上），不再出现的删掉。 */
+  function saveThemes(domain, themes) {
+    tx(() => {
+      const keep = new Set();
+      run('DELETE FROM doc_themes WHERE theme_id IN (SELECT id FROM themes WHERE domain=?)', domain);
+      for (const t of themes) {
+        run('INSERT INTO themes(domain,name,norm,summary,created_at) VALUES(?,?,?,?,?) ON CONFLICT(domain,norm) DO UPDATE SET name=excluded.name,summary=excluded.summary', domain, t.name, t.norm, t.summary || '', now());
+        const id = one('SELECT id FROM themes WHERE domain=? AND norm=?', domain, t.norm).id; keep.add(id);
+        for (const item of t.items) run('INSERT OR IGNORE INTO doc_themes(theme_id,item) SELECT ?,item FROM docs WHERE item=? AND domain=?', id, item, domain);
+      }
+      for (const { id } of all('SELECT id FROM themes WHERE domain=?', domain)) if (!keep.has(id)) run('DELETE FROM themes WHERE id=?', id);
+      run('UPDATE docs SET theme_checked=1 WHERE domain=? AND extracted_hash IS NOT NULL', domain);
+    });
+  }
+  function themes() {
+    return all(`SELECT t.id, t.domain, t.name, t.summary, count(dt.item) notes FROM themes t LEFT JOIN doc_themes dt ON dt.theme_id=t.id
+      GROUP BY t.id ORDER BY t.domain, notes DESC, t.id`);
+  }
+  function themeNotes(id) {
+    return all('SELECT d.item, d.title, d.platform, d.collected_at, d.decay FROM doc_themes dt JOIN docs d ON d.item=dt.item WHERE dt.theme_id=? ORDER BY d.collected_at DESC', id);
+  }
+  /** 没有归进任何主题的笔记。 */
+  function looseNotes() {
+    return all('SELECT item,title,domain FROM docs WHERE extracted_hash IS NOT NULL AND item NOT IN (SELECT item FROM doc_themes) ORDER BY domain, collected_at');
+  }
+
   function conceptNotes(id) {
     return all(`SELECT d.item, d.title, d.platform, d.collected_at, d.decay, d.domain, m.role FROM mentions m JOIN docs d ON d.item=m.item
       WHERE m.concept_id=? ORDER BY m.role='主题' DESC, d.collected_at DESC`, id);
@@ -245,6 +303,11 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
       docs: { total: docs.total, extracted: docs.extracted || 0, failed: docs.failed || 0 },
       concepts: { total: c.total, single: c.single || 0, with_page: c.with_page || 0 },
       isolated, pending_merges: pendingMerges().length,
+      // with_page：3 篇以上的主题，会写综述页；covered：归进了这类主题的笔记数。
+      themes: { total: one('SELECT count(*) n FROM themes').n,
+        with_page: one('SELECT count(*) n FROM (SELECT 1 FROM doc_themes GROUP BY theme_id HAVING count(*)>=3)').n,
+        covered: one('SELECT count(DISTINCT item) n FROM doc_themes WHERE theme_id IN (SELECT theme_id FROM doc_themes GROUP BY theme_id HAVING count(*)>=3)').n,
+        loose: looseNotes().length },
       domains: all('SELECT domain, count(*) notes FROM docs WHERE domain IS NOT NULL GROUP BY domain ORDER BY notes DESC'),
     };
   }
@@ -256,9 +319,9 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   /** 清空抽取结果，之后全部重抽。合并记录留着：做过的合并会重放，问过的概念对不再问。 */
   function reset() {
     tx(() => {
-      run('DELETE FROM mentions'); run('DELETE FROM relations'); run('DELETE FROM concepts'); run('UPDATE docs SET extracted_hash=NULL,prompt_hash=NULL,model=NULL,extracted_at=NULL,domain=NULL,attempts=0,error=NULL');
+      run('DELETE FROM mentions'); run('DELETE FROM relations'); run('DELETE FROM concepts'); run('DELETE FROM doc_themes'); run('UPDATE docs SET extracted_hash=NULL,prompt_hash=NULL,model=NULL,extracted_at=NULL,domain=NULL,theme_checked=0,attempts=0,error=NULL');
     });
   }
   function close() { if (db) { db.close(); db = null; } }
-  return { file, syncDocs, pendingDocs, vocabulary, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, conceptNotes, relations, stats, failures, doc, reset, close };
+  return { file, syncDocs, pendingDocs, vocabulary, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, failures, doc, reset, close };
 }

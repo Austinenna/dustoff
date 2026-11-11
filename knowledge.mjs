@@ -3,12 +3,12 @@
 //
 // 只读笔记和账本，只写 knowledge.sqlite；不改笔记、不改账本，所以不占流水线的锁。
 //
-//   node knowledge.mjs                 抽取新增和改过的笔记，全部抽完后做一次概念归并
+//   node knowledge.mjs                 抽取新增和改过的笔记，全部抽完后归并概念、按大类归纳主题
 //   node knowledge.mjs --limit 20      本轮最多抽 20 篇
 //   node knowledge.mjs --stale         连同用旧版指令抽的一起重抽
 //   node knowledge.mjs --retry-failed  重试失败满 3 次的
 //   node knowledge.mjs --rebuild       清空抽取结果后全部重抽（做过的合并会重放）
-//   node knowledge.mjs --no-merge      只抽取，不做归并
+//   node knowledge.mjs --no-merge      只抽取，不做归并和主题归纳
 //   node knowledge.mjs --dry-run       只看有多少篇要抽，不调用模型
 //   node knowledge.mjs --report        只输出当前统计
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
@@ -17,7 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { makeCfg, DUST_HOME } from './scripts/config.mjs';
 import { PauseError } from './scripts/policy.mjs';
 import { createKnowledge, bodyHash } from './scripts/knowledge-store.mjs';
-import { EXTRACT_HASH, PermanentError, extractNote, knowledgeConfig, mergeConcepts, noteBody, normName } from './scripts/knowledge-extract.mjs';
+import { EXTRACT_HASH, PermanentError, clusterThemes, extractNote, knowledgeConfig, mergeConcepts, noteBody, normName } from './scripts/knowledge-extract.mjs';
 
 const IS_MAIN = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 const stamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -88,6 +88,24 @@ export async function mergePass(kb, { config = knowledgeConfig(), fetchImpl = fe
   return result;
 }
 
+/** 主题归纳：有新笔记或笔记变动的大类，把该大类全部笔记交给模型重新归纳一遍。 */
+export async function themePass(kb, { config = knowledgeConfig(), fetchImpl = fetch, onLog = log } = {}) {
+  const result = { domains: 0, themes: 0, failed: 0, input: 0, output: 0 };
+  for (const { domain, notes, themes } of kb.themeBatches()) {
+    try {
+      // 只有一篇笔记的大类没有可归纳的，直接记为已处理。
+      const out = notes.length < 2 ? { themes: [], usage: { input: 0, output: 0 } } : await clusterThemes(domain, notes, themes, { config, fetchImpl });
+      kb.saveThemes(domain, out.themes.map(t => ({ ...t, items: t.notes.map(i => notes[i].item) })));
+      result.domains++; result.themes += out.themes.length; result.input += out.usage.input; result.output += out.usage.output;
+      onLog(`主题「${domain}」${notes.length} 篇：${out.themes.map(t => `${t.name}(${t.notes.length})`).join('、') || '无'}`);
+    } catch (e) {
+      if (e instanceof PauseError) throw e;
+      result.failed++; onLog(`✗ 归纳「${domain}」的主题失败：${e.message}`);   // 没标记，下次再试
+    }
+  }
+  return result;
+}
+
 async function main() {
   const args = process.argv.slice(2), has = flag => args.includes(flag);
   const valOf = flag => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
@@ -134,8 +152,10 @@ async function main() {
     try {
       const m = await mergePass(kb, { config });
       log(`归并：合并 ${m.merged} 个，待确认 ${m.suggested} 对${m.failed ? `，${m.failed} 批失败` : ''}；用量 输入 ${m.input} 输出 ${m.output} token`);
+      const t = await themePass(kb, { config });
+      log(`主题：${t.domains} 个大类重新归纳，共 ${t.themes} 个主题${t.failed ? `，${t.failed} 个大类失败` : ''}；用量 输入 ${t.input} 输出 ${t.output} token`);
     } catch (e) { stopped = e.message; log(`✗ ${e.message}`); }
-  } else if (rest) log(`还有 ${rest} 篇没抽取，本轮不做归并`);
+  } else if (rest) log(`还有 ${rest} 篇没抽取，本轮不做归并和主题归纳`);
   console.log(JSON.stringify(kb.stats(), null, 2));
   if (stopped) process.exitCode = stopped.startsWith('连续') ? 1 : 5;
   else if (kb.failures().length) process.exitCode = 2;
