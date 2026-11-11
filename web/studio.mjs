@@ -329,6 +329,8 @@ async function loadPage(){
     const text=v=>esc(v).replace(/笔记 ?(\d+)/g,(m,i)=>{const x=live(Number(i));return x?`<button type="button" class="ref-inline" data-action="kb-note" data-id="${esc(x.item)}" title="${esc(x.title)}">笔记 ${i}</button>`:m;});
     const points=list=>`<ul class="points">${list.map(q=>`<li>${text(q.text)}<span class="refs">${q.refs.map(ref).join('')}</span></li>`).join('')}</ul>`;
     const noteRow=(i,why='')=>{const x=live(i),n=x&&byId.get(x.item);return `<li>${x?`<button type="button" class="pnote" data-action="kb-note" data-id="${esc(x.item)}"><span class="ref">${i}</span><b>${esc(x.title)}</b>${n.read_at?'<small>已读</small>':'<span class="unread" title="未读"></span>'}</button>`:`<span class="pnote"><span class="ref gone">${i}</span><b>${esc(p.notes[i-1]?.title||'这篇笔记已经不在了')}</b></span>`}${why?`<p>${text(why)}</p>`:''}</li>`;};
+    // 阅读顺序和可跳过里已经列过的笔记，末尾不再重复列一遍。
+    const listed=new Set([...b.order,...b.skip].map(o=>o.note)),rest=p.notes.map((_,i)=>i+1).filter(i=>!listed.has(i));
     const unread=p.notes.filter(x=>byId.has(x.item)&&!byId.get(x.item).read_at).length;
     $('#reader').innerHTML=bar(true)+`<div class="article page-view"><div class="kicker">${chip('综述','green')}${chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(p.domain)}"></span>${esc(p.domain)}`)}</div><h1>${esc(p.name)}</h1>
       <div class="byline"><span>${p.notes.length} 篇笔记合写</span><span>${unread?`其中 ${unread} 篇你还没读`:'原笔记你都读过'}</span><span>写于 ${esc(fmt(p.built_at))}</span></div>
@@ -339,7 +341,7 @@ async function loadPage(){
       ${b.stale.length?`<h2>可能已经过期</h2>${points(b.stale)}`:''}
       ${b.order.length?`<h2>建议阅读顺序</h2><ol class="pnotes">${b.order.map(o=>noteRow(o.note,o.why)).join('')}</ol>`:''}
       ${b.skip.length?`<h2>可以跳过</h2><ul class="pnotes">${b.skip.map(o=>noteRow(o.note,o.why)).join('')}</ul>`:''}
-      <h2>全部出处</h2><ul class="pnotes plain">${p.notes.map((_,i)=>noteRow(i+1)).join('')}</ul></div>
+      ${rest.length?`<h2>${listed.size?'其余笔记':'全部笔记'}</h2><ul class="pnotes plain">${rest.map(i=>noteRow(i)).join('')}</ul>`:''}</div>
       <p class="page-foot">这一页由模型根据上面 ${p.notes.length} 篇笔记写成，可能有错。要点后面的编号是出处，点开可以核对原笔记。看过综述不算读过原笔记。</p></div>`;
     if(pageState(t)!=='seen')api('page-read',{id:t.id,read:true}).then(()=>ensureKnowledge(true)).catch(()=>{});
   }catch(e){if(epoch===docEpoch)$('#reader').innerHTML=bar(false)+empty(e.message);}
