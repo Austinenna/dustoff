@@ -32,7 +32,7 @@
 
 - 只读笔记和账本，只写 `knowledge.sqlite`，不改笔记的「分类」「标签」。这个文件可以随时删掉重建，做过的合并会重放。
 - 大类是固定的 22 个，定义在 `scripts/knowledge-extract.mjs`。题材不属于任何一个大类的笔记，以及被模型服务内容审核拒绝的笔记，归到「未分类」并记下原因；「未分类」不归纳主题。改了大类定义后跑 `node knowledge.mjs --stale`，只重新分类，不重抽概念。
-- 目前需要手动运行，尚未接入每日定时：`node knowledge.mjs`（`--dry-run` 只看待抽取篇数，`--report` 看统计，其余参数见文件开头）。
+- 第一次手动运行 `node knowledge.mjs` 建索引；之后每轮 `run.mjs`（含每日定时）结束时自动更新，`DUST_KB_AUTO=0` 可关闭。控制台里手工改过的大类不会被模型覆盖。手动运行的参数：`node knowledge.mjs`（`--dry-run` 只看待抽取篇数，`--report` 看统计，其余参数见文件开头）。
 
 ## 控制台
 

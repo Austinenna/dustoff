@@ -323,6 +323,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           if(code!==0)throw new HttpError(code===3?409:400,operation.error||'操作未完成，请查看控制台操作日志');
           result=kind==='discard'?{discarded:true}:{deleted:true};break;
         }
+        case '/api/knowledge-domain':if(!existsSync(knowledge.file))throw new HttpError(400,'知识库索引还没有建');try{result=knowledge.setDomain(String(data.id||''),data.domain||null);}catch(e){throw new HttpError(400,e.message);}break;
         case '/api/read':result=library.setRead(data.id,data.read!==false);break;
         case '/api/topic':result=library.saveTopic(data);break;
         case '/api/topic-delete':result=library.deleteTopic(data.id);break;

@@ -287,3 +287,24 @@ test('控制台目录：各大类和主题，每篇笔记的大类、主题和�
     assert.deepEqual(c.docs['3'].themes, []);
   } finally { await new Promise(r => app.server.close(r)); f.kb.close(); f.cleanup(); }
 });
+
+test('手工指定大类：重新分类和重建都不覆盖，两个大类重新归纳主题；取消后交回模型', async () => {
+  const f = fixture();
+  try {
+    f.kb.syncDocs();
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
+    await themePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    assert.throws(() => f.kb.setDomain('1', '其他'), /不在固定列表里/);
+    assert.throws(() => f.kb.setDomain('nope', '游戏攻略'), /还没进知识库索引/);
+    assert.deepEqual(f.kb.setDomain('x9', '游戏攻略'), { item: 'x9', domain: '游戏攻略', manual: true });
+    assert.deepEqual([f.kb.doc('x9').domain, f.kb.doc('x9').domain_note, f.kb.catalog().docs.x9.manual], ['游戏攻略', '手动指定', true]);
+    assert.deepEqual(f.kb.themeBatches().map(b => b.domain).sort(), ['游戏攻略', '软件与开发工具']);
+    const hashes = { promptHash: EXTRACT_HASH, classifyHash: 'new-definitions', stale: true };
+    assert.deepEqual(f.kb.pendingDocs(hashes).map(d => d.item), ['1', '2', '3']);   // 手工指定的不再交给模型分类
+    f.kb.reset();
+    assert.equal(f.kb.doc('x9').domain, '游戏攻略');
+    assert.deepEqual(f.kb.pendingDocs({}).find(d => d.item === 'x9').need_classify, 0);
+    assert.deepEqual(f.kb.setDomain('x9', null), { item: 'x9', manual: false });
+    assert.equal(f.kb.pendingDocs({}).find(d => d.item === 'x9').need_classify, 1);
+  } finally { f.kb.close(); f.cleanup(); }
+});

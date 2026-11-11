@@ -38,6 +38,26 @@ export function childError(name, code, lastError = '', timedOut = false) {
   e.code = code === 4 ? 4 : 1;
   return e;
 }
+/**
+ * 一轮结束后更新知识库索引（knowledge.mjs）：给新笔记定大类、抽概念，重新归纳有变动的大类。
+ * 索引建过一次才自动更新，第一次全量由人手动跑；失败只记日志，不影响本轮结果。
+ */
+async function updateKnowledge(log) {
+  if (makeCfg()('DUST_KB_AUTO', '1') === '0' || !existsSync(localPath(process.env.DUST_KNOWLEDGE_DB || join(DUST_HOME, 'knowledge.sqlite')))) return;
+  await new Promise(resolve => {
+    const p = spawn(process.execPath, [join(dirname(scripts), 'knowledge.mjs')], { env: process.env, stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    const timer = setTimeout(() => p.kill('SIGTERM'), 30 * 60_000);
+    p.stderr.on('data', d => { err = (err + d).slice(-4000); });
+    p.on('error', e => { clearTimeout(timer); log(`知识库索引没有更新：${e.message}`); resolve(); });
+    p.on('close', code => {
+      clearTimeout(timer);
+      const lines = err.split('\n').filter(l => /待处理|抽取完成|归并：|主题：|✗/.test(l)).map(l => l.replace(/^\[[\d:]+\]\s*/, ''));
+      log(`知识库索引${code === 0 ? '已更新' : `更新未全部完成（退出码 ${code}）`}：${lines.join('；') || '无输出'}`);
+      resolve();
+    });
+  });
+}
 async function script(name, args, env, log) {
   return new Promise((resolve, reject) => {
     const timeout = deadlineMs(name === 'get_collection.mjs' ? 15 * 60_000 : 90_000);
@@ -427,6 +447,7 @@ export async function main(args = process.argv.slice(2), { runScript = script, t
       appendHistory(DUST_HOME, stage.runId, summary, process.exitCode || 0, startedAt);
     }
     } finally { stage.releaseLock(); }
+    if (!dry && !downloadOnly && !skipNotes && !has('--status')) await updateKnowledge(log);
   }
 }
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) main().catch(e => { console.error(e.message); process.exitCode=1; });

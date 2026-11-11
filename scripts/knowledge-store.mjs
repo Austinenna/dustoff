@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS merges (
   id INTEGER PRIMARY KEY, a_norm TEXT NOT NULL, b_norm TEXT NOT NULL, pair TEXT NOT NULL UNIQUE, reason TEXT NOT NULL DEFAULT '',
   state TEXT NOT NULL DEFAULT 'pending',   -- pending 待确认 / merged 已合并 / kept 保持分开
   created_at INTEGER NOT NULL, decided_at INTEGER);
+-- 用户在控制台手工指定的大类。重新分类、--rebuild 都不覆盖。
+CREATE TABLE IF NOT EXISTS domain_overrides (item TEXT PRIMARY KEY, domain TEXT NOT NULL, created_at INTEGER NOT NULL);
 -- 主题：一个大类下反复出现的题目，由模型看过该大类全部笔记后归纳。综述页按主题写。
 CREATE TABLE IF NOT EXISTS themes (
   id INTEGER PRIMARY KEY, domain TEXT NOT NULL, name TEXT NOT NULL, norm TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
@@ -52,6 +54,7 @@ CREATE TABLE IF NOT EXISTS doc_themes (
   PRIMARY KEY (theme_id, item));
 CREATE INDEX IF NOT EXISTS idx_doc_themes_item ON doc_themes(item);
 `;
+const MANUAL_NOTE = '手动指定';
 const sha = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
 // 正文第一段文字的开头：跳过标题、分隔线和提示行，去掉加粗等标记。
 function gistOf(body) {
@@ -138,7 +141,7 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     const classify = ['classified_hash IS NULL', 'classified_hash!=content_hash'], extract = ['extracted_hash IS NULL', 'extracted_hash!=content_hash'], args = [];
     if (stale) { classify.push('domain_hash IS NOT ?'); args.push(classifyHash ?? null); extract.push('prompt_hash IS NOT ?'); args.push(promptHash ?? null); }
     return all(`SELECT * FROM (SELECT item,platform,kind,title,author,path,content_hash,domain,collected_at,attempts,
-      (${classify.join(' OR ')}) need_classify, (${extract.join(' OR ')}) need_extract FROM docs)
+      ((${classify.join(' OR ')}) AND item NOT IN (SELECT item FROM domain_overrides)) need_classify, (${extract.join(' OR ')}) need_extract FROM docs)
       WHERE (need_classify OR need_extract) ${retryFailed ? '' : 'AND attempts<3'} ORDER BY collected_at, item LIMIT ?`, ...args, limit);
   }
 
@@ -172,6 +175,20 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
       run('UPDATE docs SET domain=?,domain_note=?,classified_hash=?,domain_hash=?,attempts=0,error=NULL WHERE item=?', domain, domainNote, contentHash || doc.content_hash, hash || null, item);
       return true;
     });
+  }
+
+  /** 用户手工指定大类；domain 为空表示取消指定，下次运行由模型重新分类。 */
+  function setDomain(item, domain) {
+    if (!one('SELECT 1 FROM docs WHERE item=?', item)) throw new Error('这篇笔记还没进知识库索引');
+    if (!domain) {
+      const changed = Number(run('DELETE FROM domain_overrides WHERE item=?', item).changes) > 0;
+      if (changed) run('UPDATE docs SET classified_hash=NULL WHERE item=?', item);
+      return { item, manual: false };
+    }
+    if (domain !== UNSORTED && !DOMAINS.some(d => d.name === domain)) throw new Error('大类不在固定列表里');
+    run('INSERT INTO domain_overrides(item,domain,created_at) VALUES(?,?,?) ON CONFLICT(item) DO UPDATE SET domain=excluded.domain,created_at=excluded.created_at', item, domain, now());
+    saveDomain(item, { domain, domainNote: MANUAL_NOTE });
+    return { item, domain, manual: true };
   }
 
   /** 写入一篇笔记的抽取结果；重抽时先清掉这篇旧的概念关联。 */
@@ -342,10 +359,12 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   function catalog() {
     const counts = new Map(all('SELECT domain, count(*) n FROM docs WHERE domain IS NOT NULL GROUP BY domain').map(r => [r.domain, r.n]));
     const docs = {};
-    for (const d of all('SELECT item, domain, domain_note note FROM docs WHERE domain IS NOT NULL')) docs[d.item] = { domain: d.domain, note: d.note, themes: [], concepts: [] };
+    const manual = new Set(all('SELECT item FROM domain_overrides').map(r => r.item));
+    for (const d of all('SELECT item, domain, domain_note note FROM docs WHERE domain IS NOT NULL')) docs[d.item] = { domain: d.domain, note: d.note, manual: manual.has(d.item), themes: [], concepts: [] };
     for (const r of all('SELECT item, theme_id FROM doc_themes')) docs[r.item]?.themes.push(r.theme_id);
     for (const r of all("SELECT item, concept_id id, role FROM mentions ORDER BY role='主题' DESC, concept_id")) docs[r.item]?.concepts.push({ id: r.id, role: r.role });
     return {
+      all: [...DOMAINS.map(d => d.name), UNSORTED],
       domains: [...DOMAINS, { name: UNSORTED, definition: '题材不属于任何一个大类，或模型服务拒绝处理的笔记' }].map(d => ({ ...d, notes: counts.get(d.name) || 0 })).filter(d => d.notes),
       themes: themes(), docs,
       concepts: Object.fromEntries(concepts().map(c => [c.id, { name: c.name, type: c.type, summary: c.summary, notes: c.notes }])),
@@ -360,8 +379,9 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   function reset() {
     tx(() => {
       run('DELETE FROM mentions'); run('DELETE FROM relations'); run('DELETE FROM concepts'); run('DELETE FROM doc_themes'); run("UPDATE docs SET extracted_hash=NULL,prompt_hash=NULL,model=NULL,extracted_at=NULL,domain=NULL,domain_note='',classified_hash=NULL,domain_hash=NULL,theme_checked=0,attempts=0,error=NULL");
+      run('UPDATE docs SET domain=(SELECT domain FROM domain_overrides o WHERE o.item=docs.item),domain_note=?,classified_hash=content_hash WHERE item IN (SELECT item FROM domain_overrides)', MANUAL_NOTE);
     });
   }
   function close() { if (db) { db.close(); db = null; } }
-  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, catalog, failures, unsorted, doc, reset, close };
+  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, setDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, catalog, failures, unsorted, doc, reset, close };
 }
