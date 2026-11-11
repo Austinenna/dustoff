@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { localPath } from './policy.mjs';
-import { UNSORTED, noteBody, normName } from './knowledge-extract.mjs';
+import { DOMAINS, UNSORTED, noteBody, normName } from './knowledge-extract.mjs';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS docs (
@@ -338,6 +338,19 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   }
   /** 归到「未分类」的笔记和原因。 */
   function unsorted() { return all('SELECT item,title,domain_note note FROM docs WHERE domain=? ORDER BY collected_at, item', UNSORTED); }
+  /** 控制台用的目录：各大类和它的主题，每篇笔记的大类、主题和概念。 */
+  function catalog() {
+    const counts = new Map(all('SELECT domain, count(*) n FROM docs WHERE domain IS NOT NULL GROUP BY domain').map(r => [r.domain, r.n]));
+    const docs = {};
+    for (const d of all('SELECT item, domain, domain_note note FROM docs WHERE domain IS NOT NULL')) docs[d.item] = { domain: d.domain, note: d.note, themes: [], concepts: [] };
+    for (const r of all('SELECT item, theme_id FROM doc_themes')) docs[r.item]?.themes.push(r.theme_id);
+    for (const r of all("SELECT item, concept_id id, role FROM mentions ORDER BY role='主题' DESC, concept_id")) docs[r.item]?.concepts.push({ id: r.id, role: r.role });
+    return {
+      domains: [...DOMAINS, { name: UNSORTED, definition: '题材不属于任何一个大类，或模型服务拒绝处理的笔记' }].map(d => ({ ...d, notes: counts.get(d.name) || 0 })).filter(d => d.notes),
+      themes: themes(), docs,
+      concepts: Object.fromEntries(concepts().map(c => [c.id, { name: c.name, type: c.type, summary: c.summary, notes: c.notes }])),
+    };
+  }
   function failures() { return all('SELECT item,title,attempts,error FROM docs WHERE error IS NOT NULL ORDER BY item'); }
   function doc(item) { return one('SELECT * FROM docs WHERE item=?', item); }
   function relations() {
@@ -350,5 +363,5 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     });
   }
   function close() { if (db) { db.close(); db = null; } }
-  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, failures, unsorted, doc, reset, close };
+  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, catalog, failures, unsorted, doc, reset, close };
 }

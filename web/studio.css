@@ -306,6 +306,12 @@ textarea{resize:vertical}
 .facet button>span:nth-last-child(2){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .facet button>span:last-child{margin-left:auto;flex:none;color:var(--muted);font-size:11.5px}
 .sw{width:8px;height:8px;border-radius:3px;flex-shrink:0;display:inline-block}
+.facet button.sub{padding-left:26px;font-size:12.5px}
+.kb-about{padding:10px 14px;border-bottom:1px solid var(--line);font-size:12.5px;color:var(--ink-2);display:grid;gap:4px}
+.kb-about b{font-size:14px;color:var(--ink)}
+.kb-about small{color:var(--muted)}
+.article .links{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px}
+.article .links button{cursor:pointer}
 .tagcloud{display:flex;flex-wrap:wrap;gap:4px;padding:2px 6px}
 .tagcloud button{width:auto;padding:2px 8px;border-radius:99px;border:1px solid var(--line);font-size:11.5px}
 .kb-list{border-right:1px solid var(--line);display:flex;flex-direction:column}
@@ -346,6 +352,9 @@ textarea{resize:vertical}
 .tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:30px}
 .topics{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
 .topic-card{padding:18px;display:flex;flex-direction:column;gap:10px;text-align:left}
+.topic-card button{text-align:left}
+.topic-card li button:hover,.topic-card>button:hover h3{text-decoration:underline}
+.topic-card li small{color:var(--muted);margin-left:4px}
 .topic-card h3{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px}
 .topic-card .bar{height:4px;border-radius:4px;background:var(--sunken);overflow:hidden}
 .topic-card .bar i{display:block;height:100%;border-radius:4px}

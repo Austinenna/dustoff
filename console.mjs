@@ -9,6 +9,7 @@ import { spawn, execFile } from 'node:child_process';
 import { DUST_HOME } from './scripts/config.mjs';
 import { createStore, liveLock, HttpError } from './scripts/console-store.mjs';
 import { createLibrary } from './scripts/library-store.mjs';
+import { createKnowledge } from './scripts/knowledge-store.mjs';
 import { createScheduler } from './scripts/schedule.mjs';
 import { localPath, atomicWrite } from './scripts/policy.mjs';
 import { createMediaService, streamMedia } from './scripts/console-media.mjs';
@@ -31,6 +32,9 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   const access=createConsoleAccess({home,enabled:!!external});
   const store=createStore(home);
   const library=createLibrary(home);
+  // 知识库索引由 knowledge.mjs 生成；还没跑过时文件不存在，这里不替它新建。
+  const knowledge=createKnowledge(home);
+  const knowledgeState=()=>existsSync(knowledge.file)?{ready:true,...knowledge.catalog()}:{ready:false};
   const media=createMediaService({store,home});
   scheduler ||= createScheduler({home,root});
   const token=randomBytes(32).toString('hex');
@@ -278,6 +282,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/settings':result=store.settings();break;
         case '/api/notes-index':{const reads=library.readIds();result={items:store.notesIndex().items.map(i=>({...i,read_at:reads.get(i.id)||null}))};break;}
         case '/api/library':result=libraryState();break;
+        case '/api/knowledge':result=knowledgeState();break;
         case '/api/suggest':result={suggestions:suggestions(params.id)};break;
         case '/api/insights':result=store.insights({id:params.id});break;
         case '/api/tokens':result={tokens:library.tokens()};break;

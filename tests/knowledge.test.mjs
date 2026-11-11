@@ -267,3 +267,23 @@ test('失败处理：参数错误不重试，连续失败停止，预算用完�
     await assert.rejects(mergePass({ mergeBatches: () => [{ domain: '游戏攻略', concepts: [{ id: 1, name: '甲', type: '产品' }, { id: 2, name: '乙', type: '产品' }] }] }, { ...quiet, fetchImpl: status(402, {}) }), PauseError);
   } finally { f.kb.close(); f.cleanup(); }
 });
+
+test('控制台目录：各大类和主题，每篇笔记的大类、主题和概念；索引没建过时不替它新建', async () => {
+  const f = fixture();
+  const { createConsole } = await import('../console.mjs');
+  const app = createConsole({ home: f.home, scheduler: { status: () => ({ installed: false }), plan: () => null } });
+  const url = await app.listen(0);
+  try {
+    assert.deepEqual(await (await fetch(url + '/api/knowledge')).json(), { ready: false });
+    f.kb.syncDocs();
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
+    await themePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    const c = await (await fetch(url + '/api/knowledge')).json();
+    assert.equal(c.ready, true);
+    assert.deepEqual(c.domains.map(d => [d.name, d.notes]), [['视频创作', 1], ['软件与开发工具', 3]]);   // 按固定顺序，没有笔记的大类不列
+    assert.deepEqual(c.themes.map(t => [t.domain, t.name, t.notes]), [['软件与开发工具', '剪刀手用法', 3]]);
+    assert.deepEqual([c.docs['1'].domain, c.docs['1'].note, c.docs['1'].themes], ['软件与开发工具', '按内容归类', [c.themes[0].id]]);
+    assert.deepEqual(c.docs['1'].concepts.map(x => [c.concepts[x.id].name, x.role]), [['剪刀手', '主题'], ['木工坊', '提到']]);
+    assert.deepEqual(c.docs['3'].themes, []);
+  } finally { await new Promise(r => app.server.close(r)); f.kb.close(); f.cleanup(); }
+});

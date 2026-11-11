@@ -13,7 +13,7 @@ if(document.querySelector('meta[name="dustoff-access"]')?.content==='1'){const f
 const PAGES={overview:'今日',pending:'收件箱',notes:'知识库',videos:'媒体库',materials:'素材箱',collection:'收藏记录',pipeline:'流水线',health:'健康',settings:'设置'};
 const ALIASES={results:['notes'],run:['pending'],galleries:['videos','gallery'],posts:['videos','post'],schedule:['pipeline','schedule'],history:['pipeline','history'],account:['pipeline','sources'],models:['settings','models'],rules:['settings','rules'],storage:['settings','storage'],api:['settings','api']};
 const state={route:'overview',overview:null,settings:null,index:null,library:null,insights:null,
-  kb:{id:null,cat:'all',read:'all',tag:null,platform:'all',type:'all',q:'',view:'read',kind:'note',list:true},
+  kb:{id:null,cat:'all',theme:null,concept:null,read:'all',tag:null,platform:'all',type:'all',q:'',view:'read',kind:'note',list:true},
   media:{tab:'video',platform:'all',q:'',page:1},inbox:{id:null,page:1},
   collection:{q:'',status:'all',page:1,platform:'all'},materials:{topic:'all'},settingsTab:'models',
   runs:[],runId:null,logKind:'business',runPage:1,selection:'',lookup:''};
@@ -92,6 +92,7 @@ function syncChrome(){
 const overviewKey=o=>o&&JSON.stringify([o.notes,o.todayNotes,o.videos,o.galleries,o.pending,o.usedToday,o.review,o.failed,o.scheduler,o.execution,o.lastRun?.id,o.recentVideos?.map(v=>v.id),o.session.online,o.todayNew]);
 async function refreshOverview(){const before=overviewKey(state.overview);state.overview=await api('overview');syncChrome();if(state.route==='overview'&&!dialog.open&&before!==overviewKey(state.overview)){state.today=null;await loadToday();}}
 async function ensureIndex(force=false){if(!state.index||force)state.index=(await api('notes-index')).items;return state.index;}
+async function ensureKnowledge(force=false){if(!state.kn||force)state.kn=await api('knowledge').catch(()=>({ready:false}));return state.kn;}
 async function ensureLibrary(force=false){if(!state.library||force){state.library=await api('library');syncChrome();}return state.library;}
 
 // ── 今日 ──
@@ -263,31 +264,45 @@ function qualityPicker(i){
 function inboxStep(dir){const list=state.inbox.data?.items||[];if(!list.length)return;const n=list.findIndex(x=>x.id===state.inbox.id);state.inbox.id=list[(n+dir+list.length)%list.length].id;renderInbox();}
 
 // ── 知识库 ──
-const filtered=()=>{const k=state.kb,q=k.q.trim().toLowerCase();return (state.index||[]).filter(n=>(k.cat==='all'||(n.category||'未分类')===k.cat)&&(k.platform==='all'||n.platform===k.platform)&&(k.tag===null||n.tags.includes(k.tag))&&(k.type==='all'||(k.type==='note'?n.has_note:!n.has_note))&&(k.read==='all'||(k.read==='unread'?!n.read_at:k.read==='read'?!!n.read_at:k.read==='evergreen'?evergreen(n.decay):n.decay&&!evergreen(n.decay)))&&(!q||[n.title,n.author,n.id,...n.tags].join(' ').toLowerCase().includes(q)));};
+// 知识库索引建好后按大类、主题、概念筛选；还没建时沿用笔记里的旧分类。
+const kn=()=>state.kn?.ready?state.kn:null,kd=n=>kn()?.docs[n.id];
+const dom=n=>kn()?(kd(n)?.domain||'未分类'):(n.category||'未分类');
+const filtered=()=>{const k=state.kb,q=k.q.trim().toLowerCase();return (state.index||[]).filter(n=>(k.cat==='all'||dom(n)===k.cat)&&(k.theme===null||!!kd(n)?.themes.includes(k.theme))&&(k.concept===null||!!kd(n)?.concepts.some(c=>c.id===k.concept))&&(k.platform==='all'||n.platform===k.platform)&&(k.tag===null||n.tags.includes(k.tag))&&(k.type==='all'||(k.type==='note'?n.has_note:!n.has_note))&&(k.read==='all'||(k.read==='unread'?!n.read_at:k.read==='read'?!!n.read_at:k.read==='evergreen'?evergreen(n.decay):n.decay&&!evergreen(n.decay)))&&(!q||[n.title,n.author,n.id,...n.tags].join(' ').toLowerCase().includes(q)));};
 function notesPage(){return `<div class="page" id="kb">${empty('正在读取…')}</div>`;}
-async function loadNotes(){const epoch=pageEpoch;await ensureIndex(true);if(epoch!==pageEpoch)return;renderNotes();}
+async function loadNotes(){const epoch=pageEpoch;await Promise.all([ensureIndex(true),ensureKnowledge(true)]);if(epoch!==pageEpoch)return;renderNotes();}
 function renderNotes(){
   const k=state.kb,all=state.index,list=filtered(),notes=all.filter(n=>n.has_note);
-  const count=(fn)=>all.filter(fn).length,cats=Object.entries(all.reduce((a,n)=>{const c=n.category||'未分类';a[c]=(a[c]||0)+1;return a;},{})).sort((a,b)=>b[1]-a[1]);
+  const K=kn(),byDom=all.reduce((a,n)=>{const c=dom(n);a[c]=(a[c]||0)+1;return a;},{});
+  const count=(fn)=>all.filter(fn).length,cats=K?[...new Set([...K.domains.map(d=>d.name),'未分类'])].map(c=>[c,byDom[c]||0]).filter(x=>x[1]):Object.entries(byDom).sort((a,b)=>b[1]-a[1]);
+  if(!K||!K.themes.some(t=>t.id===k.theme))k.theme=null;if(!K?.concepts[k.concept])k.concept=null;
+  const themesOf=c=>K?K.themes.filter(t=>t.domain===c&&t.notes):[];
+  const pool=all.filter(n=>k.cat==='all'||dom(n)===k.cat),cc={};if(K)for(const n of pool)for(const c of kd(n)?.concepts||[])cc[c.id]=(cc[c.id]||0)+1;
+  const concepts=Object.entries(cc).filter(e=>e[1]>=2||Number(e[0])===k.concept).sort((a,b)=>b[1]-a[1]).slice(0,16);
   const tags=Object.entries(all.reduce((a,n)=>{for(const t of n.tags)a[t]=(a[t]||0)+1;return a;},{})).sort((a,b)=>b[1]-a[1]).slice(0,12);
   document.body.classList.toggle('fit',k.view==='read');
-  const headHtml=head('知识库',`${notes.length} 篇笔记 · ${count(n=>n.has_note&&!n.read_at)} 篇未读 · ${cats.length} 个主题${count(n=>!n.has_note)?` · 另有 ${count(n=>!n.has_note)} 份独立文字稿`:''}`,`<div class="seg">${[['read','阅读'],['topics','主题地图']].map(([v,l])=>`<button type="button" data-action="kb-view" data-value="${v}" aria-pressed="${k.view===v}">${l}</button>`).join('')}</div>${button(`${ic('ext',14)}Obsidian 打开目录`,'open','data-kind="notes-folder"')}`);
+  const headHtml=head('知识库',`${notes.length} 篇笔记 · ${count(n=>n.has_note&&!n.read_at)} 篇未读 · ${K?`${cats.length} 个大类 · ${K.themes.filter(t=>t.notes).length} 个主题`:`${cats.length} 个主题`}${count(n=>!n.has_note)?` · 另有 ${count(n=>!n.has_note)} 份独立文字稿`:''}`,`<div class="seg">${[['read','阅读'],['topics',K?'大类目录':'主题地图']].map(([v,l])=>`<button type="button" data-action="kb-view" data-value="${v}" aria-pressed="${k.view===v}">${l}</button>`).join('')}</div>${button(`${ic('ext',14)}Obsidian 打开目录`,'open','data-kind="notes-folder"')}`);
+  if(k.view==='topics'&&K){
+    $('#kb').innerHTML=headHtml+`<div class="topics">${cats.map(([c,n])=>{const ts=themesOf(c),loose=all.filter(x=>dom(x)===c&&!kd(x)?.themes.length).length,color=catColor(c==='未分类'?null:c);return `<div class="card topic-card"><button type="button" data-action="kb-facet" data-facet="cat" data-value="${esc(c)}" title="${esc(K.domains.find(d=>d.name===c)?.definition||'')}"><h3><span class="sw" style="width:10px;height:10px;background:${color}"></span>${esc(c)}<small style="margin-left:auto;font-weight:400">${n} 篇</small></h3></button><span class="bar"><i style="width:${Math.min(100,n/Math.max(1,...cats.map(x=>x[1]))*100)}%;background:${color}"></i></span><ul>${ts.map(t=>`<li><button type="button" data-action="kb-theme" data-cat="${esc(c)}" data-value="${t.id}" title="${esc(t.summary)}">${esc(t.name)}<small>${t.notes}</small></button></li>`).join('')}${loose?`<li>${ts.length?'另有 ':''}${loose} 篇没归进主题</li>`:''}</ul></div>`;}).join('')||empty('还没有笔记')}</div>`;return;
+  }
   if(k.view==='topics'){
     $('#kb').innerHTML=headHtml+`<div class="topics">${cats.map(([c,n])=>{const ns=all.filter(x=>(x.category||'未分类')===c);return `<button type="button" class="card topic-card" data-action="kb-facet" data-facet="cat" data-value="${esc(c)}"><h3><span class="sw" style="width:10px;height:10px;background:${catColor(c==='未分类'?null:c)}"></span>${esc(c)}<small style="margin-left:auto;font-weight:400">${n} 篇</small></h3><span class="bar"><i style="width:${Math.min(100,n/Math.max(1,cats[0][1])*100)}%;background:${catColor(c==='未分类'?null:c)}"></i></span><ul>${ns.slice(0,3).map(x=>`<li>${esc(x.title)}</li>`).join('')}</ul><span class="row">${[...new Set(ns.flatMap(x=>x.tags))].slice(0,4).map(t=>chip('#'+esc(t),'outline')).join('')}</span></button>`;}).join('')||empty('还没有笔记')}</div>`;return;
   }
   if(!list.some(n=>n.id===k.id))k.id=list[0]?.id||null;
   const n=all.find(x=>x.id===k.id);
   const facet=(f,v,label,c,dot='')=>`<button type="button" data-action="kb-facet" data-facet="${f}" data-value="${esc(v)}" aria-pressed="${String(k[f==='tag'?'tag':f])===String(v)}">${dot}<span>${label}</span><span>${c}</span></button>`;
+  const theme=K?.themes.find(t=>t.id===k.theme),concept=K?.concepts[k.concept];
+  const about=[theme&&`<div class="kb-about"><small>主题 · ${esc(theme.domain)}</small><b>${esc(theme.name)}</b><span>${esc(theme.summary)}</span></div>`,concept&&`<div class="kb-about"><small>概念 · ${esc(concept.type)} · ${concept.notes} 篇笔记讲到</small><b>${esc(concept.name)}</b><span>${esc(concept.summary)}</span></div>`].filter(Boolean).join('');
   $('#kb').innerHTML=headHtml+`<section class="card kb ${k.list?'':'nolist'} ${n&&!k.list?'reading':''}">
     <aside class="kb-facets">
       <div class="facet"><div class="nav-label">阅读状态</div>${facet('read','all','全部',all.length)}${facet('read','unread','未读',count(x=>!x.read_at))}${facet('read','read','已读',count(x=>!!x.read_at))}${facet('read','evergreen','常青内容',count(x=>evergreen(x.decay)))}${facet('read','timely','有时效',count(x=>x.decay&&!evergreen(x.decay)))}</div>
-      <div class="facet"><div class="nav-label">主题</div>${facet('cat','all','全部主题',all.length,'<span class="sw" style="background:var(--ink)"></span>')}${cats.map(([c,num])=>facet('cat',c,esc(c),num,`<span class="sw" style="background:${catColor(c==='未分类'?null:c)}"></span>`)).join('')}</div>
-      ${tags.length?`<div class="facet"><div class="nav-label">热门标签</div><div class="tagcloud">${tags.map(([t])=>`<button type="button" data-action="kb-facet" data-facet="tag" data-value="${esc(t)}" aria-pressed="${k.tag===t}">#${esc(t)}</button>`).join('')}</div></div>`:''}
+      <div class="facet"><div class="nav-label">${K?'大类':'主题'}</div>${facet('cat','all',K?'全部大类':'全部主题',all.length,'<span class="sw" style="background:var(--ink)"></span>')}${cats.map(([c,num])=>facet('cat',c,esc(c),num,`<span class="sw" style="background:${catColor(c==='未分类'?null:c)}"></span>`)+(k.cat===c?themesOf(c).map(t=>`<button type="button" class="sub" data-action="kb-facet" data-facet="theme" data-value="${t.id}" aria-pressed="${k.theme===t.id}" title="${esc(t.summary)}"><span>${esc(t.name)}</span><span>${t.notes}</span></button>`).join(''):'')).join('')}</div>
+      ${concepts.length?`<div class="facet"><div class="nav-label">${k.cat==='all'?'常见概念':'这个大类里的概念'}</div><div class="tagcloud">${concepts.map(([id])=>`<button type="button" data-action="kb-facet" data-facet="concept" data-value="${id}" aria-pressed="${k.concept===Number(id)}" title="${esc(K.concepts[id].summary)}">${esc(K.concepts[id].name)}</button>`).join('')}</div></div>`:''}
+      ${tags.length&&!K?`<div class="facet"><div class="nav-label">热门标签</div><div class="tagcloud">${tags.map(([t])=>`<button type="button" data-action="kb-facet" data-facet="tag" data-value="${esc(t)}" aria-pressed="${k.tag===t}">#${esc(t)}</button>`).join('')}</div></div>`:''}
       <div class="facet"><div class="nav-label">来源</div>${['douyin','bilibili','x'].map(p=>facet('platform',p,pf(p),count(x=>x.platform===p))).join('')}</div>
       ${count(x=>!x.has_note)?`<div class="facet"><div class="nav-label">类型</div>${facet('type','note','知识笔记',count(x=>x.has_note))}${facet('type','text','仅文字稿',count(x=>!x.has_note))}</div>`:''}
     </aside>
-    <div class="kb-list"><div class="tools">${searchField(k.q,`在 ${list.length} 篇中搜索标题、作者、标签`,'kb-search')}</div>
-      <div class="kb-items" id="kb-items">${list.map(x=>`<button type="button" class="kb-item" data-action="kb-select" data-id="${esc(x.id)}" aria-pressed="${x.id===k.id}"><b>${esc(x.title)}</b><span class="m">${pf(x.platform,false)}${x.category?`<span style="color:${catColor(x.category)}">●</span>`:''}<span>${esc(x.author||'未知作者')}</span><span>· ${esc(fmt(x.at))}</span>${x.has_note?'':tag('文字稿')}${x.read_at?'':'<span class="unread"></span>'}</span></button>`).join('')||empty(k.q?'没有找到匹配的笔记':'这个筛选下没有笔记')}</div>
+    <div class="kb-list"><div class="tools">${searchField(k.q,`在 ${list.length} 篇中搜索标题、作者、标签`,'kb-search')}</div>${about}
+      <div class="kb-items" id="kb-items">${list.map(x=>`<button type="button" class="kb-item" data-action="kb-select" data-id="${esc(x.id)}" aria-pressed="${x.id===k.id}"><b>${esc(x.title)}</b><span class="m">${pf(x.platform,false)}${K?kd(x)?`<span style="color:${catColor(dom(x))}">●</span>`:'':x.category?`<span style="color:${catColor(x.category)}">●</span>`:''}<span>${esc(x.author||'未知作者')}</span><span>· ${esc(fmt(x.at))}</span>${x.has_note?'':tag('文字稿')}${x.read_at?'':'<span class="unread"></span>'}</span></button>`).join('')||empty(k.q?'没有找到匹配的笔记':'这个筛选下没有笔记')}</div>
     </div>
     <article class="reader" id="reader">${n?'':empty('还没有可阅读的内容')}</article>
   </section>`;
@@ -305,8 +320,9 @@ async function loadDocument(){
     const doc=await api('document?'+query({id:n.id,kind:n.has_note?'note':'text'}));if(epoch!==docEpoch||state.route!=='notes')return;
     const parts=n.has_note?splitNoteContent(doc.content):{note:null,formatted:null};
     const kind=parts.formatted&&k.kind==='formatted'?'formatted':'note';
+    const K=kn(),d=kd(n),links=d&&(d.themes.length||d.concepts.length)?`<div class="links">${d.themes.map(id=>{const t=K.themes.find(x=>x.id===id);return t?`<button type="button" class="chip" data-action="kb-theme" data-cat="${esc(t.domain)}" data-value="${t.id}" title="主题：${esc(t.summary)}">${esc(t.name)}</button>`:'';}).join('')}${d.concepts.map(c=>K.concepts[c.id]?`<button type="button" class="chip outline" data-action="kb-facet" data-facet="concept" data-value="${c.id}" title="概念：${esc(K.concepts[c.id].summary)}">${c.role==='主题'?'★ ':''}${esc(K.concepts[c.id].name)}</button>`:'').join('')}</div>`:'';
     const body=n.has_note?renderMarkdown(parts[kind],{headingOffset:1}):`<div class="raw">${esc(doc.content)}</div>`;
-    $('#reader').innerHTML=bar(!!parts.formatted)+`<div class="article"><div class="kicker">${n.category?chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(n.category)}"></span>${esc(n.category)}`):''}${n.decay?chip(decayLabel(n.decay),evergreen(n.decay)?'green':'amber'):''}${n.has_note?'':chip('原始文字稿')}${n.archive_only?chip('只存原帖'):''}</div><h1>${esc(n.title)}</h1><div class="byline">${pf(n.platform)}<span>${esc(n.author||'未知作者')}</span>${n.duration_s?`<span>${esc(duration(n.duration_s))}</span>`:''}<span>收藏 ${esc(fmt(n.collected_at))}</span><span>整理 ${esc(fmt(n.at))}</span>${n.has_note?button('在文件夹中显示','open',`data-kind="folder" data-file-kind="note" data-id="${esc(n.id)}"`,'quiet sm'):''}</div><div class="prose">${body}</div>${n.tags.length?`<div class="tags">${n.tags.map(t=>chip('#'+esc(t),'outline')).join('')}</div>`:''}</div>`;
+    $('#reader').innerHTML=bar(!!parts.formatted)+`<div class="article"><div class="kicker">${kn()?kd(n)?`<span title="${esc(kd(n).note)}">${chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(dom(n)==='未分类'?null:dom(n))}"></span>${esc(dom(n))}`)}</span>`:'':n.category?chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(n.category)}"></span>${esc(n.category)}`):''}${n.decay?chip(decayLabel(n.decay),evergreen(n.decay)?'green':'amber'):''}${n.has_note?'':chip('原始文字稿')}${n.archive_only?chip('只存原帖'):''}</div><h1>${esc(n.title)}</h1><div class="byline">${pf(n.platform)}<span>${esc(n.author||'未知作者')}</span>${n.duration_s?`<span>${esc(duration(n.duration_s))}</span>`:''}<span>收藏 ${esc(fmt(n.collected_at))}</span><span>整理 ${esc(fmt(n.at))}</span>${n.has_note?button('在文件夹中显示','open',`data-kind="folder" data-file-kind="note" data-id="${esc(n.id)}"`,'quiet sm'):''}</div><div class="prose">${body}</div>${links}${n.tags.length?`<div class="tags">${n.tags.map(t=>chip('#'+esc(t),'outline')).join('')}</div>`:''}</div>`;
     if(!n.read_at&&keptUnread!==n.id){api('read',{id:n.id,read:true}).then(()=>{n.read_at=Date.now()/1000;if(epoch!==docEpoch)return;document.querySelector(`.kb-item[data-id="${CSS.escape(n.id)}"] .unread`)?.remove();const t=$('#reader [data-action="toggle-read"]');if(t)t.innerHTML=`${ic('check',14)}标为未读`;}).catch(()=>{});}
   }catch(e){if(epoch===docEpoch)$('#reader').innerHTML=bar(false)+empty(e.message);}
 }
@@ -812,7 +828,7 @@ function renderPalette(raw){
   paletteItems=[...id,...pages,...notes,...acts];paletteIndex=Math.min(paletteIndex,Math.max(0,paletteItems.length-1));
   let g='';$('#palette-results').innerHTML=paletteItems.map((it,n)=>{const h=it.g!==g?`<div class="grp">${it.g}</div>`:'';g=it.g;return h+`<button type="button" class="opt" data-action="palette-run" data-index="${n}" aria-selected="${n===paletteIndex}">${ic(it.icon,16)}<span>${esc(it.label)}</span>${it.sub?`<small>${esc(it.sub)}</small>`:''}</button>`;}).join('')||empty('没有结果');
 }
-function openNote(id){Object.assign(state.kb,{id,cat:'all',read:'all',tag:null,platform:'all',type:'all',q:'',view:'read',list:false});navigate('notes');if(state.route==='notes'&&state.index&&!state.index.some(n=>n.id===id))void loadNotes();}
+function openNote(id){Object.assign(state.kb,{id,cat:'all',theme:null,concept:null,read:'all',tag:null,platform:'all',type:'all',q:'',view:'read',list:false});navigate('notes');if(state.route==='notes'&&state.index&&!state.index.some(n=>n.id===id))void loadNotes();}
 function toggleTheme(){const r=document.documentElement,dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme:dark)').matches;r.dataset.theme=dark?'light':'dark';try{localStorage.setItem('dustoff.theme',r.dataset.theme);}catch{}}
 try{const t=localStorage.getItem('dustoff.theme');if(t==='dark'||t==='light')document.documentElement.dataset.theme=t;}catch{} // 外观只是本机偏好
 
@@ -830,7 +846,7 @@ root.addEventListener('click',async event=>{
     else{const label=b.closest('label');label.querySelector('input').checked=true;b.closest('.seg').querySelectorAll('.seg-opt').forEach(x=>{const on=x===b;x.style.background=on?'var(--surface)':'';x.style.color=on?'var(--ink)':'var(--muted)';x.style.boxShadow=on?'var(--shadow)':'';});}
     return;
   }
-  if(a==='kb-unread'){Object.assign(state.kb,{read:'unread',cat:'all',tag:null,list:true,view:'read'});return;}
+  if(a==='kb-unread'){Object.assign(state.kb,{read:'unread',cat:'all',theme:null,concept:null,tag:null,list:true,view:'read'});return;}
   if(a==='failed-items'){Object.assign(state.collection,{status:'failed',q:'',page:1});return;}
   if(b.tagName==='BUTTON')b.disabled=true;
   try{
@@ -861,7 +877,8 @@ root.addEventListener('click',async event=>{
     else if(a==='open')await mutate('open',{kind:b.dataset.kind,id,fileKind:b.dataset.fileKind},'已在本机打开。');
     else if(a==='resurface-next'){resurfaceShift++;await loadToday();}
     else if(a==='kb-view'){state.kb.view=b.dataset.value;document.body.classList.toggle('fit',state.kb.view==='read');renderNotes();}
-    else if(a==='kb-facet'){const f=b.dataset.facet,v=b.dataset.value;if(f==='tag')state.kb.tag=state.kb.tag===v?null:v;else state.kb[f]=state.kb[f]===v&&f!=='read'&&f!=='cat'?'all':v;state.kb.view='read';state.kb.list=true;state.kb.id=null;renderNotes();}
+    else if(a==='kb-theme'){Object.assign(state.kb,{cat:b.dataset.cat,theme:Number(b.dataset.value),concept:null,view:'read',list:true,id:null});document.body.classList.add('fit');renderNotes();}
+    else if(a==='kb-facet'){const f=b.dataset.facet,v=b.dataset.value;if(f==='cat')state.kb.theme=null;if(f==='tag')state.kb.tag=state.kb.tag===v?null:v;else if(f==='theme'||f==='concept')state.kb[f]=state.kb[f]===Number(v)?null:Number(v);else state.kb[f]=state.kb[f]===v&&f!=='read'&&f!=='cat'?'all':v;state.kb.view='read';state.kb.list=true;state.kb.id=null;renderNotes();}
     else if(a==='kb-select'){state.kb.id=id;state.kb.kind='note';root.querySelectorAll('.kb-item').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.id===id)));if(matchMedia('(max-width:820px)').matches){state.kb.list=false;renderNotes();}else await loadDocument();}
     else if(a==='kb-list'){state.kb.list=!state.kb.list;renderNotes();}
     else if(a==='kb-step')kbStep(Number(b.dataset.step));
