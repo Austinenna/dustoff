@@ -15,6 +15,9 @@ export const TOKEN_SCOPES = ['read', 'write'];
 const COLORS = ['#C2703D', '#5B7FC7', '#8A5BC7', '#2C8A6A', '#C79A3D', '#C75B6E', '#4E9AA8', '#7A8C3D'];
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS reads (item TEXT PRIMARY KEY, read_at INTEGER NOT NULL);
+-- 看过的综述页。key 是「大类｜主题名」（主题编号在索引重建后会变）；hash 是看的那一版，综述重写后和现在的不同。
+-- 看了综述不算读了里面的笔记，笔记的已读状态不动。
+CREATE TABLE IF NOT EXISTS page_reads (key TEXT PRIMARY KEY, hash TEXT NOT NULL, read_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS topics (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '',
   channels TEXT NOT NULL DEFAULT '[]', color TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -60,6 +63,13 @@ export function createLibrary(home, { now = () => Math.floor(Date.now() / 1000),
     if (read) run('INSERT INTO reads(item, read_at) VALUES(?, ?) ON CONFLICT(item) DO UPDATE SET read_at=excluded.read_at', item, now());
     else run('DELETE FROM reads WHERE item=?', item);
     return { item, read: !!read };
+  }
+  function pageReads() { return Object.fromEntries(all('SELECT key, hash, read_at FROM page_reads').map(r => [r.key, { hash: r.hash, read_at: r.read_at }])); }
+  function setPageRead(key, hash, read) {
+    if (typeof key !== 'string' || !key || key.length > 200 || typeof hash !== 'string' || !hash) throw new HttpError(400, '综述页不正确');
+    if (read) run('INSERT INTO page_reads(key, hash, read_at) VALUES(?, ?, ?) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash, read_at=excluded.read_at', key, hash, now());
+    else run('DELETE FROM page_reads WHERE key=?', key);
+    return { key, read: !!read, hash };
   }
 
   // ── 选题 ──
@@ -197,5 +207,5 @@ export function createLibrary(home, { now = () => Math.floor(Date.now() / 1000),
   }
 
   function close() { if (db) { db.close(); db = null; } }
-  return { file, readIds, setRead, topics, topic, saveTopic, deleteTopic, materials, material, addMaterial, updateMaterial, removeMaterial, recordUsage, suggest, tokens, createToken, revokeToken, verifyToken, close };
+  return { file, readIds, setRead, pageReads, setPageRead, topics, topic, saveTopic, deleteTopic, materials, material, addMaterial, updateMaterial, removeMaterial, recordUsage, suggest, tokens, createToken, revokeToken, verifyToken, close };
 }

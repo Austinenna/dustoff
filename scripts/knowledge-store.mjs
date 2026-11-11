@@ -53,7 +53,18 @@ CREATE TABLE IF NOT EXISTS doc_themes (
   theme_id INTEGER NOT NULL REFERENCES themes(id) ON DELETE CASCADE, item TEXT NOT NULL REFERENCES docs(item) ON DELETE CASCADE,
   PRIMARY KEY (theme_id, item));
 CREATE INDEX IF NOT EXISTS idx_doc_themes_item ON doc_themes(item);
+-- 综述页：一个主题一页，由模型把主题下的全部笔记合写出来。每次都从原笔记整页重写。
+CREATE TABLE IF NOT EXISTS pages (
+  theme_id INTEGER PRIMARY KEY REFERENCES themes(id) ON DELETE CASCADE,
+  body TEXT,                        -- 综述内容（JSON）；里面的「笔记 N」和出处编号指 items 里的第 N 篇
+  items TEXT NOT NULL DEFAULT '[]', -- 写这一版时用的笔记，按编号顺序
+  source_hash TEXT,                 -- 写这一版时的笔记清单和各篇正文的哈希；和现在的不同就要重写
+  prompt_hash TEXT, model TEXT, built_at INTEGER,
+  changes TEXT NOT NULL DEFAULT '', -- 这一版相比上一版的变化；第一版为空
+  failed_hash TEXT, attempts INTEGER NOT NULL DEFAULT 0, error TEXT);   -- failed_hash：写不出来的那一版笔记，笔记不变就不再试
 `;
+// 3 篇以上的主题才写综述：一两篇没有可合并的内容，写出来只是复述。
+export const PAGE_MIN_NOTES = 3;
 const MANUAL_NOTE = '手动指定';
 const sha = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
 // 正文第一段文字的开头：跳过标题、分隔线和提示行，去掉加粗等标记。
@@ -319,9 +330,63 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   /** 清空全部主题，之后每个大类从头归纳。改了归纳主题的指令后用。 */
   function resetThemes() { tx(() => { run('DELETE FROM doc_themes'); run('DELETE FROM themes'); run('UPDATE docs SET theme_checked=0'); }); }
   function themes() {
-    return all(`SELECT t.id, t.domain, t.name, t.summary, count(dt.item) notes FROM themes t LEFT JOIN doc_themes dt ON dt.theme_id=t.id
-      GROUP BY t.id ORDER BY t.domain, notes DESC, t.id`);
+    // page_hash 不为空表示这个主题有综述页；控制台用它判断用户看过的是不是这一版。
+    return all(`SELECT t.id, t.domain, t.name, t.summary, count(dt.item) notes,
+      (SELECT source_hash FROM pages p WHERE p.theme_id=t.id AND p.body IS NOT NULL) page_hash,
+      (SELECT built_at FROM pages p WHERE p.theme_id=t.id AND p.body IS NOT NULL) page_at,
+      (SELECT changes FROM pages p WHERE p.theme_id=t.id AND p.body IS NOT NULL) page_changes
+      FROM themes t LEFT JOIN doc_themes dt ON dt.theme_id=t.id GROUP BY t.id ORDER BY t.domain, notes DESC, t.id`);
   }
+  // ── 综述页 ──
+  const pageNotes = id => all('SELECT d.item, d.title, d.author, d.path, d.content_hash FROM doc_themes dt JOIN docs d ON d.item=dt.item WHERE dt.theme_id=? ORDER BY d.collected_at, d.item', id);
+  const sourceHash = notes => sha(notes.map(n => `${n.item}:${n.content_hash}`).sort().join('\n'));
+  /**
+   * 要写或重写综述的主题：够篇数，并且还没有综述、笔记清单或正文变了；stale 为真时再加上用旧版指令写的。
+   * 同一批笔记写不出来（失败满 3 次，或被内容审核拒绝）的不再自动重试，等笔记有变化再说。
+   */
+  function pageBatches({ promptHash, stale = false, retryFailed = false } = {}) {
+    return themes().filter(t => t.notes >= PAGE_MIN_NOTES).map(t => {
+      const notes = pageNotes(t.id), hash = sourceHash(notes), page = one('SELECT source_hash,prompt_hash,failed_hash,attempts,body FROM pages WHERE theme_id=?', t.id);
+      const fresh = page?.body && page.source_hash === hash && !(stale && page.prompt_hash !== (promptHash ?? null));
+      const gaveUp = !retryFailed && page?.failed_hash === hash && page.attempts >= 3;
+      return fresh || gaveUp ? null : { ...t, notes, hash };
+    }).filter(Boolean);
+  }
+  /** 写入一页综述，并记下和上一版相比多了、少了哪几篇笔记。 */
+  function savePage(themeId, body, { notes, hash, promptHash, model } = {}) {
+    return tx(() => {
+      if (!one('SELECT 1 FROM themes WHERE id=?', themeId)) return false;
+      const old = one('SELECT body,items FROM pages WHERE theme_id=?', themeId), items = notes.map(n => n.item);
+      let changes = '';
+      if (old?.body) {
+        const before = new Set(JSON.parse(old.items)), now_ = new Set(items);
+        const added = notes.filter(n => !before.has(n.item)), removed = [...before].filter(i => !now_.has(i)).length;
+        changes = [added.length && `新增 ${added.length} 篇：${added.slice(0, 3).map(n => `《${n.title}》`).join('')}${added.length > 3 ? ' 等' : ''}`, removed && `移出 ${removed} 篇`].filter(Boolean).join('；') || '有笔记的正文改过，已按新内容重写';
+      }
+      run(`INSERT INTO pages(theme_id,body,items,source_hash,prompt_hash,model,built_at,changes) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(theme_id) DO UPDATE SET body=excluded.body,items=excluded.items,source_hash=excluded.source_hash,prompt_hash=excluded.prompt_hash,
+        model=excluded.model,built_at=excluded.built_at,changes=excluded.changes,failed_hash=NULL,attempts=0,error=NULL`,
+        themeId, JSON.stringify(body), JSON.stringify(items), hash, promptHash || null, model || null, now(), changes);
+      return true;
+    });
+  }
+  /** 记一次写综述失败。原来写成的那一版留着继续显示。 */
+  function markPageError(themeId, hash, message, { permanent = false } = {}) {
+    const old = one('SELECT failed_hash,attempts FROM pages WHERE theme_id=?', themeId);
+    const attempts = permanent ? 3 : (old?.failed_hash === hash ? old.attempts : 0) + 1;
+    run(`INSERT INTO pages(theme_id,failed_hash,attempts,error) VALUES(?,?,?,?)
+      ON CONFLICT(theme_id) DO UPDATE SET failed_hash=excluded.failed_hash,attempts=excluded.attempts,error=excluded.error`, themeId, hash, attempts, String(message).slice(0, 300));
+  }
+  /** 一页综述，连同它引用的笔记（按编号顺序）。outdated：写完之后主题下的笔记又有变化，下一轮会重写。 */
+  function page(themeId) {
+    const row = one(`SELECT p.*, t.domain, t.name, t.summary FROM pages p JOIN themes t ON t.id=p.theme_id WHERE p.theme_id=? AND p.body IS NOT NULL`, Number(themeId));
+    if (!row) return null;
+    const titles = new Map(all('SELECT item,title FROM docs').map(d => [d.item, d.title]));
+    return { theme_id: row.theme_id, domain: row.domain, name: row.name, summary: row.summary, body: JSON.parse(row.body),
+      notes: JSON.parse(row.items).map(item => ({ item, title: titles.get(item) || null })),   // title 为空：这篇笔记已经不在了
+      hash: row.source_hash, built_at: row.built_at, changes: row.changes, model: row.model, outdated: sourceHash(pageNotes(row.theme_id)) !== row.source_hash };
+  }
+  function pageFailures() { return all('SELECT t.domain, t.name, p.attempts, p.error FROM pages p JOIN themes t ON t.id=p.theme_id WHERE p.error IS NOT NULL ORDER BY t.domain, t.name'); }
   function themeNotes(id) {
     return all('SELECT d.item, d.title, d.platform, d.collected_at, d.decay FROM doc_themes dt JOIN docs d ON d.item=dt.item WHERE dt.theme_id=? ORDER BY d.collected_at DESC', id);
   }
@@ -349,6 +414,7 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
         with_page: one('SELECT count(*) n FROM (SELECT 1 FROM doc_themes GROUP BY theme_id HAVING count(*)>=3)').n,
         covered: one('SELECT count(DISTINCT item) n FROM doc_themes WHERE theme_id IN (SELECT theme_id FROM doc_themes GROUP BY theme_id HAVING count(*)>=3)').n,
         loose: looseNotes().length },
+      pages: { total: one('SELECT count(*) n FROM pages WHERE body IS NOT NULL').n, failed: pageFailures().length },
       domains: all('SELECT domain, count(*) notes FROM docs WHERE domain IS NOT NULL GROUP BY domain ORDER BY notes DESC'),
       unsorted: unsorted(),
     };
@@ -383,5 +449,5 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     });
   }
   function close() { if (db) { db.close(); db = null; } }
-  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, setDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, catalog, failures, unsorted, doc, reset, close };
+  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, setDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, pageBatches, savePage, markPageError, page, pageFailures, looseNotes, conceptNotes, relations, stats, catalog, failures, unsorted, doc, reset, close };
 }

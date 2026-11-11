@@ -3,13 +3,14 @@
 //
 // 只读笔记和账本，只写 knowledge.sqlite；不改笔记、不改账本，所以不占流水线的锁。
 //
-//   node knowledge.mjs                 给新增和改过的笔记定大类、抽概念，全部做完后归并概念、按大类归纳主题
+//   node knowledge.mjs                 给新增和改过的笔记定大类、抽概念，全部做完后归并概念、按大类归纳主题、给主题写综述页
 //   node knowledge.mjs --limit 20      本轮最多抽 20 篇
-//   node knowledge.mjs --stale         连同用旧版指令做的一起重做（只改了大类定义时只重新分类）
-//   node knowledge.mjs --retry-failed  重试失败满 3 次的
+//   node knowledge.mjs --stale         连同用旧版指令做的一起重做（只改了大类定义时只重新分类，只改了综述指令时只重写综述）
+//   node knowledge.mjs --retry-failed  重试失败满 3 次的笔记和综述
 //   node knowledge.mjs --rebuild       清空抽取结果后全部重抽（做过的合并会重放）
 //   node knowledge.mjs --rethemes      清空主题后每个大类从头归纳（改了归纳主题的指令后用）
-//   node knowledge.mjs --no-merge      只抽取，不做归并和主题归纳
+//   node knowledge.mjs --no-merge      只抽取，不做归并、主题归纳和综述
+//   node knowledge.mjs --no-pages      不写综述页
 //   node knowledge.mjs --dry-run       只看有多少篇要抽，不调用模型
 //   node knowledge.mjs --report        只输出当前统计
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
@@ -18,7 +19,7 @@ import { pathToFileURL } from 'node:url';
 import { makeCfg, DUST_HOME } from './scripts/config.mjs';
 import { PauseError } from './scripts/policy.mjs';
 import { createKnowledge, bodyHash } from './scripts/knowledge-store.mjs';
-import { CLASSIFY_HASH, EXTRACT_HASH, ModerationError, PermanentError, UNSORTED, classifyNote, clusterThemes, extractNote, knowledgeConfig, mergeConcepts, noteBody, normName } from './scripts/knowledge-extract.mjs';
+import { CLASSIFY_HASH, EXTRACT_HASH, PAGE_HASH, ModerationError, PermanentError, UNSORTED, classifyNote, clusterThemes, extractNote, knowledgeConfig, mergeConcepts, noteBody, notePublished, normName, writePage } from './scripts/knowledge-extract.mjs';
 
 const IS_MAIN = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 const stamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -27,6 +28,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // 正文太短没有可抽的东西；太长的只取开头，概念通常在前面就出现了。
 const MIN_CHARS = 20, MAX_CHARS = 12000, MERGE_BATCH = 200;
+// 写综述时每篇笔记最多给这么多字，整个主题合计不超过 PAGE_TOTAL_CHARS；篇数多时每篇按比例少给。
+const PAGE_NOTE_CHARS = 8000, PAGE_TOTAL_CHARS = 60000;
 
 /**
  * 处理一批笔记：定大类、抽概念，每篇各调一次模型。并发处理，每篇失败后本轮内再试两次；
@@ -129,12 +132,47 @@ export async function themePass(kb, { config = knowledgeConfig(), fetchImpl = fe
   return result;
 }
 
+/**
+ * 综述页：够篇数的主题里，还没有综述或笔记有变化的，把主题下全部笔记交给模型重写一页。
+ * 每页失败后本轮内再试两次。被内容审核拒绝的记下来，这批笔记不变就不再试。
+ */
+export async function pagePass(kb, { config = knowledgeConfig(), fetchImpl = fetch, concurrency = 2, stale = false, retryFailed = false, retryMs = 2000, today = new Date().toLocaleDateString('sv'), onLog = log } = {}) {
+  const queue = kb.pageBatches({ promptHash: PAGE_HASH, stale, retryFailed }), result = { pages: 0, failed: 0, input: 0, output: 0 };
+  let stop = null;
+  async function one(theme) {
+    const cap = Math.min(PAGE_NOTE_CHARS, Math.floor(PAGE_TOTAL_CHARS / theme.notes.length));
+    let notes;
+    try {
+      notes = theme.notes.map(n => { const source = readFileSync(n.path, 'utf8'); return { ...n, published: notePublished(source), body: noteBody(source).slice(0, cap) }; });
+    } catch (e) { kb.markPageError(theme.id, theme.hash, `读不到笔记文件：${e.code || e.message}`); result.failed++; return; }
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const { usage, ...body } = await writePage({ domain: theme.domain, name: theme.name, summary: theme.summary, notes, today }, { config, fetchImpl });
+        kb.savePage(theme.id, body, { notes, hash: theme.hash, promptHash: PAGE_HASH, model: config.model });
+        result.pages++; result.input += usage.input; result.output += usage.output;
+        onLog(`综述「${theme.name}」${notes.length} 篇，${body.sections.reduce((n, s) => n + s.points.length, 0)} 条要点`);
+        return;
+      } catch (e) {
+        if (e instanceof PauseError) { stop = e; return; }
+        const permanent = e instanceof PermanentError;
+        if (!permanent && attempt < 3) { await sleep(retryMs * attempt); continue; }
+        kb.markPageError(theme.id, theme.hash, e instanceof ModerationError ? '模型服务的内容审核拒绝处理这个主题的笔记' : e.message, { permanent });
+        result.failed++; onLog(`✗ 综述「${theme.name}」失败：${e.message}`);
+        return;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, async () => { while (queue.length && !stop) await one(queue.shift()); }));
+  if (stop) throw stop;
+  return result;
+}
+
 async function main() {
   const args = process.argv.slice(2), has = flag => args.includes(flag);
   const valOf = flag => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
   const cfg = makeCfg(), config = knowledgeConfig(cfg);
   const kb = createKnowledge(DUST_HOME);
-  if (has('--report')) { console.log(JSON.stringify({ ...kb.stats(), failures: kb.failures() }, null, 2)); return; }
+  if (has('--report')) { console.log(JSON.stringify({ ...kb.stats(), failures: kb.failures(), page_failures: kb.pageFailures() }, null, 2)); return; }
 
   // 同一时间只跑一个：两个进程同时抽，会各自新建同一个概念。
   const lock = join(DUST_HOME, '.lock.knowledge');
@@ -158,7 +196,7 @@ async function main() {
   const limit = Number(valOf('--limit')) > 0 ? Number(valOf('--limit')) : 100000;
   const docs = kb.pendingDocs({ promptHash: EXTRACT_HASH, classifyHash: CLASSIFY_HASH, stale: has('--stale'), retryFailed: has('--retry-failed'), limit });
   log(`待处理 ${docs.length} 篇，其中要分类 ${docs.filter(d => d.need_classify).length}、要抽概念 ${docs.filter(d => d.need_extract).length}（模型 ${config.model}，思考档位 ${config.effort}）`);
-  if (has('--dry-run')) return;
+  if (has('--dry-run')) { log(`按现在的主题，要写或重写的综述 ${has('--no-pages') ? 0 : kb.pageBatches({ promptHash: PAGE_HASH, stale: has('--stale'), retryFailed: has('--retry-failed') }).length} 页`); return; }
 
   let stopped = null;
   if (docs.length) {
@@ -178,11 +216,15 @@ async function main() {
       log(`归并：合并 ${m.merged} 个，待确认 ${m.suggested} 对${m.failed ? `，${m.failed} 批失败` : ''}；用量 输入 ${m.input} 输出 ${m.output} token`);
       const t = await themePass(kb, { config });
       log(`主题：${t.domains} 个大类重新归纳，共 ${t.themes} 个主题${t.failed ? `，${t.failed} 个大类失败` : ''}；用量 输入 ${t.input} 输出 ${t.output} token`);
+      if (!has('--no-pages')) {
+        const p = await pagePass(kb, { config, concurrency: Number(cfg('DUST_KB_CONCURRENCY', 2)), stale: has('--stale'), retryFailed: has('--retry-failed') });
+        log(`综述：写了 ${p.pages} 页${p.failed ? `，${p.failed} 页失败` : ''}；用量 输入 ${p.input} 输出 ${p.output} token`);
+      }
     } catch (e) { stopped = e.message; log(`✗ ${e.message}`); }
-  } else if (rest) log(`还有 ${rest} 篇没抽取，本轮不做归并和主题归纳`);
+  } else if (rest) log(`还有 ${rest} 篇没抽取，本轮不做归并、主题归纳和综述`);
   console.log(JSON.stringify(kb.stats(), null, 2));
   if (stopped) process.exitCode = stopped.startsWith('连续') ? 1 : 5;
-  else if (kb.failures().length) process.exitCode = 2;
+  else if (kb.failures().length || kb.pageFailures().length) process.exitCode = 2;
   kb.close();
 }
 

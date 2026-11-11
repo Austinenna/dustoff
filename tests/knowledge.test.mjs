@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createKnowledge } from '../scripts/knowledge-store.mjs';
-import { CLASSIFY_HASH, EXTRACT_HASH, cleanClassification, cleanExtraction, cleanMerge, cleanThemes, noteBody, normName } from '../scripts/knowledge-extract.mjs';
-import { extractPending, mergePass, themePass } from '../knowledge.mjs';
+import { CLASSIFY_HASH, EXTRACT_HASH, cleanClassification, cleanExtraction, cleanMerge, cleanPage, cleanThemes, noteBody, notePublished, normName } from '../scripts/knowledge-extract.mjs';
+import { extractPending, mergePass, pagePass, themePass } from '../knowledge.mjs';
 import { PauseError } from '../scripts/policy.mjs';
 
 // 虚构笔记：三篇整理过的笔记（两篇讲同一个工具，写法不同），一条只存了原帖的 X 书签。
@@ -50,6 +50,11 @@ function fakeModel(calls = [], domains = { 节拍网格: '视频创作' }) {
       // 把标题里带「剪刀手」或正文讲剪刀手的归成一个主题；只有一篇的不归。
       const rows = user.split('\n').filter(line => /^\d+｜/.test(line)), hit = rows.filter(r => /剪刀手|Scissor/.test(r)).map(r => Number(r.split('｜')[0]));
       return reply({ 主题: hit.length >= 2 ? [{ 名称: '剪刀手用法', 说明: '命令行剪辑工具剪刀手的入门和进阶', 笔记: hit }] : [] });
+    }
+    if (body.messages[0].content.includes('合写成一页综述')) {
+      const n = user.match(/=== 笔记 \d+ ===/g).length;
+      return reply({ 是什么: '剪刀手是命令行剪辑工具。', 分节: [{ 标题: '用法', 要点: [{ 内容: '适合批量处理', 出处: [1] }, { 内容: '可以把剪辑写成脚本', 出处: [2, n] }, { 内容: '没有出处的要点', 出处: [] }] }],
+        分歧: [], 可能过期: [{ 内容: '笔记 3 说的 2.0 版可能已有新版', 出处: [n] }], 阅读顺序: [{ 笔记: 1, 理由: '入门' }], 可跳过: [{ 笔记: 1, 理由: '重复列出' }, { 笔记: n, 理由: '只是一句话' }] });
     }
     if (body.messages[0].content.includes('找出指同一个东西的概念')) {
       const rows = user.split('\n').slice(2).map(line => line.split('｜')), id = name => Number(rows.find(r => r[1] === name)?.[0]);
@@ -307,4 +312,92 @@ test('手工指定大类：重新分类和重建都不覆盖，两个大类重�
     assert.deepEqual(f.kb.setDomain('x9', null), { item: 'x9', manual: false });
     assert.equal(f.kb.pendingDocs({}).find(d => d.item === 'x9').need_classify, 1);
   } finally { f.kb.close(); f.cleanup(); }
+});
+
+test('综述结果校验：没有出处的条目丢掉，一篇笔记不同时出现在阅读顺序和可跳过里，要点覆盖不到一半的笔记算没写好', () => {
+  const out = cleanPage({ 是什么: '说明', 分节: [{ 标题: '甲', 要点: [{ 内容: '一', 出处: [1, 1, 9] }, { 内容: '二', 出处: ['2'] }] }, { 标题: '空', 要点: [] }],
+    分歧: [{ 内容: '三', 出处: [2] }], 阅读顺序: [{ 笔记: 2, 理由: '全' }, { 笔记: 7 }], 可跳过: [{ 笔记: 2, 理由: '重复' }, { 笔记: 1, 理由: '被 2 覆盖' }] }, 2);
+  assert.deepEqual(out.sections, [{ title: '甲', points: [{ text: '一', refs: [1] }] }]);
+  assert.deepEqual([out.disputes, out.stale, out.order, out.skip], [[{ text: '三', refs: [2] }], [], [{ note: 2, why: '全' }], [{ note: 1, why: '被 2 覆盖' }]]);
+  assert.throws(() => cleanPage({ 分节: [{ 要点: [{ 内容: '一', 出处: [] }] }] }, 3), /没有带出处的要点/);
+  assert.throws(() => cleanPage({ 分节: [{ 要点: [{ 内容: '一', 出处: [1] }] }] }, 3), /不到一半/);
+  assert.equal(notePublished('---\n标题: "x"\n发布日期: 2026-01-09\n---\n正文'), '2026-01-09');
+  assert.equal(notePublished('正文里写 发布日期: 2026-01-09'), '');
+});
+
+test('综述页：3 篇以上的主题才写，笔记没变不重写，变了整页重写并记下变化；写不出来的同一批笔记不再试', async () => {
+  const f = fixture(), calls = [];
+  try {
+    f.kb.syncDocs();
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
+    await themePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    const [theme] = f.kb.themes();
+    assert.equal(theme.page_hash, null);
+    // 内容审核拒绝：记下来，这批笔记不变就不再试。
+    const blocked = async () => new Response(JSON.stringify({ error: { code: '1301', message: '敏感内容' } }), { status: 400 });
+    assert.deepEqual([(await pagePass(f.kb, { ...quiet, fetchImpl: blocked })).failed, f.kb.pageBatches({}).length], [1, 0]);
+    assert.match(f.kb.pageFailures()[0].error, /内容审核拒绝/);
+    assert.equal(f.kb.page(theme.id), null);
+    const p = await pagePass(f.kb, { ...quiet, fetchImpl: fakeModel(calls), retryFailed: true, today: '2026-11-11' });
+    assert.deepEqual([p.pages, p.failed, calls.length], [1, 0, 1]);
+    assert.match(calls[0].body.messages[1].content, /主题：剪刀手用法[\s\S]*今天的日期：2026-11-11[\s\S]*=== 笔记 1 ===\n标题：剪刀手入门\n作者：测试作者/);
+    assert.doesNotMatch(calls[0].body.messages[1].content, /口语原稿/);   // 只给提炼正文，不给转写稿
+    const page = f.kb.page(theme.id);
+    assert.deepEqual(page.notes.map(n => n.item), ['1', '2', 'x9']);   // 编号按收藏时间
+    assert.deepEqual(page.body.sections[0].points.map(x => x.refs), [[1], [2, 3]]);
+    assert.deepEqual([page.body.order, page.body.skip.map(x => x.note), page.changes, page.outdated], [[{ note: 1, why: '入门' }], [3], '', false]);
+    assert.deepEqual([f.kb.themes()[0].page_hash, f.kb.stats().pages, f.kb.pageFailures()], [page.hash, { total: 1, failed: 0 }, []]);
+    // 没有变动，不调用模型。
+    calls.length = 0;
+    assert.deepEqual([(await pagePass(f.kb, { ...quiet, fetchImpl: fakeModel(calls) })).pages, calls.length], [0, 0]);
+    // 改了综述指令：--stale 才重写。
+    assert.deepEqual([f.kb.pageBatches({ promptHash: 'new' }).length, f.kb.pageBatches({ promptHash: 'new', stale: true }).length], [0, 1]);
+    // 主题里多了一篇：标成待更新，重写后记下新增了哪篇。
+    writeFileSync(join(f.home, 'notes', '4.md'), '---\n标题: "剪刀手插件"\n---\n# 核心观点\n\n剪刀手可以装插件扩展转场效果。');
+    const db = new DatabaseSync(join(f.home, 'index.sqlite'));
+    db.prepare("INSERT INTO items(id,platform,title,author,media_type,status,first_seen,last_seen,updated_at,note_path,prompt_hash,collected_at,decay) VALUES('4','douyin','剪刀手插件','测试作者','video','extracted',1,1,1,?,'aaaa',500,'slow')").run(join(f.home, 'notes', '4.md'));
+    db.close();
+    f.kb.syncDocs();
+    const model = async (url, init) => /标题：剪刀手插件/.test(JSON.parse(init.body).messages[1].content) && !JSON.parse(init.body).messages[0].content.includes('合写成一页综述') && JSON.parse(init.body).messages[0].content.includes('抽出它讲到的')
+      ? reply({ 概念: [concept('剪刀手')], 关系: [] }) : fakeModel(calls)(url, init);
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: model, concurrency: 1 });
+    await themePass(f.kb, { ...quiet, fetchImpl: model });
+    assert.equal(f.kb.page(theme.id).outdated, true);
+    await pagePass(f.kb, { ...quiet, fetchImpl: model });
+    const next = f.kb.page(theme.id);
+    assert.deepEqual([next.notes.length, next.changes, next.outdated, next.hash !== page.hash], [4, '新增 1 篇：《剪刀手插件》', false, true]);
+    // 主题不够 3 篇了，不再写；主题消失，综述跟着删掉。
+    for (const file of ['x9.md', '4.md', '2.md']) rmSync(join(f.home, 'notes', file));
+    f.kb.syncDocs();
+    await themePass(f.kb, { ...quiet, fetchImpl: model });
+    assert.deepEqual([f.kb.themes().length, f.kb.stats().pages.total], [0, 0]);
+  } finally { f.kb.close(); f.cleanup(); }
+});
+
+test('控制台综述页：返回综述和它引用的笔记；标记看过记的是当时那一版，不动笔记的已读', async () => {
+  const f = fixture();
+  const { createConsole } = await import('../console.mjs');
+  const app = createConsole({ home: f.home, scheduler: { status: () => ({ installed: false }), plan: () => null } });
+  const url = await app.listen(0);
+  const token = (await (await fetch(url)).text()).match(/name="dustoff-token" content="([^"]+)"/)[1];
+  const post = (path, data) => fetch(url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: new URL(url).origin, 'X-Dustoff-Token': token }, body: JSON.stringify(data) });
+  try {
+    f.kb.syncDocs();
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
+    await themePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    const id = f.kb.themes()[0].id;
+    assert.equal((await fetch(`${url}/api/knowledge-page?id=${id}`)).status, 404);
+    await pagePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    const page = await (await fetch(`${url}/api/knowledge-page?id=${id}`)).json();
+    assert.deepEqual([page.name, page.notes.map(n => n.title), page.body.intro], ['剪刀手用法', ['剪刀手入门', '剪刀手进阶', '发现一个项目'], '剪刀手是命令行剪辑工具。']);
+    const c = await (await fetch(url + '/api/knowledge')).json();
+    assert.deepEqual([c.themes[0].page_hash, c.pageReads], [page.hash, {}]);
+    const r = await post('/api/page-read', { id });
+    assert.equal(r.status, 200, await r.clone().text());
+    const after = await (await fetch(url + '/api/knowledge')).json();
+    assert.equal(after.pageReads['软件与开发工具｜剪刀手用法'].hash, page.hash);
+    assert.equal((await (await fetch(url + '/api/notes-index')).json()).items.every(i => !i.read_at), true);
+    await post('/api/page-read', { id, read: false });
+    assert.deepEqual((await (await fetch(url + '/api/knowledge')).json()).pageReads, {});
+  } finally { await new Promise(r => app.server.close(r)); f.kb.close(); f.cleanup(); }
 });

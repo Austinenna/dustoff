@@ -34,7 +34,10 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   const library=createLibrary(home);
   // 知识库索引由 knowledge.mjs 生成；还没跑过时文件不存在，这里不替它新建。
   const knowledge=createKnowledge(home);
-  const knowledgeState=()=>existsSync(knowledge.file)?{ready:true,...knowledge.catalog()}:{ready:false};
+  // pageReads：用户看过哪些综述页、看的是哪一版；键是「大类｜主题名」。
+  const pageKey=t=>`${t.domain}｜${t.name}`;
+  const knowledgeState=()=>existsSync(knowledge.file)?{ready:true,...knowledge.catalog(),pageReads:library.pageReads()}:{ready:false};
+  const knowledgePage=id=>{const page=existsSync(knowledge.file)&&knowledge.page(id);if(!page)throw new HttpError(404,'这个主题还没有综述页');return page;};
   const media=createMediaService({store,home});
   scheduler ||= createScheduler({home,root});
   const token=randomBytes(32).toString('hex');
@@ -283,6 +286,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/notes-index':{const reads=library.readIds();result={items:store.notesIndex().items.map(i=>({...i,read_at:reads.get(i.id)||null}))};break;}
         case '/api/library':result=libraryState();break;
         case '/api/knowledge':result=knowledgeState();break;
+        case '/api/knowledge-page':result=knowledgePage(params.id);break;
         case '/api/suggest':result={suggestions:suggestions(params.id)};break;
         case '/api/insights':result=store.insights({id:params.id});break;
         case '/api/tokens':result={tokens:library.tokens()};break;
@@ -325,6 +329,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         }
         case '/api/knowledge-domain':if(!existsSync(knowledge.file))throw new HttpError(400,'知识库索引还没有建');try{result=knowledge.setDomain(String(data.id||''),data.domain||null);}catch(e){throw new HttpError(400,e.message);}break;
         case '/api/read':result=library.setRead(data.id,data.read!==false);break;
+        case '/api/page-read':{const page=knowledgePage(data.id);result=library.setPageRead(pageKey(page),page.hash,data.read!==false);break;}
         case '/api/topic':result=library.saveTopic(data);break;
         case '/api/topic-delete':result=library.deleteTopic(data.id);break;
         case '/api/material':result=enrich([library.addMaterial(data)])[0];break;

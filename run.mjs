@@ -52,7 +52,7 @@ async function updateKnowledge(log) {
     p.on('error', e => { clearTimeout(timer); log(`知识库索引没有更新：${e.message}`); resolve(); });
     p.on('close', code => {
       clearTimeout(timer);
-      const lines = err.split('\n').filter(l => /待处理|抽取完成|归并：|主题：|✗/.test(l)).map(l => l.replace(/^\[[\d:]+\]\s*/, ''));
+      const lines = err.split('\n').filter(l => /待处理|抽取完成|归并：|主题：|综述：|✗/.test(l)).map(l => l.replace(/^\[[\d:]+\]\s*/, ''));
       log(`知识库索引${code === 0 ? '已更新' : `更新未全部完成（退出码 ${code}）`}：${lines.join('；') || '无输出'}`);
       resolve();
     });
