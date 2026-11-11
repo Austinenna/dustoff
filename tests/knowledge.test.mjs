@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createKnowledge } from '../scripts/knowledge-store.mjs';
-import { EXTRACT_HASH, cleanExtraction, cleanMerge, cleanThemes, noteBody, normName } from '../scripts/knowledge-extract.mjs';
+import { CLASSIFY_HASH, EXTRACT_HASH, cleanClassification, cleanExtraction, cleanMerge, cleanThemes, noteBody, normName } from '../scripts/knowledge-extract.mjs';
 import { extractPending, mergePass, themePass } from '../knowledge.mjs';
 import { PauseError } from '../scripts/policy.mjs';
 
@@ -34,17 +34,18 @@ function fixture() {
 const config = { base: 'http://127.0.0.1:8317/v1/chat/completions', key: 'fixture-token', model: 'fixture-model', effort: 'high', maxTokens: 1000, timeoutMs: 5000 };
 const reply = data => new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(data) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200 });
 const concept = (名称, 角色 = '主题', 类型 = '产品') => ({ 名称, 类型, 角色, 说明: `${名称}的说明` });
-// 按标题给出固定的抽取结果；同时记下每次请求，供断言用。
-function fakeModel(calls = []) {
+// 按标题给出固定的分类和抽取结果；同时记下每次请求，供断言用。
+function fakeModel(calls = [], domains = { 节拍网格: '视频创作' }) {
   const answers = {
-    剪刀手入门: { 大类: '软件与开发工具', 概念: [concept('剪刀手'), concept('木工坊', '提到', '机构')], 关系: [{ 从: '剪刀手', 到: '木工坊', 类型: '出自' }] },
-    剪刀手进阶: { 大类: '软件与开发工具', 概念: [concept('Scissor Hand'), concept('节拍网格', '提到', '方法')], 关系: [{ 从: 'Scissor Hand', 到: '节拍网格', 类型: '用于' }] },
-    节拍网格: { 大类: '视频创作', 概念: [concept('节拍网格', '主题', '方法')], 关系: [] },
-    发现一个项目: { 大类: '软件与开发工具', 概念: [concept('剪 刀 手', '提到')], 关系: [] },
+    剪刀手入门: { 概念: [concept('剪刀手'), concept('木工坊', '提到', '机构')], 关系: [{ 从: '剪刀手', 到: '木工坊', 类型: '出自' }] },
+    剪刀手进阶: { 概念: [concept('Scissor Hand'), concept('节拍网格', '提到', '方法')], 关系: [{ 从: 'Scissor Hand', 到: '节拍网格', 类型: '用于' }] },
+    节拍网格: { 概念: [concept('节拍网格', '主题', '方法')], 关系: [] },
+    发现一个项目: { 概念: [concept('剪 刀 手', '提到')], 关系: [] },
   };
   return async (url, init) => {
     const body = JSON.parse(init.body); calls.push({ url, headers: init.headers, body });
     const user = body.messages[1].content;
+    if (body.messages[0].content.includes('给个人收藏笔记归类')) return reply({ 大类: domains[user.match(/^标题：(.+)$/m)[1]] || '软件与开发工具', 理由: '按内容归类' });
     if (body.messages[0].content.includes('归纳出这个大类里反复出现的')) {
       // 把标题里带「剪刀手」或正文讲剪刀手的归成一个主题；只有一篇的不归。
       const rows = user.split('\n').filter(line => /^\d+｜/.test(line)), hit = rows.filter(r => /剪刀手|Scissor/.test(r)).map(r => Number(r.split('｜')[0]));
@@ -57,7 +58,7 @@ function fakeModel(calls = []) {
     return reply(answers[user.match(/^标题：(.+)$/m)[1]]);
   };
 }
-const quiet = { config, retryMs: 0, onLog() {} };
+const quiet = { config, retryMs: 0, onLog(m) { if (process.env.KB_DEBUG) console.error(m); } };
 
 test('概念名归一：全半角、大小写、空格和连接符不同算同一个名字，版本号保留', () => {
   assert.equal(normName('Claude Code'), normName('claude-code'));
@@ -73,14 +74,13 @@ test('取笔记正文：去掉元信息、转写稿和原帖，只存原帖的�
   assert.equal(noteBody(`${head}# 帖子\n\n只有原帖。\n\n- [图 1](https://x.invalid/a.png) · 本地：\`/home/u/a.png\`\n`), '# 帖子\n\n只有原帖。\n\n- [图 1](https://x.invalid/a.png)');
 });
 
-test('抽取结果校验：大类必须在固定列表里，坏条目丢掉，主题最多 2 个、关系最多 3 条', () => {
-  assert.throws(() => cleanExtraction({ 大类: '其他', 概念: [] }), /不在固定列表里/);
-  const out = cleanExtraction({ 大类: '游戏攻略', 概念: [concept('甲'), concept('乙'), concept('丙'), concept('丁'), concept('甲'), { 名称: '坏类型', 类型: '别的' }, concept('')],
+test('抽取结果校验：坏条目丢掉，主题最多 2 个、关系最多 3 条', () => {
+  const out = cleanExtraction({ 概念: [concept('甲'), concept('乙'), concept('丙'), concept('丁'), concept('甲'), { 名称: '坏类型', 类型: '别的' }, concept('')],
     关系: [{ 从: '甲', 到: '乙', 类型: '用于' }, { 从: '甲', 到: '乙', 类型: '用于' }, { 从: '甲', 到: '不存在', 类型: '用于' }, { 从: '甲', 到: '乙', 类型: '喜欢' }, { 从: '甲', 到: '甲', 类型: '属于' }] });
   assert.deepEqual(out.concepts.map(c => [c.name, c.role]), [['甲', '主题'], ['乙', '主题'], ['丙', '提到'], ['丁', '提到']]);
   assert.deepEqual(out.relations, [{ from: '甲', to: '乙', type: '用于' }]);
-  assert.equal(cleanExtraction({ 大类: '游戏攻略', 概念: [concept('没有类型', '主题', '话题')], 关系: [] }).concepts.length, 0);   // 概念只收有名字的东西
-  const many = cleanExtraction({ 大类: '游戏攻略', 概念: ['甲', '乙', '丙', '丁'].map(n => concept(n)), 关系: [['甲', '乙'], ['甲', '丙'], ['甲', '丁'], ['乙', '丙']].map(([从, 到]) => ({ 从, 到, 类型: '用于' })) });
+  assert.equal(cleanExtraction({ 概念: [concept('没有类型', '主题', '话题')], 关系: [] }).concepts.length, 0);   // 概念只收有名字的东西
+  const many = cleanExtraction({ 概念: ['甲', '乙', '丙', '丁'].map(n => concept(n)), 关系: [['甲', '乙'], ['甲', '丙'], ['甲', '丁'], ['乙', '丙']].map(([从, 到]) => ({ 从, 到, 类型: '用于' })) });
   assert.equal(many.relations.length, 3);
 });
 
@@ -90,28 +90,33 @@ test('归并结果校验：编号必须在这一批里，不确定里被并掉�
   assert.deepEqual(out.unsure, [{ a: 1, b: 4, reason: 'r' }]);
 });
 
-test('抽取入库：同一个东西的不同写法落到同一个概念，请求显式带思考档位', async () => {
+test('分类和抽取入库：每篇先定大类再抽概念，同一个东西的不同写法落到同一个概念，请求显式带思考档位', async () => {
   const f = fixture(), calls = [];
   try {
     assert.deepEqual(f.kb.syncDocs(), { total: 4, added: 4, changed: 0, removed: 0 });
     assert.equal(f.kb.doc('1').title, '剪刀手入门');
     assert.equal(f.kb.doc('x9').kind, 'post');
-    const docs = f.kb.pendingDocs({ promptHash: EXTRACT_HASH });
-    assert.deepEqual(docs.map(d => d.item), ['1', '2', '3', 'x9']);
+    const docs = f.kb.pendingDocs({ promptHash: EXTRACT_HASH, classifyHash: CLASSIFY_HASH });
+    assert.deepEqual(docs.map(d => [d.item, d.need_classify, d.need_extract]), [['1', 1, 1], ['2', 1, 1], ['3', 1, 1], ['x9', 1, 1]]);
     const r = await extractPending(f.kb, docs, { ...quiet, fetchImpl: fakeModel(calls), concurrency: 1 });
-    assert.deepEqual([r.done, r.failed, r.input, r.output], [4, 0, 40, 20]);
+    assert.deepEqual([r.done, r.failed, r.input, r.output], [4, 0, 80, 40]);
+    assert.equal(calls.length, 8);
+    assert.match(calls[0].body.messages[0].content, /给个人收藏笔记归类[\s\S]*- 未分类：/);
+    assert.doesNotMatch(calls[1].body.messages[0].content, /大类/);   // 抽概念的提示词里不再提大类
     assert.equal(calls[0].body.reasoning_effort, 'high');
     assert.equal(calls[0].body.model, 'fixture-model');
     assert.doesNotMatch(calls[0].body.messages[1].content, /口语原稿/);
     // 第二篇开始，已有概念作为参照传给模型。
-    assert.match(calls[1].body.messages[1].content, /已有概念[^\n]*\n剪刀手/);
+    assert.match(calls[3].body.messages[1].content, /已有概念[^\n]*\n剪刀手/);
     const byName = Object.fromEntries(f.kb.concepts().map(c => [c.name, c]));
     assert.deepEqual(Object.keys(byName).sort(), ['Scissor Hand', '剪刀手', '木工坊', '节拍网格']);
     assert.deepEqual([byName.剪刀手.notes, byName.剪刀手.topics, byName.剪刀手.domain], [2, 1, '软件与开发工具']);   // 「剪 刀 手」对上了「剪刀手」
     assert.deepEqual([byName.节拍网格.notes, byName.节拍网格.topics], [2, 1]);
-    assert.equal(f.kb.doc('3').domain, '视频创作');
-    assert.equal(f.kb.pendingDocs({ promptHash: EXTRACT_HASH }).length, 0);
-    assert.equal(f.kb.pendingDocs({ promptHash: 'newprompt', stale: true }).length, 4);
+    assert.deepEqual([f.kb.doc('3').domain, f.kb.doc('3').domain_note], ['视频创作', '按内容归类']);
+    const hashes = { promptHash: EXTRACT_HASH, classifyHash: CLASSIFY_HASH };
+    assert.equal(f.kb.pendingDocs(hashes).length, 0);
+    assert.equal(f.kb.pendingDocs({ ...hashes, stale: true }).length, 0);
+    assert.equal(f.kb.pendingDocs({ ...hashes, promptHash: 'newprompt', stale: true }).length, 4);
     const s = f.kb.stats();
     assert.deepEqual([s.docs.extracted, s.concepts.total, s.concepts.single, s.isolated], [4, 4, 2, 0]);
   } finally { f.kb.close(); f.cleanup(); }
@@ -151,7 +156,7 @@ test('归并：模型认定的直接合并，拿不准的等确认；问过的�
     assert.equal(f.kb.replayMerges(), 1);
     assert.deepEqual(f.kb.concepts().map(c => c.name).sort(), names);
     // 合并后，旧写法再出现也指向保留的概念。
-    f.kb.saveExtraction('3', cleanExtraction({ 大类: '软件与开发工具', 概念: [concept('scissor-hand')], 关系: [] }));
+    f.kb.saveExtraction('3', cleanExtraction({ 概念: [concept('scissor-hand')], 关系: [] }));
     assert.equal(f.kb.concepts().find(c => c.name === '剪刀手').notes, 4);
   } finally { f.kb.close(); f.cleanup(); }
 });
@@ -205,10 +210,28 @@ test('笔记改了要重抽，笔记没了连同只属于它的概念一起清�
   } finally { f.kb.close(); f.cleanup(); }
 });
 
+test('只改了大类定义：只重新分类，不重抽概念；大类变了的笔记，原来和现在的大类都重新归纳主题', async () => {
+  const f = fixture(), calls = [];
+  try {
+    f.kb.syncDocs();
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
+    await themePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    assert.equal(f.kb.themes()[0].notes, 3);
+    const db = new DatabaseSync(f.kb.file); db.exec("UPDATE docs SET domain_hash='old'"); db.close();
+    const docs = f.kb.pendingDocs({ promptHash: EXTRACT_HASH, classifyHash: CLASSIFY_HASH, stale: true });
+    assert.deepEqual(docs.map(d => [d.item, d.need_classify, d.need_extract]), [['1', 1, 0], ['2', 1, 0], ['3', 1, 0], ['x9', 1, 0]]);
+    const r = await extractPending(f.kb, docs, { ...quiet, fetchImpl: fakeModel(calls, { 节拍网格: '视频创作', 发现一个项目: 'AI行业动态' }), concurrency: 1 });
+    assert.deepEqual([r.done, calls.length], [4, 4]);
+    assert.equal(f.kb.concepts().length, 4);   // 概念没动
+    assert.equal(f.kb.doc('x9').domain, 'AI行业动态');
+    assert.deepEqual(f.kb.themeNotes(f.kb.themes()[0].id).map(n => n.item).sort(), ['1', '2']);   // 改了大类的那篇先从主题里拿掉
+    assert.deepEqual(f.kb.themeBatches().map(b => b.domain).sort(), ['AI行业动态', '软件与开发工具']);
+  } finally { f.kb.close(); f.cleanup(); }
+});
+
 test('未分类：模型可以选未分类并写原因，内容审核拒绝的也放进去，都不参加主题归纳', async () => {
-  const out = cleanExtraction({ 大类: '未分类', 大类说明: '讲公益故事，建议设「科技公益」', 概念: [concept('甲')], 关系: [] });
-  assert.deepEqual([out.domain, out.domainNote], ['未分类', '讲公益故事，建议设「科技公益」']);
-  assert.equal(cleanExtraction({ 大类: '游戏攻略', 大类说明: '多写的', 概念: [] }).domainNote, '');
+  assert.throws(() => cleanClassification({ 大类: '其他', 理由: '' }), /不在固定列表里/);
+  assert.deepEqual(cleanClassification({ 大类: '未分类', 理由: '讲公益故事，建议设「科技公益」' }), { domain: '未分类', domainNote: '讲公益故事，建议设「科技公益」' });
   const f = fixture();
   try {
     f.kb.syncDocs();

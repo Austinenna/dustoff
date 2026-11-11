@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// dustoff / knowledge.mjs —— 第四段：从笔记抽出概念，建知识库索引 knowledge.sqlite。
+// dustoff / knowledge.mjs —— 第四段：给笔记定大类、抽出概念，建知识库索引 knowledge.sqlite。
 //
 // 只读笔记和账本，只写 knowledge.sqlite；不改笔记、不改账本，所以不占流水线的锁。
 //
-//   node knowledge.mjs                 抽取新增和改过的笔记，全部抽完后归并概念、按大类归纳主题
+//   node knowledge.mjs                 给新增和改过的笔记定大类、抽概念，全部做完后归并概念、按大类归纳主题
 //   node knowledge.mjs --limit 20      本轮最多抽 20 篇
-//   node knowledge.mjs --stale         连同用旧版指令抽的一起重抽
+//   node knowledge.mjs --stale         连同用旧版指令做的一起重做（只改了大类定义时只重新分类）
 //   node knowledge.mjs --retry-failed  重试失败满 3 次的
 //   node knowledge.mjs --rebuild       清空抽取结果后全部重抽（做过的合并会重放）
 //   node knowledge.mjs --no-merge      只抽取，不做归并和主题归纳
@@ -17,7 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { makeCfg, DUST_HOME } from './scripts/config.mjs';
 import { PauseError } from './scripts/policy.mjs';
 import { createKnowledge, bodyHash } from './scripts/knowledge-store.mjs';
-import { EXTRACT_HASH, ModerationError, PermanentError, UNSORTED, clusterThemes, extractNote, knowledgeConfig, mergeConcepts, noteBody, normName } from './scripts/knowledge-extract.mjs';
+import { CLASSIFY_HASH, EXTRACT_HASH, ModerationError, PermanentError, UNSORTED, classifyNote, clusterThemes, extractNote, knowledgeConfig, mergeConcepts, noteBody, normName } from './scripts/knowledge-extract.mjs';
 
 const IS_MAIN = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 const stamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -28,7 +28,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const MIN_CHARS = 20, MAX_CHARS = 12000, MERGE_BATCH = 200;
 
 /**
- * 抽取一批笔记。并发处理，每篇失败后本轮内再试两次；
+ * 处理一批笔记：定大类、抽概念，每篇各调一次模型。并发处理，每篇失败后本轮内再试两次；
  * 连续失败达到上限就停（多半是密钥、余额或网络出了问题），预算用完立即停。
  */
 export async function extractPending(kb, docs, { config = knowledgeConfig(), fetchImpl = fetch, concurrency = 2, maxFails = 3, retryMs = 2000, onLog = log } = {}) {
@@ -38,18 +38,33 @@ export async function extractPending(kb, docs, { config = knowledgeConfig(), fet
     let body;
     try { body = noteBody(readFileSync(doc.path, 'utf8')); } catch (e) { kb.markError(doc.item, `读不到笔记文件：${e.code || e.message}`); result.failed++; return; }
     if (body.length < MIN_CHARS) { kb.markError(doc.item, '正文太短，没有可抽取的内容', { permanent: true }); result.skipped++; return; }
+    const input = body.slice(0, MAX_CHARS), saved = { model: config.model, contentHash: bodyHash(body) };
+    const used = usage => { result.input += usage.input; result.output += usage.output; };
+    let domain = doc.domain, line = '';
     for (let attempt = 1; ; attempt++) {
       try {
-        const out = await extractNote({ id: doc.item, title: doc.title, author: doc.author, body: body.slice(0, MAX_CHARS), vocabulary: kb.vocabulary() }, { config, fetchImpl });
-        kb.saveExtraction(doc.item, out, { promptHash: EXTRACT_HASH, model: config.model, contentHash: bodyHash(body) });
-        result.done++; result.input += out.usage.input; result.output += out.usage.output; streak = 0;
-        onLog(`✓ ${doc.item} ${out.domain}${out.domainNote ? `（${out.domainNote}）` : ''}｜${out.concepts.map(c => (c.role === '主题' ? '★' : '') + c.name).join('、')}`);
+        // 先定大类，再抽概念。前一步成功后就存下来，后一步失败重试时不用再做一遍。
+        if (doc.need_classify) {
+          const out = await classifyNote({ id: doc.item, title: doc.title, body: input }, { config, fetchImpl });
+          kb.saveDomain(doc.item, out, { hash: CLASSIFY_HASH, contentHash: saved.contentHash });
+          doc.need_classify = 0; domain = out.domain; used(out.usage);
+          if (out.domain === UNSORTED) line = `（${out.domainNote}）`;
+        }
+        if (doc.need_extract) {
+          const out = await extractNote({ id: doc.item, title: doc.title, author: doc.author, body: input, vocabulary: kb.vocabulary() }, { config, fetchImpl });
+          kb.saveExtraction(doc.item, out, { promptHash: EXTRACT_HASH, ...saved });
+          doc.need_extract = 0; used(out.usage);
+          line += `｜${out.concepts.map(c => (c.role === '主题' ? '★' : '') + c.name).join('、')}`;
+        }
+        result.done++; streak = 0;
+        onLog(`✓ ${doc.item} ${domain}${line}`);
         return;
       } catch (e) {
         if (e instanceof PauseError) { result.stopped = e.message; return; }
         // 内容审核拒绝的不算失败：放进「未分类」并写明原因，不抽概念，也不再重试。
         if (e instanceof ModerationError) {
-          kb.saveExtraction(doc.item, { domain: UNSORTED, domainNote: '模型服务的内容审核拒绝处理这篇笔记', concepts: [], relations: [] }, { promptHash: EXTRACT_HASH, model: config.model, contentHash: bodyHash(body) });
+          kb.saveDomain(doc.item, { domain: UNSORTED, domainNote: '模型服务的内容审核拒绝处理这篇笔记' }, { hash: CLASSIFY_HASH, contentHash: saved.contentHash });
+          if (doc.need_extract) kb.saveExtraction(doc.item, { concepts: [], relations: [] }, { promptHash: EXTRACT_HASH, ...saved });
           result.done++; result.moderated++; streak = 0;
           onLog(`✓ ${doc.item} ${UNSORTED}｜内容审核拒绝`);
           return;
@@ -139,8 +154,8 @@ async function main() {
   log(`笔记 ${sync.total} 篇：新增 ${sync.added}，正文有改动 ${sync.changed}，已不存在 ${sync.removed}`);
   if (has('--rebuild')) { kb.reset(); log('已清空抽取结果，全部重抽'); }
   const limit = Number(valOf('--limit')) > 0 ? Number(valOf('--limit')) : 100000;
-  const docs = kb.pendingDocs({ promptHash: EXTRACT_HASH, stale: has('--stale'), retryFailed: has('--retry-failed'), limit });
-  log(`待抽取 ${docs.length} 篇（模型 ${config.model}，思考档位 ${config.effort}）`);
+  const docs = kb.pendingDocs({ promptHash: EXTRACT_HASH, classifyHash: CLASSIFY_HASH, stale: has('--stale'), retryFailed: has('--retry-failed'), limit });
+  log(`待处理 ${docs.length} 篇，其中要分类 ${docs.filter(d => d.need_classify).length}、要抽概念 ${docs.filter(d => d.need_extract).length}（模型 ${config.model}，思考档位 ${config.effort}）`);
   if (has('--dry-run')) return;
 
   let stopped = null;
@@ -154,7 +169,7 @@ async function main() {
   const replayed = kb.replayMerges(), orphans = kb.dropOrphans();
   if (replayed || orphans) log(`重放以前的合并 ${replayed} 次，清掉没有笔记的概念 ${orphans} 个`);
   // 还有笔记没抽完时不做归并：概念不全，判断了也要重来。
-  const rest = kb.pendingDocs({ promptHash: EXTRACT_HASH, stale: has('--stale') }).length;
+  const rest = kb.pendingDocs({ promptHash: EXTRACT_HASH, classifyHash: CLASSIFY_HASH, stale: has('--stale') }).length;
   if (!has('--no-merge') && !stopped && !rest) {
     try {
       const m = await mergePass(kb, { config });

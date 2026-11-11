@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS docs (
   extracted_hash TEXT,              -- 上次抽取时的正文哈希；和 content_hash 不同就要重抽
   prompt_hash TEXT, model TEXT, extracted_at INTEGER,
   domain TEXT,                      -- 固定大类，由模型从列表里选
-  domain_note TEXT NOT NULL DEFAULT '',       -- 归到「未分类」的原因
+  domain_note TEXT NOT NULL DEFAULT '',       -- 模型归到这个大类的理由；「未分类」的是原因
+  classified_hash TEXT, domain_hash TEXT,     -- 上次分类时的正文哈希和分类提示词指纹
   theme_checked INTEGER NOT NULL DEFAULT 0,   -- 所在大类归纳主题时有没有算上这篇
   attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS concepts (
@@ -73,8 +74,9 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     db = new DatabaseSync(file);
     db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON');
     db.exec(SCHEMA);
-    // 早先建的库没有这一列。
-    if (!db.prepare('PRAGMA table_info(docs)').all().some(c => c.name === 'domain_note')) db.exec("ALTER TABLE docs ADD COLUMN domain_note TEXT NOT NULL DEFAULT ''");
+    // 早先建的库没有这几列。
+    const cols = new Set(db.prepare('PRAGMA table_info(docs)').all().map(c => c.name));
+    for (const [name, type] of [['domain_note', "TEXT NOT NULL DEFAULT ''"], ['classified_hash', 'TEXT'], ['domain_hash', 'TEXT']]) if (!cols.has(name)) db.exec(`ALTER TABLE docs ADD COLUMN ${name} ${type}`);
     return db;
   }
   const one = (sql, ...args) => open().prepare(sql).get(...args);
@@ -128,12 +130,16 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     return stats;
   }
 
-  /** 等待抽取的笔记：没抽过、正文变了；stale 为真时再加上用旧版指令抽的。失败满 3 次的不再自动重试。 */
-  function pendingDocs({ promptHash, stale = false, retryFailed = false, limit = 100000 } = {}) {
-    const where = ['extracted_hash IS NULL', 'extracted_hash!=content_hash'], args = [];
-    if (stale) { where.push('prompt_hash IS NOT ?'); args.push(promptHash ?? null); }
-    return all(`SELECT item,platform,kind,title,author,path,content_hash FROM docs WHERE (${where.join(' OR ')}) ${retryFailed ? '' : 'AND attempts<3'}
-      ORDER BY collected_at, item LIMIT ?`, ...args, limit);
+  /**
+   * 等待处理的笔记：没分类或没抽过、正文变了；stale 为真时再加上用旧版指令做的。失败满 3 次的不再自动重试。
+   * need_classify、need_extract 标出这篇要做哪一步：只改了大类定义时，只重新分类，不重抽概念。
+   */
+  function pendingDocs({ promptHash, classifyHash, stale = false, retryFailed = false, limit = 100000 } = {}) {
+    const classify = ['classified_hash IS NULL', 'classified_hash!=content_hash'], extract = ['extracted_hash IS NULL', 'extracted_hash!=content_hash'], args = [];
+    if (stale) { classify.push('domain_hash IS NOT ?'); args.push(classifyHash ?? null); extract.push('prompt_hash IS NOT ?'); args.push(promptHash ?? null); }
+    return all(`SELECT * FROM (SELECT item,platform,kind,title,author,path,content_hash,domain,collected_at,attempts,
+      (${classify.join(' OR ')}) need_classify, (${extract.join(' OR ')}) need_extract FROM docs)
+      WHERE (need_classify OR need_extract) ${retryFailed ? '' : 'AND attempts<3'} ORDER BY collected_at, item LIMIT ?`, ...args, limit);
   }
 
   /** 已有概念的名称，被越多笔记讲到的越靠前。给抽取做参照，让同一个东西用同一个写法。 */
@@ -153,14 +159,27 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     return id;
   }
 
+  /** 写入一篇笔记的大类。大类变了，原来和现在的大类都要重新归纳主题。 */
+  function saveDomain(item, { domain, domainNote = '' }, { hash, contentHash } = {}) {
+    return tx(() => {
+      const doc = one('SELECT domain,content_hash FROM docs WHERE item=?', item);
+      if (!doc) return false;
+      if (doc.domain !== domain) {
+        run('DELETE FROM doc_themes WHERE item=?', item);
+        if (doc.domain) run('UPDATE docs SET theme_checked=0 WHERE domain=?', doc.domain);
+        run('UPDATE docs SET theme_checked=0 WHERE item=?', item);
+      }
+      run('UPDATE docs SET domain=?,domain_note=?,classified_hash=?,domain_hash=?,attempts=0,error=NULL WHERE item=?', domain, domainNote, contentHash || doc.content_hash, hash || null, item);
+      return true;
+    });
+  }
+
   /** 写入一篇笔记的抽取结果；重抽时先清掉这篇旧的概念关联。 */
-  function saveExtraction(item, { domain, domainNote = '', concepts, relations }, { promptHash, model, contentHash } = {}) {
+  function saveExtraction(item, { concepts, relations }, { promptHash, model, contentHash } = {}) {
     return tx(() => {
       const doc = one('SELECT content_hash FROM docs WHERE item=?', item);
       if (!doc) return false;
       run('DELETE FROM mentions WHERE item=?', item); run('DELETE FROM relations WHERE item=?', item);
-      // 重抽后大类可能变了：从原来的主题里拿掉，等所在大类重新归纳。
-      run('DELETE FROM doc_themes WHERE item=?', item);
       const ids = new Map();
       for (const c of concepts) {
         const id = conceptId(c); ids.set(c.norm, id);
@@ -171,7 +190,7 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
         const from = ids.get(r.from), to = ids.get(r.to);
         if (from && to && from !== to) run('INSERT OR IGNORE INTO relations(from_id,to_id,type,item) VALUES(?,?,?,?)', from, to, r.type, item);
       }
-      run('UPDATE docs SET domain=?,domain_note=?,extracted_hash=?,prompt_hash=?,model=?,extracted_at=?,theme_checked=0,attempts=0,error=NULL WHERE item=?', domain, domainNote, contentHash || doc.content_hash, promptHash || null, model || null, now(), item);
+      run('UPDATE docs SET extracted_hash=?,prompt_hash=?,model=?,extracted_at=?,theme_checked=0,attempts=0,error=NULL WHERE item=?', contentHash || doc.content_hash, promptHash || null, model || null, now(), item);
       return true;
     });
   }
@@ -325,9 +344,9 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   /** 清空抽取结果，之后全部重抽。合并记录留着：做过的合并会重放，问过的概念对不再问。 */
   function reset() {
     tx(() => {
-      run('DELETE FROM mentions'); run('DELETE FROM relations'); run('DELETE FROM concepts'); run('DELETE FROM doc_themes'); run("UPDATE docs SET extracted_hash=NULL,prompt_hash=NULL,model=NULL,extracted_at=NULL,domain=NULL,domain_note='',theme_checked=0,attempts=0,error=NULL");
+      run('DELETE FROM mentions'); run('DELETE FROM relations'); run('DELETE FROM concepts'); run('DELETE FROM doc_themes'); run("UPDATE docs SET extracted_hash=NULL,prompt_hash=NULL,model=NULL,extracted_at=NULL,domain=NULL,domain_note='',classified_hash=NULL,domain_hash=NULL,theme_checked=0,attempts=0,error=NULL");
     });
   }
   function close() { if (db) { db.close(); db = null; } }
-  return { file, syncDocs, pendingDocs, vocabulary, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, failures, unsorted, doc, reset, close };
+  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, failures, unsorted, doc, reset, close };
 }
