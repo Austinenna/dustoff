@@ -37,10 +37,10 @@ const concept = (名称, 角色 = '主题', 类型 = '产品') => ({ 名称, 类
 // 按标题给出固定的抽取结果；同时记下每次请求，供断言用。
 function fakeModel(calls = []) {
   const answers = {
-    剪刀手入门: { 大类: '效率工具', 概念: [concept('剪刀手'), concept('木工坊', '提到', '机构')], 关系: [{ 从: '剪刀手', 到: '木工坊', 类型: '出自' }] },
-    剪刀手进阶: { 大类: '效率工具', 概念: [concept('Scissor Hand'), concept('节拍网格', '提到', '方法')], 关系: [{ 从: 'Scissor Hand', 到: '节拍网格', 类型: '用于' }] },
-    节拍网格: { 大类: 'AI 视频与创作', 概念: [concept('节拍网格', '主题', '方法')], 关系: [] },
-    发现一个项目: { 大类: '效率工具', 概念: [concept('剪 刀 手', '提到')], 关系: [] },
+    剪刀手入门: { 大类: '软件与开发工具', 概念: [concept('剪刀手'), concept('木工坊', '提到', '机构')], 关系: [{ 从: '剪刀手', 到: '木工坊', 类型: '出自' }] },
+    剪刀手进阶: { 大类: '软件与开发工具', 概念: [concept('Scissor Hand'), concept('节拍网格', '提到', '方法')], 关系: [{ 从: 'Scissor Hand', 到: '节拍网格', 类型: '用于' }] },
+    节拍网格: { 大类: '视频创作', 概念: [concept('节拍网格', '主题', '方法')], 关系: [] },
+    发现一个项目: { 大类: '软件与开发工具', 概念: [concept('剪 刀 手', '提到')], 关系: [] },
   };
   return async (url, init) => {
     const body = JSON.parse(init.body); calls.push({ url, headers: init.headers, body });
@@ -75,12 +75,12 @@ test('取笔记正文：去掉元信息、转写稿和原帖，只存原帖的�
 
 test('抽取结果校验：大类必须在固定列表里，坏条目丢掉，主题最多 2 个、关系最多 3 条', () => {
   assert.throws(() => cleanExtraction({ 大类: '其他', 概念: [] }), /不在固定列表里/);
-  const out = cleanExtraction({ 大类: '游戏', 概念: [concept('甲'), concept('乙'), concept('丙'), concept('丁'), concept('甲'), { 名称: '坏类型', 类型: '别的' }, concept('')],
+  const out = cleanExtraction({ 大类: '游戏攻略', 概念: [concept('甲'), concept('乙'), concept('丙'), concept('丁'), concept('甲'), { 名称: '坏类型', 类型: '别的' }, concept('')],
     关系: [{ 从: '甲', 到: '乙', 类型: '用于' }, { 从: '甲', 到: '乙', 类型: '用于' }, { 从: '甲', 到: '不存在', 类型: '用于' }, { 从: '甲', 到: '乙', 类型: '喜欢' }, { 从: '甲', 到: '甲', 类型: '属于' }] });
   assert.deepEqual(out.concepts.map(c => [c.name, c.role]), [['甲', '主题'], ['乙', '主题'], ['丙', '提到'], ['丁', '提到']]);
   assert.deepEqual(out.relations, [{ from: '甲', to: '乙', type: '用于' }]);
-  assert.equal(cleanExtraction({ 大类: '游戏', 概念: [concept('没有类型', '主题', '话题')], 关系: [] }).concepts.length, 0);   // 概念只收有名字的东西
-  const many = cleanExtraction({ 大类: '游戏', 概念: ['甲', '乙', '丙', '丁'].map(n => concept(n)), 关系: [['甲', '乙'], ['甲', '丙'], ['甲', '丁'], ['乙', '丙']].map(([从, 到]) => ({ 从, 到, 类型: '用于' })) });
+  assert.equal(cleanExtraction({ 大类: '游戏攻略', 概念: [concept('没有类型', '主题', '话题')], 关系: [] }).concepts.length, 0);   // 概念只收有名字的东西
+  const many = cleanExtraction({ 大类: '游戏攻略', 概念: ['甲', '乙', '丙', '丁'].map(n => concept(n)), 关系: [['甲', '乙'], ['甲', '丙'], ['甲', '丁'], ['乙', '丙']].map(([从, 到]) => ({ 从, 到, 类型: '用于' })) });
   assert.equal(many.relations.length, 3);
 });
 
@@ -107,9 +107,9 @@ test('抽取入库：同一个东西的不同写法落到同一个概念，请�
     assert.match(calls[1].body.messages[1].content, /已有概念[^\n]*\n剪刀手/);
     const byName = Object.fromEntries(f.kb.concepts().map(c => [c.name, c]));
     assert.deepEqual(Object.keys(byName).sort(), ['Scissor Hand', '剪刀手', '木工坊', '节拍网格']);
-    assert.deepEqual([byName.剪刀手.notes, byName.剪刀手.topics, byName.剪刀手.domain], [2, 1, '效率工具']);   // 「剪 刀 手」对上了「剪刀手」
+    assert.deepEqual([byName.剪刀手.notes, byName.剪刀手.topics, byName.剪刀手.domain], [2, 1, '软件与开发工具']);   // 「剪 刀 手」对上了「剪刀手」
     assert.deepEqual([byName.节拍网格.notes, byName.节拍网格.topics], [2, 1]);
-    assert.equal(f.kb.doc('3').domain, 'AI 视频与创作');
+    assert.equal(f.kb.doc('3').domain, '视频创作');
     assert.equal(f.kb.pendingDocs({ promptHash: EXTRACT_HASH }).length, 0);
     assert.equal(f.kb.pendingDocs({ promptHash: 'newprompt', stale: true }).length, 4);
     const s = f.kb.stats();
@@ -124,7 +124,7 @@ test('归并：模型认定的直接合并，拿不准的等确认；问过的�
     await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
     const m = await mergePass(f.kb, { ...quiet, fetchImpl: fakeModel(calls) });
     assert.deepEqual([m.merged, m.suggested, m.failed], [1, 1, 0]);
-    assert.equal(calls.length, 1);   // 只有「效率工具」有多个概念；另一个大类只有一个概念，不用问
+    assert.equal(calls.length, 1);   // 只有「软件与开发工具」有多个概念；另一个大类只有一个概念，不用问
     let names = f.kb.concepts().map(c => c.name).sort();
     assert.deepEqual(names, ['剪刀手', '木工坊', '节拍网格']);
     const tool = f.kb.concepts().find(c => c.name === '剪刀手');
@@ -151,13 +151,13 @@ test('归并：模型认定的直接合并，拿不准的等确认；问过的�
     assert.equal(f.kb.replayMerges(), 1);
     assert.deepEqual(f.kb.concepts().map(c => c.name).sort(), names);
     // 合并后，旧写法再出现也指向保留的概念。
-    f.kb.saveExtraction('3', cleanExtraction({ 大类: '效率工具', 概念: [concept('scissor-hand')], 关系: [] }));
+    f.kb.saveExtraction('3', cleanExtraction({ 大类: '软件与开发工具', 概念: [concept('scissor-hand')], 关系: [] }));
     assert.equal(f.kb.concepts().find(c => c.name === '剪刀手').notes, 4);
   } finally { f.kb.close(); f.cleanup(); }
 });
 
 test('主题归纳结果校验：至少 2 篇，一篇最多归 2 个主题，不能用大类名', () => {
-  const out = cleanThemes({ 主题: [{ 名称: '甲', 说明: 's', 笔记: [1, 2, 2, 9] }, { 名称: '游戏', 笔记: [1, 2] }, { 名称: '乙', 笔记: [1, 3] }, { 名称: '丙', 笔记: [1, 3] }, { 名称: '丁', 笔记: [4] }, { 名称: '甲', 笔记: [3, 4] }] }, 4, '游戏');
+  const out = cleanThemes({ 主题: [{ 名称: '甲', 说明: 's', 笔记: [1, 2, 2, 9] }, { 名称: '游戏攻略', 笔记: [1, 2] }, { 名称: '乙', 笔记: [1, 3] }, { 名称: '丙', 笔记: [1, 3] }, { 名称: '丁', 笔记: [4] }, { 名称: '甲', 笔记: [3, 4] }] }, 4, '游戏攻略');
   assert.deepEqual(out.map(t => [t.name, t.notes]), [['甲', [1, 2]], ['乙', [1, 3]]]);   // 丙：第 1 篇已经归了两个主题，只剩一篇，不成主题
 });
 
@@ -171,7 +171,7 @@ test('主题：按大类归纳，名称没变的主题保留编号，大类里�
     assert.equal(calls.length, 1);   // 「AI 视频与创作」只有一篇，不用问模型
     assert.match(calls[0].body.messages[1].content, /1｜剪刀手入门｜剪刀手是一个命令行剪辑工具[^｜]*｜★剪刀手、木工坊/);
     const [theme] = f.kb.themes();
-    assert.deepEqual([theme.domain, theme.name, theme.notes], ['效率工具', '剪刀手用法', 3]);
+    assert.deepEqual([theme.domain, theme.name, theme.notes], ['软件与开发工具', '剪刀手用法', 3]);
     assert.deepEqual(f.kb.themeNotes(theme.id).map(n => n.item).sort(), ['1', '2', 'x9']);
     assert.deepEqual(f.kb.looseNotes().map(n => n.item), ['3']);
     assert.deepEqual([f.kb.stats().themes.with_page, f.kb.stats().themes.covered, f.kb.stats().themes.loose], [1, 3, 1]);
@@ -205,12 +205,30 @@ test('笔记改了要重抽，笔记没了连同只属于它的概念一起清�
   } finally { f.kb.close(); f.cleanup(); }
 });
 
+test('未分类：模型可以选未分类并写原因，内容审核拒绝的也放进去，都不参加主题归纳', async () => {
+  const out = cleanExtraction({ 大类: '未分类', 大类说明: '讲公益故事，建议设「科技公益」', 概念: [concept('甲')], 关系: [] });
+  assert.deepEqual([out.domain, out.domainNote], ['未分类', '讲公益故事，建议设「科技公益」']);
+  assert.equal(cleanExtraction({ 大类: '游戏攻略', 大类说明: '多写的', 概念: [] }).domainNote, '');
+  const f = fixture();
+  try {
+    f.kb.syncDocs();
+    const rejected = async () => new Response(JSON.stringify({ error: { code: '1301', message: '内容不合规' } }), { status: 400 });
+    const r = await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: rejected, concurrency: 1, maxFails: 2 });
+    assert.deepEqual([r.done, r.moderated, r.failed, r.stopped], [4, 4, 0, null]);   // 不算失败，不触发连续失败停止
+    assert.deepEqual([f.kb.doc('1').domain, f.kb.doc('1').error], ['未分类', null]);
+    assert.match(f.kb.doc('1').domain_note, /内容审核/);
+    assert.equal(f.kb.pendingDocs({}).length, 0);
+    assert.equal(f.kb.stats().unsorted.length, 4);
+    assert.equal(f.kb.themeBatches().length, 0);
+  } finally { f.kb.close(); f.cleanup(); }
+});
+
 test('失败处理：参数错误不重试，连续失败停止，预算用完立即停止', async () => {
   const f = fixture();
   try {
     f.kb.syncDocs();
     const status = (code, error) => async () => new Response(JSON.stringify({ error }), { status: code });
-    let r = await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: status(400, { code: '1301', message: '内容不合规' }), concurrency: 1, maxFails: 2 });
+    let r = await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: status(400, { code: '1210', message: '参数有误' }), concurrency: 1, maxFails: 2 });
     assert.deepEqual([r.done, r.failed], [0, 2]);
     assert.match(r.stopped, /连续 2 篇失败/);
     assert.equal(f.kb.doc('1').attempts, 3);                    // 永久失败，不再自动重试
@@ -223,6 +241,6 @@ test('失败处理：参数错误不重试，连续失败停止，预算用完�
     r = await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: status(402, { message: '本月预算已用完' }), concurrency: 1 });
     assert.match(r.stopped, /预算已用完/);
     assert.equal(f.kb.doc('3').attempts, 1);                     // 预算用完不算这篇的失败
-    await assert.rejects(mergePass({ mergeBatches: () => [{ domain: '游戏', concepts: [{ id: 1, name: '甲', type: '产品' }, { id: 2, name: '乙', type: '产品' }] }] }, { ...quiet, fetchImpl: status(402, {}) }), PauseError);
+    await assert.rejects(mergePass({ mergeBatches: () => [{ domain: '游戏攻略', concepts: [{ id: 1, name: '甲', type: '产品' }, { id: 2, name: '乙', type: '产品' }] }] }, { ...quiet, fetchImpl: status(402, {}) }), PauseError);
   } finally { f.kb.close(); f.cleanup(); }
 });

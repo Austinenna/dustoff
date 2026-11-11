@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { localPath } from './policy.mjs';
-import { noteBody, normName } from './knowledge-extract.mjs';
+import { UNSORTED, noteBody, normName } from './knowledge-extract.mjs';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS docs (
@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS docs (
   extracted_hash TEXT,              -- 上次抽取时的正文哈希；和 content_hash 不同就要重抽
   prompt_hash TEXT, model TEXT, extracted_at INTEGER,
   domain TEXT,                      -- 固定大类，由模型从列表里选
+  domain_note TEXT NOT NULL DEFAULT '',       -- 归到「未分类」的原因
   theme_checked INTEGER NOT NULL DEFAULT 0,   -- 所在大类归纳主题时有没有算上这篇
   attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS concepts (
@@ -72,6 +73,8 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     db = new DatabaseSync(file);
     db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON');
     db.exec(SCHEMA);
+    // 早先建的库没有这一列。
+    if (!db.prepare('PRAGMA table_info(docs)').all().some(c => c.name === 'domain_note')) db.exec("ALTER TABLE docs ADD COLUMN domain_note TEXT NOT NULL DEFAULT ''");
     return db;
   }
   const one = (sql, ...args) => open().prepare(sql).get(...args);
@@ -151,7 +154,7 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   }
 
   /** 写入一篇笔记的抽取结果；重抽时先清掉这篇旧的概念关联。 */
-  function saveExtraction(item, { domain, concepts, relations }, { promptHash, model, contentHash } = {}) {
+  function saveExtraction(item, { domain, domainNote = '', concepts, relations }, { promptHash, model, contentHash } = {}) {
     return tx(() => {
       const doc = one('SELECT content_hash FROM docs WHERE item=?', item);
       if (!doc) return false;
@@ -168,7 +171,7 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
         const from = ids.get(r.from), to = ids.get(r.to);
         if (from && to && from !== to) run('INSERT OR IGNORE INTO relations(from_id,to_id,type,item) VALUES(?,?,?,?)', from, to, r.type, item);
       }
-      run('UPDATE docs SET domain=?,extracted_hash=?,prompt_hash=?,model=?,extracted_at=?,theme_checked=0,attempts=0,error=NULL WHERE item=?', domain, contentHash || doc.content_hash, promptHash || null, model || null, now(), item);
+      run('UPDATE docs SET domain=?,domain_note=?,extracted_hash=?,prompt_hash=?,model=?,extracted_at=?,theme_checked=0,attempts=0,error=NULL WHERE item=?', domain, domainNote, contentHash || doc.content_hash, promptHash || null, model || null, now(), item);
       return true;
     });
   }
@@ -252,9 +255,9 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   function markMergeChecked(ids) { tx(() => { for (const id of ids) run('UPDATE concepts SET merge_checked=1 WHERE id=?', id); }); }
 
   // ── 主题 ──
-  /** 有笔记还没参加过主题归纳的大类，连同该大类的全部笔记和已有主题。 */
+  /** 有笔记还没参加过主题归纳的大类，连同该大类的全部笔记和已有主题。「未分类」里的笔记互不相干，不归纳。 */
   function themeBatches() {
-    const domains = all('SELECT DISTINCT domain FROM docs WHERE domain IS NOT NULL AND extracted_hash IS NOT NULL AND theme_checked=0').map(r => r.domain);
+    const domains = all('SELECT DISTINCT domain FROM docs WHERE domain IS NOT NULL AND domain!=? AND extracted_hash IS NOT NULL AND theme_checked=0', UNSORTED).map(r => r.domain);
     return domains.map(domain => {
       const notes = all('SELECT item,title,gist FROM docs WHERE domain=? AND extracted_hash IS NOT NULL ORDER BY collected_at, item', domain).map(d => {
         const cs = all('SELECT c.name, m.role FROM mentions m JOIN concepts c ON c.id=m.concept_id WHERE m.item=? ORDER BY c.id', d.item);
@@ -309,8 +312,11 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
         covered: one('SELECT count(DISTINCT item) n FROM doc_themes WHERE theme_id IN (SELECT theme_id FROM doc_themes GROUP BY theme_id HAVING count(*)>=3)').n,
         loose: looseNotes().length },
       domains: all('SELECT domain, count(*) notes FROM docs WHERE domain IS NOT NULL GROUP BY domain ORDER BY notes DESC'),
+      unsorted: unsorted(),
     };
   }
+  /** 归到「未分类」的笔记和原因。 */
+  function unsorted() { return all('SELECT item,title,domain_note note FROM docs WHERE domain=? ORDER BY collected_at, item', UNSORTED); }
   function failures() { return all('SELECT item,title,attempts,error FROM docs WHERE error IS NOT NULL ORDER BY item'); }
   function doc(item) { return one('SELECT * FROM docs WHERE item=?', item); }
   function relations() {
@@ -319,9 +325,9 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
   /** 清空抽取结果，之后全部重抽。合并记录留着：做过的合并会重放，问过的概念对不再问。 */
   function reset() {
     tx(() => {
-      run('DELETE FROM mentions'); run('DELETE FROM relations'); run('DELETE FROM concepts'); run('DELETE FROM doc_themes'); run('UPDATE docs SET extracted_hash=NULL,prompt_hash=NULL,model=NULL,extracted_at=NULL,domain=NULL,theme_checked=0,attempts=0,error=NULL');
+      run('DELETE FROM mentions'); run('DELETE FROM relations'); run('DELETE FROM concepts'); run('DELETE FROM doc_themes'); run("UPDATE docs SET extracted_hash=NULL,prompt_hash=NULL,model=NULL,extracted_at=NULL,domain=NULL,domain_note='',theme_checked=0,attempts=0,error=NULL");
     });
   }
   function close() { if (db) { db.close(); db = null; } }
-  return { file, syncDocs, pendingDocs, vocabulary, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, failures, doc, reset, close };
+  return { file, syncDocs, pendingDocs, vocabulary, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, failures, unsorted, doc, reset, close };
 }

@@ -17,7 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { makeCfg, DUST_HOME } from './scripts/config.mjs';
 import { PauseError } from './scripts/policy.mjs';
 import { createKnowledge, bodyHash } from './scripts/knowledge-store.mjs';
-import { EXTRACT_HASH, PermanentError, clusterThemes, extractNote, knowledgeConfig, mergeConcepts, noteBody, normName } from './scripts/knowledge-extract.mjs';
+import { EXTRACT_HASH, ModerationError, PermanentError, UNSORTED, clusterThemes, extractNote, knowledgeConfig, mergeConcepts, noteBody, normName } from './scripts/knowledge-extract.mjs';
 
 const IS_MAIN = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 const stamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -32,7 +32,7 @@ const MIN_CHARS = 20, MAX_CHARS = 12000, MERGE_BATCH = 200;
  * 连续失败达到上限就停（多半是密钥、余额或网络出了问题），预算用完立即停。
  */
 export async function extractPending(kb, docs, { config = knowledgeConfig(), fetchImpl = fetch, concurrency = 2, maxFails = 3, retryMs = 2000, onLog = log } = {}) {
-  const queue = [...docs], result = { done: 0, failed: 0, skipped: 0, input: 0, output: 0, stopped: null };
+  const queue = [...docs], result = { done: 0, failed: 0, skipped: 0, moderated: 0, input: 0, output: 0, stopped: null };
   let streak = 0;
   async function one(doc) {
     let body;
@@ -43,10 +43,17 @@ export async function extractPending(kb, docs, { config = knowledgeConfig(), fet
         const out = await extractNote({ id: doc.item, title: doc.title, author: doc.author, body: body.slice(0, MAX_CHARS), vocabulary: kb.vocabulary() }, { config, fetchImpl });
         kb.saveExtraction(doc.item, out, { promptHash: EXTRACT_HASH, model: config.model, contentHash: bodyHash(body) });
         result.done++; result.input += out.usage.input; result.output += out.usage.output; streak = 0;
-        onLog(`✓ ${doc.item} ${out.domain}｜${out.concepts.map(c => (c.role === '主题' ? '★' : '') + c.name).join('、')}`);
+        onLog(`✓ ${doc.item} ${out.domain}${out.domainNote ? `（${out.domainNote}）` : ''}｜${out.concepts.map(c => (c.role === '主题' ? '★' : '') + c.name).join('、')}`);
         return;
       } catch (e) {
         if (e instanceof PauseError) { result.stopped = e.message; return; }
+        // 内容审核拒绝的不算失败：放进「未分类」并写明原因，不抽概念，也不再重试。
+        if (e instanceof ModerationError) {
+          kb.saveExtraction(doc.item, { domain: UNSORTED, domainNote: '模型服务的内容审核拒绝处理这篇笔记', concepts: [], relations: [] }, { promptHash: EXTRACT_HASH, model: config.model, contentHash: bodyHash(body) });
+          result.done++; result.moderated++; streak = 0;
+          onLog(`✓ ${doc.item} ${UNSORTED}｜内容审核拒绝`);
+          return;
+        }
         const permanent = e instanceof PermanentError;
         if (!permanent && attempt < 3) { await sleep(retryMs * attempt); continue; }
         kb.markError(doc.item, e.message, { permanent });
@@ -141,7 +148,7 @@ async function main() {
     if (!config.key) { log('✗ 未配置模型密钥（DUST_LLM_KEY 或 DUST_KB_KEY）'); process.exitCode = 6; return; }
     const r = await extractPending(kb, docs, { config, concurrency: Number(cfg('DUST_KB_CONCURRENCY', 2)), maxFails: Number(cfg('DUST_LLM_MAX_FAILS', 3)) });
     stopped = r.stopped;
-    log(`抽取完成 ${r.done} 篇，失败 ${r.failed}，跳过 ${r.skipped}；用量 输入 ${r.input} 输出 ${r.output} token`);
+    log(`抽取完成 ${r.done} 篇，失败 ${r.failed}，跳过 ${r.skipped}${r.moderated ? `，其中 ${r.moderated} 篇被内容审核拒绝、已放进「未分类」` : ''}；用量 输入 ${r.input} 输出 ${r.output} token`);
     if (stopped) log(`✗ ${stopped}`);
   }
   const replayed = kb.replayMerges(), orphans = kb.dropOrphans();
