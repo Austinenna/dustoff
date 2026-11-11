@@ -8,6 +8,7 @@
 //   node knowledge.mjs --stale         连同用旧版指令做的一起重做（只改了大类定义时只重新分类）
 //   node knowledge.mjs --retry-failed  重试失败满 3 次的
 //   node knowledge.mjs --rebuild       清空抽取结果后全部重抽（做过的合并会重放）
+//   node knowledge.mjs --rethemes      清空主题后每个大类从头归纳（改了归纳主题的指令后用）
 //   node knowledge.mjs --no-merge      只抽取，不做归并和主题归纳
 //   node knowledge.mjs --dry-run       只看有多少篇要抽，不调用模型
 //   node knowledge.mjs --report        只输出当前统计
@@ -153,6 +154,7 @@ async function main() {
   const sync = kb.syncDocs();
   log(`笔记 ${sync.total} 篇：新增 ${sync.added}，正文有改动 ${sync.changed}，已不存在 ${sync.removed}`);
   if (has('--rebuild')) { kb.reset(); log('已清空抽取结果，全部重抽'); }
+  if (has('--rethemes')) { kb.resetThemes(); log('已清空主题，每个大类从头归纳'); }
   const limit = Number(valOf('--limit')) > 0 ? Number(valOf('--limit')) : 100000;
   const docs = kb.pendingDocs({ promptHash: EXTRACT_HASH, classifyHash: CLASSIFY_HASH, stale: has('--stale'), retryFailed: has('--retry-failed'), limit });
   log(`待处理 ${docs.length} 篇，其中要分类 ${docs.filter(d => d.need_classify).length}、要抽概念 ${docs.filter(d => d.need_extract).length}（模型 ${config.model}，思考档位 ${config.effort}）`);

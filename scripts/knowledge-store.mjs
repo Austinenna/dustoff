@@ -299,6 +299,8 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
       run('UPDATE docs SET theme_checked=1 WHERE domain=? AND extracted_hash IS NOT NULL', domain);
     });
   }
+  /** 清空全部主题，之后每个大类从头归纳。改了归纳主题的指令后用。 */
+  function resetThemes() { tx(() => { run('DELETE FROM doc_themes'); run('DELETE FROM themes'); run('UPDATE docs SET theme_checked=0'); }); }
   function themes() {
     return all(`SELECT t.id, t.domain, t.name, t.summary, count(dt.item) notes FROM themes t LEFT JOIN doc_themes dt ON dt.theme_id=t.id
       GROUP BY t.id ORDER BY t.domain, notes DESC, t.id`);
@@ -348,5 +350,5 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     });
   }
   function close() { if (db) { db.close(); db = null; } }
-  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, failures, unsorted, doc, reset, close };
+  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, looseNotes, conceptNotes, relations, stats, failures, unsorted, doc, reset, close };
 }
