@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { localPath } from './policy.mjs';
 import { DOMAINS, UNSORTED, missingNotes, noteBody, normName } from './knowledge-extract.mjs';
+import { INDEX_VERSION, chunkNote, chunkPage, chunkText, cutText, looseTerms, markRegex, searchTerms, snippet } from './knowledge-search.mjs';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS docs (
@@ -63,10 +64,26 @@ CREATE TABLE IF NOT EXISTS pages (
   changes TEXT NOT NULL DEFAULT '', -- 这一版相比上一版的变化；第一版为空
   complete INTEGER,                 -- 1 每篇笔记都写到了；0 重写 3 次仍有漏的；空：早先写的，没做过这项检查
   failed_hash TEXT, attempts INTEGER NOT NULL DEFAULT 0, error TEXT);   -- failed_hash：写不出来的那一版笔记，笔记不变就不再试
+-- 全文索引。chunk_sources 一行是一份进了索引的内容：笔记、文字稿和只有标题的收藏用作品 ID 当 key，主题用「theme:编号」。
+-- hash 是进索引时内容的指纹，没变就不重切。
+CREATE TABLE IF NOT EXISTS chunk_sources (key TEXT PRIMARY KEY, kind TEXT NOT NULL, hash TEXT NOT NULL);   -- kind: note 笔记 / text 文字稿 / bare 只有标题 / theme 主题
+-- chunks 是切好的段，存原文，显示命中片段时用。每份内容的第 0 段是标题（heading 里放作者）。
+CREATE TABLE IF NOT EXISTS chunks (
+  id INTEGER PRIMARY KEY, key TEXT NOT NULL, seq INTEGER NOT NULL,
+  tier TEXT NOT NULL,               -- head 标题 / body 提炼正文 / source 转写稿、原帖、文字稿 / page 综述
+  heading TEXT NOT NULL DEFAULT '', text TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_chunks_key ON chunks(key, seq);
+-- 对照表：存切词后的文字，rowid 和 chunks.id 相同。
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(heading, text);
 `;
 // 3 篇以上的主题才写综述：一两篇没有可合并的内容，写出来只是复述。
 export const PAGE_MIN_NOTES = 3;
 const MANUAL_NOTE = '手动指定';
+// 搜索排序时各类段落的分量：标题里出现说明整篇在讲它；转写稿又长又散，什么词都可能出现一次，排在提炼正文后面。
+const TIER_WEIGHT = { head: 1.6, page: 1.2, body: 1, source: 0.5 };
+// 只有标题的收藏点进去没有笔记可读，排在最后。
+const KIND_WEIGHT = { note: 1, theme: 1, text: 0.8, bare: 0.5 };
+const TEXT_MAX_BYTES = 4 * 1024 ** 2;
 const sha = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
 // 正文第一段文字的开头：跳过标题、分隔线和提示行，去掉加粗等标记。
 function gistOf(body) {
@@ -436,10 +453,118 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     return {
       all: [...DOMAINS.map(d => d.name), UNSORTED],
       domains: [...DOMAINS, { name: UNSORTED, definition: '题材不属于任何一个大类，或模型服务拒绝处理的笔记' }].map(d => ({ ...d, notes: counts.get(d.name) || 0 })).filter(d => d.notes),
-      themes: themes(), docs,
+      themes: themes(), docs, search: searchReady(),
       concepts: Object.fromEntries(concepts().map(c => [c.id, { name: c.name, type: c.type, summary: c.summary, notes: c.notes }])),
     };
   }
+  // ── 全文索引 ──
+  /**
+   * 按现在的笔记、账本和综述对齐全文索引：新增和改过的重新切段，已经不在的删掉。不调用模型。
+   * 进索引的有四类：笔记（标题、提炼正文、转写稿或原帖）、没整理成笔记的文字稿、只有标题的收藏、主题（名称、说明和综述）。
+   */
+  function syncChunks(ledgerFile = localPath(process.env.DUST_DB || join(home, 'index.sqlite'))) {
+    const want = new Map();
+    const add = (key, kind, parts, build) => want.set(key, { kind, hash: sha([INDEX_VERSION, ...parts].join('\u0001')), build });
+    const head = (title, author) => ({ tier: 'head', heading: author || '', text: title || '' });
+    for (const d of all('SELECT item,title,author,path FROM docs')) {
+      let source;
+      try { source = readFileSync(d.path, 'utf8'); } catch { continue; }
+      add(d.item, 'note', [d.title, d.author, source], () => [head(d.title, d.author), ...chunkNote(source)]);
+    }
+    if (existsSync(ledgerFile)) {
+      const ledger = new DatabaseSync(ledgerFile, { readOnly: true });
+      let rows;
+      try { rows = ledger.prepare("SELECT id,title,author,text_path FROM items WHERE COALESCE(skip_reason,'')!='user_deleted' AND status!='removed'").all(); } finally { ledger.close(); }
+      for (const r of rows) {
+        if (want.has(r.id)) continue;
+        let text = null;
+        try { const path = r.text_path && localPath(r.text_path); if (path && statSync(path).size <= TEXT_MAX_BYTES) text = readFileSync(path, 'utf8'); } catch {}
+        if (text !== null) add(r.id, 'text', [r.title, r.author, text], () => [head(r.title || r.id, r.author), ...chunkText(text)]);
+        else if (r.title) add(r.id, 'bare', [r.title, r.author], () => [head(r.title, r.author)]);
+      }
+    }
+    for (const t of themes()) {
+      if (!t.notes) continue;
+      const body = one('SELECT body FROM pages WHERE theme_id=? AND body IS NOT NULL', t.id)?.body;
+      add(`theme:${t.id}`, 'theme', [t.name, t.summary, t.page_hash, t.page_at], () => [head(t.name), ...(t.summary ? [{ tier: 'page', heading: '', text: t.summary }] : []), ...(body ? chunkPage(JSON.parse(body)) : [])]);
+    }
+    const stats = { total: want.size, added: 0, changed: 0, removed: 0 };
+    tx(() => {
+      const have = new Map(all('SELECT key,hash FROM chunk_sources').map(r => [r.key, r.hash]));
+      const drop = key => { run('DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE key=?)', key); run('DELETE FROM chunks WHERE key=?', key); run('DELETE FROM chunk_sources WHERE key=?', key); };
+      for (const key of have.keys()) if (!want.has(key)) { drop(key); stats.removed++; }
+      for (const [key, w] of want) {
+        if (have.get(key) === w.hash) continue;
+        drop(key); stats[have.has(key) ? 'changed' : 'added']++;
+        run('INSERT INTO chunk_sources(key,kind,hash) VALUES(?,?,?)', key, w.kind, w.hash);
+        w.build().forEach((c, seq) => {
+          const id = Number(run('INSERT INTO chunks(key,seq,tier,heading,text) VALUES(?,?,?,?,?)', key, seq, c.tier, c.heading, c.text).lastInsertRowid);
+          run('INSERT INTO chunks_fts(rowid,heading,text) VALUES(?,?,?)', id, cutText(c.heading), cutText(c.text));
+        });
+      }
+    });
+    return { ...stats, chunks: one('SELECT count(*) n FROM chunks').n };
+  }
+  function searchReady() { return !!one('SELECT 1 FROM chunk_sources LIMIT 1'); }
+  /** 名称里带搜索词的概念，被越多笔记讲到的越靠前；名称和搜索词完全一样的排最前。 */
+  function matchConcepts(input, limit = 6) {
+    const norm = normName(input);
+    if (norm.length < 2) return [];
+    const exact = new Set(), ids = new Set();
+    for (const a of all('SELECT norm, concept_id id FROM aliases')) if (a.norm.includes(norm)) { ids.add(a.id); if (a.norm === norm) exact.add(a.id); }
+    return concepts().filter(c => ids.has(c.id)).sort((a, b) => exact.has(b.id) - exact.has(a.id) || b.notes - a.notes).slice(0, limit)
+      .map(c => ({ id: c.id, name: c.name, type: c.type, notes: c.notes }));
+  }
+  /**
+   * 全文搜索。先查出含有任意一个搜索词的段，再按所属的笔记（或主题）合并打分。
+   * mode：all 列出的每一篇都包含全部搜索词；loose 没有哪一篇包含全部的词，列的是包含其中一部分、或字面相近的。
+   * 返回里的 marks 是在原文里标出命中词的正则，snippet 的格式见 knowledge-search.mjs。
+   */
+  function search(input, { limit = 30 } = {}) {
+    const query = String(input ?? '').trim(), empty = { ready: true, query, mode: 'all', marks: [], themes: [], concepts: [], hits: [] };
+    if (!searchReady()) return { ready: false };
+    let terms = searchTerms(query), mode = 'all';
+    if (!terms.length) return empty;
+    function collect(list) {
+      const rows = all(`SELECT c.key, c.seq, c.tier, c.heading, c.text, s.kind, -bm25(chunks_fts, 2.0, 1.0) score
+        FROM chunks_fts JOIN chunks c ON c.id=chunks_fts.rowid JOIN chunk_sources s ON s.key=c.key WHERE chunks_fts MATCH ? ORDER BY score DESC LIMIT 800`, list.map(t => t.fts).join(' OR '));
+      const tests = list.map(t => markRegex([t.mark])), groups = new Map();
+      for (const r of rows) {
+        const g = groups.get(r.key) || { key: r.key, kind: r.kind, rows: [], matched: new Set() };
+        r.score *= TIER_WEIGHT[r.tier] ?? 1;
+        g.rows.push(r); groups.set(r.key, g);
+        tests.forEach((re, i) => { re.lastIndex = 0; if (re.test(`${r.heading}\n${r.text}`)) g.matched.add(i); });
+      }
+      return [...groups.values()];
+    }
+    // 一篇里各个词可以分散在不同的段：标题里有一个、正文里有另一个也算全部命中。
+    // 只有综述包含全部的词、没有哪篇笔记包含时，也放宽，免得笔记一栏是空的。
+    let list = collect(terms).filter(g => g.matched.size === terms.length);
+    if (!list.some(g => g.kind !== 'theme')) {
+      const extra = looseTerms(terms);
+      if (terms.length > 1 || extra.length) { mode = 'loose'; terms = [...terms, ...extra]; list = collect(terms); }
+    }
+    for (const g of list) {
+      g.rows.sort((a, b) => b.score - a.score);
+      // 最好的一段定高低，同一篇里其他命中的段再加一点分。
+      g.score = (g.rows[0].score + 0.3 * g.rows.slice(1, 6).reduce((n, r) => n + r.score, 0)) * (KIND_WEIGHT[g.kind] ?? 1);
+    }
+    list.sort((a, b) => b.score - a.score);
+    // 放宽之后沾边的内容很多，只列最相关的一批。
+    const cap = mode === 'loose' ? Math.min(limit, 30) : limit;
+    const marks = terms.map(t => t.mark), themeById = new Map(themes().map(t => [t.id, t])), out = { ...empty, mode, marks, concepts: matchConcepts(query) };
+    for (const g of list) {
+      // 标题以外有命中的段时，显示那一段；只有标题命中就显示标题。
+      const shown = g.rows.find(r => r.tier !== 'head') || g.rows[0], title = one('SELECT heading, text FROM chunks WHERE key=? AND seq=0', g.key);
+      const hit = { tier: shown.tier, heading: shown.tier === 'head' ? '' : shown.heading, snippet: snippet(shown.text, marks), chunks: g.rows.length };
+      if (g.kind === 'theme') {
+        const t = themeById.get(Number(g.key.slice(6)));
+        if (t && out.themes.length < 5) out.themes.push({ id: t.id, domain: t.domain, name: t.name, notes: t.notes, page: !!t.page_hash, ...hit });
+      } else if (out.hits.length < cap) out.hits.push({ key: g.key, kind: g.kind, title: title?.text || g.key, author: title?.heading || '', ...hit });
+    }
+    return out;
+  }
+
   function failures() { return all('SELECT item,title,attempts,error FROM docs WHERE error IS NOT NULL ORDER BY item'); }
   function doc(item) { return one('SELECT * FROM docs WHERE item=?', item); }
   function relations() {
@@ -453,5 +578,5 @@ export function createKnowledge(home, { now = () => Math.floor(Date.now() / 1000
     });
   }
   function close() { if (db) { db.close(); db = null; } }
-  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, setDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, pageBatches, savePage, markPageError, page, pageFailures, looseNotes, conceptNotes, relations, stats, catalog, failures, unsorted, doc, reset, close };
+  return { file, syncDocs, pendingDocs, vocabulary, saveDomain, setDomain, saveExtraction, markError, dropOrphans, merge, replayMerges, suggest, decide, pendingMerges, concepts, mergeBatches, markMergeChecked, themeBatches, saveThemes, resetThemes, themes, themeNotes, pageBatches, savePage, markPageError, page, pageFailures, looseNotes, conceptNotes, relations, stats, catalog, failures, unsorted, doc, reset, syncChunks, searchReady, search, close };
 }

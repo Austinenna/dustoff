@@ -37,6 +37,8 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   // pageReads：用户看过哪些综述页、看的是哪一版；键是「大类｜主题名」。
   const pageKey=t=>`${t.domain}｜${t.name}`;
   const knowledgeState=()=>existsSync(knowledge.file)?{ready:true,...knowledge.catalog(),pageReads:library.pageReads()}:{ready:false};
+  // 全文搜索：索引由 knowledge.mjs 维护，没建时返回 ready:false，浏览器退回按标题筛选。
+  const knowledgeSearch=(q,limit)=>existsSync(knowledge.file)?knowledge.search(String(q||'').slice(0,200),{limit:Math.min(Math.max(Number(limit)||30,1),300)}):{ready:false};
   const knowledgePage=id=>{const page=existsSync(knowledge.file)&&knowledge.page(id);if(!page)throw new HttpError(404,'这个主题还没有综述页');return page;};
   const media=createMediaService({store,home});
   scheduler ||= createScheduler({home,root});
@@ -287,6 +289,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/library':result=libraryState();break;
         case '/api/knowledge':result=knowledgeState();break;
         case '/api/knowledge-page':result=knowledgePage(params.id);break;
+        case '/api/search':result=knowledgeSearch(params.q,params.limit);break;
         case '/api/suggest':result={suggestions:suggestions(params.id)};break;
         case '/api/insights':result=store.insights({id:params.id});break;
         case '/api/tokens':result={tokens:library.tokens()};break;

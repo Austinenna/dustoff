@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createKnowledge } from '../scripts/knowledge-store.mjs';
 import { CLASSIFY_HASH, EXTRACT_HASH, cleanClassification, cleanExtraction, cleanMerge, cleanPage, cleanThemes, missingNotes, noteBody, notePublished, normName } from '../scripts/knowledge-extract.mjs';
 import { extractPending, mergePass, pagePass, themePass } from '../knowledge.mjs';
+import { chunkNote, cutText, looseTerms, markRegex, searchTerms, snippet } from '../scripts/knowledge-search.mjs';
 import { PauseError } from '../scripts/policy.mjs';
 
 // 虚构笔记：三篇整理过的笔记（两篇讲同一个工具，写法不同），一条只存了原帖的 X 书签。
@@ -434,4 +435,121 @@ test('综述漏写笔记：既不在要点里也不在可跳过里就重写，�
     assert.deepEqual(f.kb.pageBatches({}).map(t => t.id), [theme.id]);
     db.close();
   } finally { f.kb.close(); f.cleanup(); }
+});
+
+test('搜索的切词：中文按单字切，英文按整词并在结尾按前缀匹配；没有全部命中时按词典拆出更小的词', () => {
+  assert.equal(cutText('用Ｃlaude剪辑').replace(/\s+/g, ' ').trim(), '用 Claude 剪 辑');   // 全角字母先归一
+  const terms = searchTerms('  剪辑  AI Agent 剪辑 ++ ');
+  assert.deepEqual(terms.map(t => t.fts), ['"剪 辑"', '"ai"', '("agent" OR "agent" *)']);   // 重复的词和没有文字的词去掉；两个字母的英文词不做前缀匹配
+  const agent = markRegex([terms[2].mark]);
+  assert.deepEqual(['AI Agents', 'reagent', '多 Agent 协作'].map(x => { agent.lastIndex = 0; return agent.test(x); }), [true, false, true]);
+  assert.equal(markRegex([searchTerms('GPT-5.5')[0].mark]).test('用 gpt 5.5 写'), true);   // 词之间隔着标点、空白也算连着
+  const loose = looseTerms(searchTerms('怎么给视频加字幕')).map(t => t.text);
+  assert.equal(loose.includes('视频') && loose.includes('字幕'), true);
+  assert.deepEqual(looseTerms(searchTerms('字幕')), []);   // 拆不出更小的词
+  // 词典不认识的名字被拆成单字，连着的单字合起来当一个词；「怎么」这类虚词不补。
+  assert.deepEqual(looseTerms(searchTerms('嫦小娥阵容怎么玩')).map(t => t.text), ['嫦小娥', '阵容']);
+});
+
+test('笔记切段和命中片段：正文和转写稿分开，按标题分节，一节太长按句子切开；片段里奇数位是命中的词', () => {
+  const long = '第一句讲剪辑。'.repeat(300);
+  const chunks = chunkNote(`---\n标题: "x"\n---\n开头一段\n\n# 核心观点\n\n要点 · 本地：\`/tmp/a.png\`\n\n## 步骤\n\n${long}\n\n---\n## 完整转写稿\n\n口语原稿\n\n---\n[完整转写稿](#完整转写稿)\n`);
+  assert.deepEqual(chunks.slice(0, 2), [{ tier: 'body', heading: '', text: '开头一段' }, { tier: 'body', heading: '核心观点', text: '要点' }]);
+  const steps = chunks.filter(c => c.heading === '步骤');
+  assert.equal(steps.length > 1 && steps.every(c => c.text.length <= 1200 && c.text.endsWith('。')), true);
+  assert.equal(steps.map(c => c.text).join(''), long);
+  assert.deepEqual(chunks.at(-1), { tier: 'source', heading: '完整转写稿', text: '口语原稿' });
+  assert.deepEqual(chunkNote('只存了原帖的书签\n\n---\n[原推文](https://x.com/i/status/9)\n').map(c => c.tier), ['body']);
+  const marks = searchTerms('剪辑 脚本').map(t => t.mark);
+  assert.deepEqual(snippet('用 **Scissor Hand** 把剪辑写成脚本，再对齐音乐。', marks), ['用 Scissor Hand 把', '剪辑', '写成', '脚本', '，再对齐音乐。']);
+  const far = snippet(`${'铺垫'.repeat(40)}这里讲到剪辑${'后文'.repeat(80)}`, marks);
+  assert.deepEqual([far[0].startsWith('…'), far[1], far.at(-1).endsWith('…'), far.join('').length < 110], [true, '剪辑', true, true]);
+  assert.deepEqual(snippet('没有命中词的一段', marks), ['没有命中词的一段']);
+});
+
+test('全文索引和搜索：标题、正文、转写稿都能搜到，正文排在转写稿前面；没变的不重切，没了的删掉；收藏标题、文字稿和主题也进索引', async () => {
+  const f = fixture();
+  try {
+    // 另加一条只保存了视频、没有笔记的收藏，和一份没整理成笔记的文字稿。
+    const db = new DatabaseSync(join(f.home, 'index.sqlite'));
+    const insert = db.prepare("INSERT INTO items(id,platform,title,author,media_type,status,first_seen,last_seen,updated_at,text_path) VALUES(?,'douyin',?,?,'video',?,1,1,1,?)");
+    mkdirSync(join(f.home, 'text'));
+    writeFileSync(join(f.home, 'text', '8.txt'), '这份收藏只有文字稿，讲的是榫卯结构。');
+    insert.run('7', '木工坊探店实拍', '另一位作者', 'saved', null);
+    insert.run('8', '榫卯讲解', '测试作者', 'transcribed', join(f.home, 'text', '8.txt'));
+    db.close();
+    f.kb.syncDocs();
+    assert.deepEqual(f.kb.search('剪刀手'), { ready: false });   // 还没建全文索引
+    assert.deepEqual(f.kb.syncChunks(), { total: 6, added: 6, changed: 0, removed: 0, chunks: 14 });
+    assert.deepEqual(f.kb.syncChunks(), { total: 6, added: 0, changed: 0, removed: 0, chunks: 14 });
+    const keys = q => f.kb.search(q).hits.map(h => h.key);
+
+    const hit = f.kb.search('剪刀手');
+    assert.deepEqual([hit.ready, hit.mode, hit.hits[0].key, [...keys('剪刀手')].sort()], [true, 'all', '1', ['1', '2', 'x9']]);   // 标题和正文都有的排最前；只有标题里有的也能搜到
+    assert.deepEqual([hit.hits[0].title, hit.hits[0].author, hit.hits[0].tier, hit.hits[0].heading, hit.hits[0].snippet[1]], ['剪刀手入门', '测试作者', 'body', '核心观点', '剪刀手']);
+    assert.deepEqual(keys('入门 批量'), ['1']);            // 一个词在标题、一个在正文，也算全部命中
+    assert.deepEqual(keys('Scis'), ['2']);                 // 英文词按前缀匹配
+    assert.deepEqual(keys('另一位作者'), ['7']);            // 作者也能搜
+    assert.deepEqual(f.kb.search('探店').hits.map(h => [h.key, h.kind, h.tier, h.title]), [['7', 'bare', 'head', '木工坊探店实拍']]);
+    assert.deepEqual(f.kb.search('榫卯').hits.map(h => [h.key, h.kind, h.tier, h.snippet[1]]), [['8', 'text', 'source', '榫卯']]);
+    const transcript = f.kb.search('口语原稿');
+    assert.deepEqual([[...transcript.hits.map(h => h.key)].sort(), transcript.hits[0].tier, transcript.hits[0].heading], [['1', '2', '3'], 'source', '完整转写稿']);
+
+    const loose = f.kb.search('入门 火星');
+    assert.deepEqual([loose.mode, loose.hits.map(h => h.key)], ['loose', ['1']]);   // 没有哪一篇两个词都有
+    assert.deepEqual([f.kb.search('火星').hits, f.kb.search('  ').hits, f.kb.search('"*) OR (').hits], [[], [], []]);
+
+    // 笔记改了重切：同一个词在正文里的排在转写稿里的前面。
+    writeFileSync(join(f.home, 'notes', '3.md'), '---\n标题: "节拍网格"\n---\n# 核心观点\n\n口语原稿要先整理再用。\n');
+    f.kb.syncDocs();
+    assert.deepEqual(f.kb.syncChunks(), { total: 6, added: 0, changed: 1, removed: 0, chunks: 13 });
+    assert.deepEqual([keys('口语原稿')[0], f.kb.search('口语原稿').hits[0].tier], ['3', 'body']);
+    // 笔记文件没了：正文搜不到了，账本里的标题还在，按只有标题的收藏算。
+    rmSync(join(f.home, 'notes', '2.md'));
+    f.kb.syncDocs();
+    assert.deepEqual(f.kb.syncChunks(), { total: 6, added: 0, changed: 1, removed: 0, chunks: 11 });
+    assert.deepEqual([keys('Scissor'), f.kb.search('原标题二').hits.map(h => [h.key, h.kind])], [[], [['2', 'bare']]]);
+    // 用户删掉的记录：从索引里删掉。
+    const ledger = new DatabaseSync(join(f.home, 'index.sqlite'));
+    ledger.prepare("UPDATE items SET skip_reason='user_deleted' WHERE id='7'").run(); ledger.close();
+    assert.equal(f.kb.syncChunks().removed, 1);
+    assert.deepEqual(keys('探店'), []);
+
+    // 主题和综述：名称、说明和综述里的话都能搜到，列在主题一栏。
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
+    writeFileSync(join(f.home, 'notes', '2.md'), '---\n标题: "剪刀手进阶"\n---\n# 核心观点\n\n用 Scissor Hand 把剪辑写成脚本。\n');
+    f.kb.syncDocs();
+    await extractPending(f.kb, f.kb.pendingDocs({}), { ...quiet, fetchImpl: fakeModel(), concurrency: 1 });
+    await themePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    await pagePass(f.kb, { ...quiet, fetchImpl: fakeModel() });
+    const synced = f.kb.syncChunks();
+    assert.deepEqual([synced.added, synced.changed], [1, 1]);   // 新出现的主题；笔记 2 从只有标题变回笔记
+    const theme = f.kb.search('写成脚本');
+    assert.deepEqual(theme.themes.map(t => [t.name, t.domain, t.page, t.tier, t.heading]), [['剪刀手用法', '软件与开发工具', true, 'page', '用法']]);
+    assert.deepEqual(theme.hits.map(h => h.key), ['2']);
+    assert.deepEqual(f.kb.search('命令行剪辑工具剪刀手').themes.map(t => t.name), ['剪刀手用法']);   // 主题说明
+    // 只有综述同时讲到两个词、没有哪篇笔记同时讲到：放宽，把各讲到一个词的笔记也列出来。
+    const both = f.kb.search('批量 脚本');
+    assert.deepEqual([both.mode, both.themes.map(t => t.name), [...both.hits.map(h => h.key)].sort()], ['loose', ['剪刀手用法'], ['1', '2']]);
+    assert.deepEqual(f.kb.search('剪刀手').concepts.map(c => c.name), ['剪刀手']);
+    assert.equal(f.kb.catalog().search, true);
+  } finally { f.kb.close(); f.cleanup(); }
+});
+
+test('控制台搜索接口：全文索引没建时返回 ready:false，建好后返回命中的笔记和片段', async () => {
+  const f = fixture();
+  const { createConsole } = await import('../console.mjs');
+  const app = createConsole({ home: f.home, scheduler: { status: () => ({ installed: false }), plan: () => null } });
+  const url = await app.listen(0);
+  const search = async q => (await fetch(`${url}/api/search?q=${encodeURIComponent(q)}`)).json();
+  try {
+    assert.deepEqual(await search('剪刀手'), { ready: false });
+    f.kb.syncDocs();
+    assert.deepEqual(await search('剪刀手'), { ready: false });
+    f.kb.syncChunks();
+    const r = await search('批量处理');
+    assert.deepEqual([r.ready, r.mode, r.hits.map(h => [h.key, h.kind, h.title, h.snippet[1]])], [true, 'all', [['1', 'note', '剪刀手入门', '批量处理']]]);
+    assert.equal(new RegExp(r.marks.join('|'), 'giu').test('适合批量处理。'), true);
+    assert.equal((await (await fetch(`${url}/api/search?q=${encodeURIComponent('口语')}&limit=2`)).json()).hits.length, 2);
+  } finally { await new Promise(r => app.server.close(r)); f.kb.close(); f.cleanup(); }
 });

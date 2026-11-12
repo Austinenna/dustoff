@@ -13,7 +13,7 @@ if(document.querySelector('meta[name="dustoff-access"]')?.content==='1'){const f
 const PAGES={overview:'今日',pending:'收件箱',notes:'知识库',videos:'媒体库',materials:'素材箱',collection:'收藏记录',pipeline:'流水线',health:'健康',settings:'设置'};
 const ALIASES={results:['notes'],run:['pending'],galleries:['videos','gallery'],posts:['videos','post'],schedule:['pipeline','schedule'],history:['pipeline','history'],account:['pipeline','sources'],models:['settings','models'],rules:['settings','rules'],storage:['settings','storage'],api:['settings','api']};
 const state={route:'overview',overview:null,settings:null,index:null,library:null,insights:null,
-  kb:{id:null,page:false,cat:'all',theme:null,concept:null,read:'all',tag:null,platform:'all',type:'all',q:'',view:'read',kind:'note',list:true},
+  kb:{id:null,page:false,cat:'all',theme:null,concept:null,read:'all',tag:null,platform:'all',type:'all',q:'',search:null,view:'read',kind:'note',list:true},
   media:{tab:'video',platform:'all',q:'',page:1},inbox:{id:null,page:1},
   collection:{q:'',status:'all',page:1,platform:'all'},materials:{topic:'all'},settingsTab:'models',
   runs:[],runId:null,logKind:'business',runPage:1,selection:'',lookup:''};
@@ -275,7 +275,18 @@ const dom=n=>kn()?(kd(n)?.domain||'未分类'):(n.category||'未分类');
 // 主题的综述页状态：null 没有综述，new 没看过，seen 看过现在这一版，updated 看过之后重写过。
 const pageState=t=>{if(!t?.page_hash)return null;const r=kn()?.pageReads?.[`${t.domain}｜${t.name}`];return !r?'new':r.hash===t.page_hash?'seen':'updated';};
 const pageMark=t=>{const st=pageState(t);return st?`<i class="pg ${st}" title="${st==='seen'?'综述已看':st==='updated'?'综述在你看过之后有更新':'有综述，还没看'}"></i>`:'';};
-const filtered=()=>{const k=state.kb,q=k.q.trim().toLowerCase();return (state.index||[]).filter(n=>(k.cat==='all'||dom(n)===k.cat)&&(k.theme===null||!!kd(n)?.themes.includes(k.theme))&&(k.concept===null||!!kd(n)?.concepts.some(c=>c.id===k.concept))&&(k.platform==='all'||n.platform===k.platform)&&(k.tag===null||n.tags.includes(k.tag))&&(k.type==='all'||(k.type==='note'?n.has_note:!n.has_note))&&(k.read==='all'||(k.read==='unread'?!n.read_at:k.read==='read'?!!n.read_at:k.read==='evergreen'?evergreen(n.decay):n.decay&&!evergreen(n.decay)))&&(!q||[n.title,n.author,n.id,...n.tags].join(' ').toLowerCase().includes(q)));};
+// 全文搜索：结果已按相关程度排好，放在 state.kb.search；全文索引没建或请求失败时，退回在浏览器里按标题、作者、标签筛选。
+let lastSearch=null;
+async function searchFor(q){if(lastSearch?.q===q&&Date.now()-lastSearch.at<30000)return lastSearch;const r=await api('search?'+query({q,limit:200})).catch(()=>({ready:false}));return lastSearch={...r,q,at:Date.now()};}
+const kbSearch=()=>{const s=state.kb.search,q=state.kb.q.trim();return q&&s?.ready&&s.q===q?s:null;};
+// 命中的片段：奇数位是命中的词。
+const snip=parts=>parts.map((p,i)=>i%2?`<mark>${esc(p)}</mark>`:esc(p)).join('');
+// 在一小段文字（标题、小节名）里标出命中的词。
+const markRe=marks=>{try{return new RegExp(marks.join('|'),'giu');}catch{return null;}};
+const hl=(text,re)=>{if(!re)return esc(text);let out='',pos=0;for(const m of String(text).matchAll(re)){if(!m[0])continue;out+=esc(text.slice(pos,m.index))+`<mark>${esc(m[0])}</mark>`;pos=m.index+m[0].length;}return out+esc(String(text).slice(pos));};
+// 命中在转写稿里的笔记，打开时直接看格式化转写。
+const kindFor=id=>kbSearch()?.hits.find(h=>h.key===id)?.tier==='source'?'formatted':'note';
+const filtered=()=>{const k=state.kb,s=kbSearch(),q=s?'':k.q.trim().toLowerCase(),rank=s&&new Map(s.hits.map((h,i)=>[h.key,i]));const list=(state.index||[]).filter(n=>(!rank||rank.has(n.id))&&(k.cat==='all'||dom(n)===k.cat)&&(k.theme===null||!!kd(n)?.themes.includes(k.theme))&&(k.concept===null||!!kd(n)?.concepts.some(c=>c.id===k.concept))&&(k.platform==='all'||n.platform===k.platform)&&(k.tag===null||n.tags.includes(k.tag))&&(k.type==='all'||(k.type==='note'?n.has_note:!n.has_note))&&(k.read==='all'||(k.read==='unread'?!n.read_at:k.read==='read'?!!n.read_at:k.read==='evergreen'?evergreen(n.decay):n.decay&&!evergreen(n.decay)))&&(!q||[n.title,n.author,n.id,...n.tags].join(' ').toLowerCase().includes(q)));return rank?list.sort((a,b)=>rank.get(a.id)-rank.get(b.id)):list;};
 function notesPage(){return `<div class="page" id="kb">${empty('正在读取…')}</div>`;}
 async function loadNotes(){const epoch=pageEpoch;await Promise.all([ensureIndex(true),ensureKnowledge(true)]);if(epoch!==pageEpoch)return;renderNotes();}
 function renderNotes(){
@@ -295,8 +306,11 @@ function renderNotes(){
   if(k.view==='topics'){
     $('#kb').innerHTML=headHtml+`<div class="topics">${cats.map(([c,n])=>{const ns=all.filter(x=>(x.category||'未分类')===c);return `<button type="button" class="card topic-card" data-action="kb-facet" data-facet="cat" data-value="${esc(c)}"><h3><span class="sw" style="width:10px;height:10px;background:${catColor(c==='未分类'?null:c)}"></span>${esc(c)}<small style="margin-left:auto;font-weight:400">${n} 篇</small></h3><span class="bar"><i style="width:${Math.min(100,n/Math.max(1,cats[0][1])*100)}%;background:${catColor(c==='未分类'?null:c)}"></i></span><ul>${ns.slice(0,3).map(x=>`<li>${esc(x.title)}</li>`).join('')}</ul><span class="row">${[...new Set(ns.flatMap(x=>x.tags))].slice(0,4).map(t=>chip('#'+esc(t),'outline')).join('')}</span></button>`;}).join('')||empty('还没有笔记')}</div>`;return;
   }
-  if(!list.some(n=>n.id===k.id))k.id=list[0]?.id||null;
+  const s=kbSearch(),hitOf=new Map(s?s.hits.map(h=>[h.key,h]):[]),re=s&&markRe(s.marks);
+  if(!list.some(n=>n.id===k.id)){k.id=list[0]?.id||null;if(s)k.kind=kindFor(k.id);}
   const n=all.find(x=>x.id===k.id);
+  const loose=s?.mode==='loose'&&list.length>0,found=s&&(loose||s.themes.length||s.concepts.length)?`<div class="kb-found">${loose?'<small>没有哪一篇包含全部搜索词，下面是部分相关的</small>':''}${s.themes.map(t=>`<button type="button" class="chip" data-action="kb-theme" data-cat="${esc(t.domain)}" data-value="${t.id}" title="${esc(t.snippet.join(''))}">${t.page?'综述':'主题'} · ${esc(t.name)}</button>`).join('')}${s.concepts.map(c=>`<button type="button" class="chip outline" data-action="kb-facet" data-facet="concept" data-value="${c.id}" data-clear-q="1" title="${c.notes} 篇笔记讲到，点开看这些笔记">概念 · ${esc(c.name)}</button>`).join('')}</div>`:'';
+  const hitLine=x=>{const h=hitOf.get(x.id);return h&&h.tier!=='head'?`<span class="hit">${h.heading?`<i>${hl(h.heading,re)}</i>`:''}${snip(h.snippet)}</span>`:'';};
   const facet=(f,v,label,c,dot='')=>`<button type="button" data-action="kb-facet" data-facet="${f}" data-value="${esc(v)}" aria-pressed="${String(k[f==='tag'?'tag':f])===String(v)}">${dot}<span>${label}</span><span>${c}</span></button>`;
   const theme=K?.themes.find(t=>t.id===k.theme),concept=K?.concepts[k.concept];
   const seenItems=new Set(K?K.themes.filter(t=>['seen','updated'].includes(pageState(t))).flatMap(t=>all.filter(x=>kd(x)?.themes.includes(t.id)).map(x=>x.id)):[]);
@@ -310,8 +324,8 @@ function renderNotes(){
       <div class="facet"><div class="nav-label">来源</div>${['douyin','bilibili','x'].map(p=>facet('platform',p,pf(p),count(x=>x.platform===p))).join('')}</div>
       ${count(x=>!x.has_note)?`<div class="facet"><div class="nav-label">类型</div>${facet('type','note','知识笔记',count(x=>x.has_note))}${facet('type','text','仅文字稿',count(x=>!x.has_note))}</div>`:''}
     </aside>
-    <div class="kb-list"><div class="tools">${searchField(k.q,`在 ${list.length} 篇中搜索标题、作者、标签`,'kb-search')}</div>${about}
-      <div class="kb-items" id="kb-items">${list.map(x=>`<button type="button" class="kb-item" data-action="kb-select" data-id="${esc(x.id)}" aria-pressed="${!k.page&&x.id===k.id}"><b>${esc(x.title)}</b><span class="m">${pf(x.platform,false)}${K?kd(x)?`<span style="color:${catColor(dom(x))}">●</span>`:'':x.category?`<span style="color:${catColor(x.category)}">●</span>`:''}<span>${esc(x.author||'未知作者')}</span><span>· ${esc(fmt(x.at))}</span>${x.has_note?'':tag('文字稿')}${!x.read_at&&seenItems.has(x.id)?'<span class="covered" title="你看过它所在主题的综述，原笔记还没读">综述已看</span>':''}${x.read_at?'':'<span class="unread"></span>'}</span></button>`).join('')||empty(k.q?'没有找到匹配的笔记':'这个筛选下没有笔记')}</div>
+    <div class="kb-list"><div class="tools">${searchField(k.q,K?.search?'搜索标题和正文，多个词用空格分开':`在 ${list.length} 篇中搜索标题、作者、标签`,'kb-search')}</div>${about}${found}
+      <div class="kb-items" id="kb-items">${list.map(x=>`<button type="button" class="kb-item" data-action="kb-select" data-id="${esc(x.id)}" aria-pressed="${!k.page&&x.id===k.id}"><b>${hitOf.has(x.id)?hl(x.title,re):esc(x.title)}</b>${hitLine(x)}<span class="m">${pf(x.platform,false)}${K?kd(x)?`<span style="color:${catColor(dom(x))}">●</span>`:'':x.category?`<span style="color:${catColor(x.category)}">●</span>`:''}<span>${esc(x.author||'未知作者')}</span><span>· ${esc(fmt(x.at))}</span>${x.has_note?'':tag('文字稿')}${!x.read_at&&seenItems.has(x.id)?'<span class="covered" title="你看过它所在主题的综述，原笔记还没读">综述已看</span>':''}${x.read_at?'':'<span class="unread"></span>'}</span></button>`).join('')||empty(k.q?'没有找到匹配的笔记':'这个筛选下没有笔记')}</div>
     </div>
     <article class="reader" id="reader">${n?'':empty('还没有可阅读的内容')}</article>
   </section>`;
@@ -359,10 +373,30 @@ async function loadDocument(){
     const K=kn(),d=kd(n),links=d&&(d.themes.length||d.concepts.length)?`<div class="links">${d.themes.map(id=>{const t=K.themes.find(x=>x.id===id);return t?`<button type="button" class="chip" data-action="kb-theme" data-cat="${esc(t.domain)}" data-value="${t.id}" title="主题：${esc(t.summary)}">${esc(t.name)}</button>`:'';}).join('')}${d.concepts.map(c=>K.concepts[c.id]?`<button type="button" class="chip outline" data-action="kb-facet" data-facet="concept" data-value="${c.id}" title="概念：${esc(K.concepts[c.id].summary)}">${c.role==='主题'?'★ ':''}${esc(K.concepts[c.id].name)}</button>`:'').join('')}</div>`:'';
     const body=n.has_note?renderMarkdown(parts[kind],{headingOffset:1}):`<div class="raw">${esc(doc.content)}</div>`;
     $('#reader').innerHTML=bar(!!parts.formatted)+`<div class="article"><div class="kicker">${kn()?kd(n)?`<select class="seg-select" data-domain-for="${esc(n.id)}" aria-label="大类" title="${esc(kd(n).manual?'你手动指定的大类':'模型的归类理由：'+kd(n).note)}。可以改">${kn().all.map(c=>`<option ${c===dom(n)?'selected':''}>${esc(c)}</option>`).join('')}${kd(n).manual?'<option value="">交回模型判断</option>':''}</select>`:'':n.category?chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(n.category)}"></span>${esc(n.category)}`):''}${n.decay?chip(decayLabel(n.decay),evergreen(n.decay)?'green':'amber'):''}${n.has_note?'':chip('原始文字稿')}${n.archive_only?chip('只存原帖'):''}</div><h1>${esc(n.title)}</h1><div class="byline">${pf(n.platform)}<span>${esc(n.author||'未知作者')}</span>${n.duration_s?`<span>${esc(duration(n.duration_s))}</span>`:''}<span>收藏 ${esc(fmt(n.collected_at))}</span><span>整理 ${esc(fmt(n.at))}</span>${n.has_note?button('在文件夹中显示','open',`data-kind="folder" data-file-kind="note" data-id="${esc(n.id)}"`,'quiet sm'):''}</div><div class="prose">${body}</div>${links}${n.tags.length?`<div class="tags">${n.tags.map(t=>chip('#'+esc(t),'outline')).join('')}</div>`:''}</div>`;
+    const found=kbSearch(),hit=found?.hits.find(h=>h.key===n.id);if(hit)markHits($('#reader .article'),found.marks,hit.tier==='head'?'':hit.heading);
     if(!n.read_at&&keptUnread!==n.id){api('read',{id:n.id,read:true}).then(()=>{n.read_at=Date.now()/1000;if(epoch!==docEpoch)return;document.querySelector(`.kb-item[data-id="${CSS.escape(n.id)}"] .unread`)?.remove();const t=$('#reader [data-action="toggle-read"]');if(t)t.innerHTML=`${ic('check',14)}标为未读`;}).catch(()=>{});}
   }catch(e){if(epoch===docEpoch)$('#reader').innerHTML=bar(false)+empty(e.message);}
 }
-function kbStep(dir){const list=filtered();if(!list.length)return;if(state.kb.page){state.kb.page=false;renderNotes();return;}const n=Math.max(0,list.findIndex(x=>x.id===state.kb.id));state.kb.id=list[(n+dir+list.length)%list.length].id;root.querySelectorAll('.kb-item').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.id===state.kb.id)));void loadDocument();}
+// 在阅读区标出搜索命中的词，并滚到命中的那一节。
+function markHits(el,marks,heading){
+  let re;try{re=new RegExp(marks.join('|'),'giu');}catch{return;}
+  const walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT,{acceptNode:t=>t.parentElement.closest('button,select,mark')?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT}),nodes=[];
+  while(walker.nextNode())nodes.push(walker.currentNode);
+  let count=0;
+  for(const t of nodes){
+    const text=t.nodeValue;let frag=null,pos=0;
+    for(const m of text.matchAll(re)){
+      if(!m[0]||count>=400)continue;
+      frag??=document.createDocumentFragment();frag.append(text.slice(pos,m.index));
+      const k=document.createElement('mark');k.textContent=m[0];frag.append(k);pos=m.index+m[0].length;count++;
+    }
+    if(frag){frag.append(text.slice(pos));t.replaceWith(frag);}
+  }
+  const hits=[...el.querySelectorAll('mark')];if(!hits.length)return;
+  const h=heading&&[...el.querySelectorAll('h2,h3,h4')].find(x=>x.textContent.trim()===heading);
+  ((h&&hits.find(x=>h.compareDocumentPosition(x)&Node.DOCUMENT_POSITION_FOLLOWING))||hits[0]).scrollIntoView({block:'center'});
+}
+function kbStep(dir){const list=filtered();if(!list.length)return;if(state.kb.page){state.kb.page=false;renderNotes();return;}const n=Math.max(0,list.findIndex(x=>x.id===state.kb.id));state.kb.id=list[(n+dir+list.length)%list.length].id;if(kbSearch())state.kb.kind=kindFor(state.kb.id);root.querySelectorAll('.kb-item').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.id===state.kb.id)));void loadDocument();}
 
 // ── 媒体库：视频、图集、X 原帖 ──
 function videosPage(){const m=state.media;return `<div class="page">${head('媒体库',`按原样保留的内容：视频保存高清原声，图集按原顺序${state.overview.x.enabled?'，X 每条书签都存原帖':''}`,`<span class="chip">${ic('clock',13)}保留占用 ${esc(bytes(state.overview.storage.savedUsed))}</span>`)}
@@ -852,19 +886,25 @@ async function go(hash){
 function navigate(hash){if(location.hash==='#'+hash)void go(hash);else location.hash=hash;}
 
 // ── ⌘K 搜索 ──
-let paletteItems=[],paletteIndex=0;
+let paletteItems=[],paletteIndex=0,paletteSearch=null,paletteTimer;
 function openPalette(){$('#palette').hidden=false;$('#scrim').hidden=false;$('#palette-input').value='';paletteIndex=0;renderPalette('');setTimeout(()=>$('#palette-input').focus(),20);ensureIndex().then(()=>{if(!$('#palette').hidden)renderPalette($('#palette-input').value);}).catch(()=>{});}
 function closePalette(){$('#palette').hidden=true;$('#scrim').hidden=true;}
 function renderPalette(raw){
-  const q=raw.trim().toLowerCase();
+  const q=raw.trim().toLowerCase(),s=paletteSearch?.ready&&paletteSearch.q===raw.trim()?paletteSearch:null;
   const pages=Object.entries(PAGES).filter(([,l])=>!q||l.includes(q)).map(([id,l])=>({g:'页面',label:l,icon:'arrow',run:()=>navigate(id)}));
-  const notes=(state.index||[]).filter(n=>q&&[n.title,n.author,...n.tags].join(' ').toLowerCase().includes(q)).slice(0,8).map(n=>({g:'笔记',label:n.title,icon:'note',sub:n.category||'',run:()=>openNote(n.id)}));
+  // 全文搜索的结果回来之前（或全文索引没建时），先按标题、作者、标签列出笔记。
+  const re=s&&markRe(s.marks);
+  const hitItem=h=>({g:h.kind==='bare'?'收藏':'笔记',label:h.title,re,icon:h.kind==='bare'?'bookmark':'note',snip:h.tier==='head'?null:h.snippet,run:()=>h.kind==='bare'?detail(h.key):openHit(h,s)});
+  const notes=s?[...s.themes.map(t=>({g:'主题',label:t.name,icon:'book',sub:t.page?'有综述':t.domain,run:()=>openTheme(t.domain,t.id)})),...s.hits.filter(h=>h.kind!=='bare').slice(0,8).map(hitItem),...s.hits.filter(h=>h.kind==='bare').slice(0,5).map(hitItem)]
+    :(state.index||[]).filter(n=>q&&[n.title,n.author,...n.tags].join(' ').toLowerCase().includes(q)).slice(0,8).map(n=>({g:'笔记',label:n.title,icon:'note',sub:n.category||'',run:()=>openNote(n.id)}));
   const id=/^(x?\d{6,}|BV[0-9A-Za-z]{10})$/.test(raw.trim())?[{g:'作品 ID',label:`查看作品 ${raw.trim()}`,icon:'list',run:()=>detail(raw.trim())}]:[];
   const acts=[{g:'操作',label:busy()?'查看本轮进度':'运行一轮',icon:'play',run:()=>busy()?navigate('pipeline'):manualRun()},{g:'操作',label:'切换明暗',icon:'moon',run:toggleTheme}].filter(a=>!q||a.label.includes(q));
   paletteItems=[...id,...pages,...notes,...acts];paletteIndex=Math.min(paletteIndex,Math.max(0,paletteItems.length-1));
-  let g='';$('#palette-results').innerHTML=paletteItems.map((it,n)=>{const h=it.g!==g?`<div class="grp">${it.g}</div>`:'';g=it.g;return h+`<button type="button" class="opt" data-action="palette-run" data-index="${n}" aria-selected="${n===paletteIndex}">${ic(it.icon,16)}<span>${esc(it.label)}</span>${it.sub?`<small>${esc(it.sub)}</small>`:''}</button>`;}).join('')||empty('没有结果');
+  let g='';$('#palette-results').innerHTML=paletteItems.map((it,n)=>{const h=it.g!==g?`<div class="grp">${it.g}</div>`:'';g=it.g;return h+`<button type="button" class="opt" data-action="palette-run" data-index="${n}" aria-selected="${n===paletteIndex}">${ic(it.icon,16)}<span>${it.re?hl(it.label,it.re):esc(it.label)}${it.snip?`<i class="snip">${snip(it.snip)}</i>`:''}</span>${it.sub?`<small>${esc(it.sub)}</small>`:''}</button>`;}).join('')||empty('没有结果');
 }
 function openTheme(cat,id){Object.assign(state.kb,{id:null,page:true,cat,theme:Number(id),concept:null,read:'all',tag:null,platform:'all',type:'all',q:'',view:'read',list:true});if(state.route==='notes'){document.body.classList.add('fit');renderNotes();}else navigate('notes');}
+// 从搜索面板打开一篇命中的笔记：带着搜索词过去，阅读区会标出命中的词。
+function openHit(h,s){Object.assign(state.kb,{id:h.key,page:false,cat:'all',theme:null,concept:null,read:'all',tag:null,platform:'all',type:'all',q:s.q,search:s,view:'read',list:false,kind:h.tier==='source'?'formatted':'note'});navigate('notes');if(state.route==='notes'&&state.index&&!state.index.some(n=>n.id===h.key))void loadNotes();}
 function openNote(id){Object.assign(state.kb,{id,page:false,cat:'all',theme:null,concept:null,read:'all',tag:null,platform:'all',type:'all',q:'',view:'read',list:false});navigate('notes');if(state.route==='notes'&&state.index&&!state.index.some(n=>n.id===id))void loadNotes();}
 function toggleTheme(){const r=document.documentElement,dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme:dark)').matches;r.dataset.theme=dark?'light':'dark';try{localStorage.setItem('dustoff.theme',r.dataset.theme);}catch{}}
 try{const t=localStorage.getItem('dustoff.theme');if(t==='dark'||t==='light')document.documentElement.dataset.theme=t;}catch{} // 外观只是本机偏好
@@ -919,8 +959,8 @@ root.addEventListener('click',async event=>{
     else if(a==='kb-page'){state.kb.page=true;renderNotes();}
     else if(a==='kb-note'){Object.assign(state.kb,{id,page:false,kind:'note',read:'all',q:''});if(!filtered().some(x=>x.id===id))Object.assign(state.kb,{cat:'all',theme:null,concept:null,tag:null,platform:'all',type:'all'});renderNotes();}
     else if(a==='page-read'){const read=b.dataset.read==='1';await api('page-read',{id:Number(b.dataset.value),read});await ensureKnowledge(true);if(read)renderNotes();else{state.kb.page=false;renderNotes();}notice(read?'已标为已看':'已标为没看过');}
-    else if(a==='kb-facet'){const f=b.dataset.facet,v=b.dataset.value;if(f==='cat')state.kb.theme=null;if(f==='tag')state.kb.tag=state.kb.tag===v?null:v;else if(f==='theme'||f==='concept')state.kb[f]=state.kb[f]===Number(v)?null:Number(v);else state.kb[f]=state.kb[f]===v&&f!=='read'&&f!=='cat'?'all':v;state.kb.page=f==='theme'&&state.kb.theme!==null;state.kb.view='read';state.kb.list=true;state.kb.id=null;renderNotes();}
-    else if(a==='kb-select'){const wasPage=state.kb.page;state.kb.page=false;state.kb.id=id;state.kb.kind='note';if(wasPage){renderNotes();return;}root.querySelectorAll('.kb-item').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.id===id)));if(matchMedia('(max-width:820px)').matches){state.kb.list=false;renderNotes();}else await loadDocument();}
+    else if(a==='kb-facet'){const f=b.dataset.facet,v=b.dataset.value;if(b.dataset.clearQ)state.kb.q='';if(f==='cat')state.kb.theme=null;if(f==='tag')state.kb.tag=state.kb.tag===v?null:v;else if(f==='theme'||f==='concept')state.kb[f]=state.kb[f]===Number(v)?null:Number(v);else state.kb[f]=state.kb[f]===v&&f!=='read'&&f!=='cat'?'all':v;state.kb.page=f==='theme'&&state.kb.theme!==null;state.kb.view='read';state.kb.list=true;state.kb.id=null;renderNotes();}
+    else if(a==='kb-select'){const wasPage=state.kb.page;state.kb.page=false;state.kb.id=id;state.kb.kind=kindFor(id);if(wasPage){renderNotes();return;}root.querySelectorAll('.kb-item').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.id===id)));if(matchMedia('(max-width:820px)').matches){state.kb.list=false;renderNotes();}else await loadDocument();}
     else if(a==='kb-list'){state.kb.list=!state.kb.list;renderNotes();}
     else if(a==='kb-step')kbStep(Number(b.dataset.step));
     else if(a==='kb-kind'){state.kb.kind=b.dataset.value;await loadDocument();}
@@ -955,9 +995,9 @@ root.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches?.('.mca
 async function mutate(path,data,message){const r=await api(path,data);await refreshOverview();notice(message);return r;}
 root.addEventListener('input',event=>{
   const input=event.target;
-  if(input.id==='kb-search'){state.kb.q=input.value;clearTimeout(searchTimer);searchTimer=setTimeout(()=>{const pos=input.selectionStart;renderNotes();const next=$('#kb-search');next?.focus();next?.setSelectionRange(pos,pos);},200);}
+  if(input.id==='kb-search'){state.kb.q=input.value;clearTimeout(searchTimer);searchTimer=setTimeout(async()=>{const q=state.kb.q.trim();if(q){const r=await searchFor(q);if(state.kb.q.trim()!==q)return;state.kb.search=r;state.kb.kind=kindFor(state.kb.id);}const el=$('#kb-search');if(!el)return;const pos=el.selectionStart;renderNotes();const next=$('#kb-search');next?.focus();next?.setSelectionRange(pos,pos);},220);}
   if(['collection-search','media-search'].includes(input.id)){const kind=input.id==='media-search'?'media':'collection';state[kind].q=input.value;state[kind].page=1;++listEpoch;clearTimeout(searchTimer);searchTimer=setTimeout(()=>{(kind==='media'?loadMedia():loadCollection()).catch(e=>notice(e.message,true));},250);}
-  if(input.id==='palette-input'){paletteIndex=0;renderPalette(input.value);}
+  if(input.id==='palette-input'){paletteIndex=0;renderPalette(input.value);clearTimeout(paletteTimer);const q=input.value.trim();if(q)paletteTimer=setTimeout(async()=>{const r=await searchFor(q);if($('#palette').hidden||$('#palette-input').value.trim()!==q)return;paletteSearch=r;renderPalette($('#palette-input').value);},220);}
   if(input.closest('#schedule-form'))schedulePreview();
 });
 root.addEventListener('change',event=>{const dn=event.target.dataset?.domainFor;if(dn){api('knowledge-domain',{id:dn,domain:event.target.value||null}).then(()=>ensureKnowledge(true)).then(()=>{notice(event.target.value?'大类已改，主题在下次运行时重新归纳':'已交回模型，下次运行时重新判断');renderNotes();}).catch(e=>notice(e.message,true));return;}if(event.target.id==='collection-status'){state.collection.status=event.target.value;state.collection.page=1;main.innerHTML=collectionPage();loadCollection().catch(e=>notice(e.message,true));}});

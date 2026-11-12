@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// dustoff / knowledge.mjs —— 第四段：给笔记定大类、抽出概念，建知识库索引 knowledge.sqlite。
+// dustoff / knowledge.mjs —— 第四段：给笔记定大类、抽出概念，建知识库索引 knowledge.sqlite；同时维护控制台搜索用的全文索引。
 //
 // 只读笔记和账本，只写 knowledge.sqlite；不改笔记、不改账本，所以不占流水线的锁。
 //
@@ -11,6 +11,7 @@
 //   node knowledge.mjs --rethemes      清空主题后每个大类从头归纳（改了归纳主题的指令后用）
 //   node knowledge.mjs --no-merge      只抽取，不做归并、主题归纳和综述
 //   node knowledge.mjs --no-pages      不写综述页
+//   node knowledge.mjs --index         只更新全文索引（笔记、文字稿、收藏标题、综述），不调用模型
 //   node knowledge.mjs --dry-run       只看有多少篇要抽，不调用模型
 //   node knowledge.mjs --report        只输出当前统计
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
@@ -194,6 +195,10 @@ async function main() {
 
   const sync = kb.syncDocs();
   log(`笔记 ${sync.total} 篇：新增 ${sync.added}，正文有改动 ${sync.changed}，已不存在 ${sync.removed}`);
+  // 全文索引不调用模型，放在最前面：后面抽取失败或没配密钥，新笔记也能先搜到。
+  const index = () => { const r = kb.syncChunks(); log(`全文索引：${r.total} 份内容共 ${r.chunks} 段，新增 ${r.added}，重切 ${r.changed}，删除 ${r.removed}`); };
+  index();
+  if (has('--index')) { kb.close(); return; }
   if (has('--rebuild')) { kb.reset(); log('已清空抽取结果，全部重抽'); }
   if (has('--rethemes')) { kb.resetThemes(); log('已清空主题，每个大类从头归纳'); }
   const limit = Number(valOf('--limit')) > 0 ? Number(valOf('--limit')) : 100000;
@@ -225,6 +230,7 @@ async function main() {
       }
     } catch (e) { stopped = e.message; log(`✗ ${e.message}`); }
   } else if (rest) log(`还有 ${rest} 篇没抽取，本轮不做归并、主题归纳和综述`);
+  index();   // 主题和综述在上面几步里会变，结束前再对齐一次
   console.log(JSON.stringify(kb.stats(), null, 2));
   if (stopped) process.exitCode = stopped.startsWith('连续') ? 1 : 5;
   else if (kb.failures().length || kb.pageFailures().length) process.exitCode = 2;
