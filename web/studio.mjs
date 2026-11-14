@@ -560,7 +560,7 @@ async function playVideo(id){
   const epoch=++dialogEpoch;drawerId=null;
   openDialog(`<div class="player-loading">${empty('正在读取视频…')}</div>`,'player-dialog');
   try{
-    const i=await api('item?'+query({id}));if(epoch!==dialogEpoch||!dialog.open)return;
+    const [i]=await Promise.all([api('item?'+query({id})),ensureDemo().catch(()=>null)]);if(epoch!==dialogEpoch||!dialog.open)return;
     // 先按未知方向渲染，读到视频尺寸后切换横屏或竖屏布局；优先尝试原片，避免默认降画质。
     dialog.innerHTML=`<button type="button" class="player-close" data-action="close-dialog" aria-label="关闭">${ic('x',18)}</button><div class="player">
       <div class="screen"><img class="screen-poster" src="api/video-poster?id=${encodeURIComponent(id)}" alt=""><video class="local-video" controls playsinline preload="metadata" aria-label="${esc(titleOf(i))}" data-compatible="false"></video></div>
@@ -568,7 +568,7 @@ async function playVideo(id){
         <div class="info-main"><div class="meta-line">${pf(i.platform)}<span>${esc(i.author||'未知作者')}</span><span>${esc(kindOf(i))}</span><span>${esc(mediaLabel(i))}</span></div>
           <h2 title="${esc(titleOf(i))}">${esc(titleOf(i))}</h2><p id="video-message" role="status" aria-live="polite">正在载入视频…</p></div>
         <div class="info-acts"><div class="row">${i.status==='review'?`${button(`${ic('video',14)}保存视频`,'quick-purpose',`data-id="${esc(id)}" data-purpose="video"`,'primary sm')}${button(`${ic('note',14)}知识笔记`,'quick-purpose',`data-id="${esc(id)}" data-purpose="note"`,'sm')}`:`${button(`${ic('bookmark',14)}加入素材箱`,'add-material',`data-id="${esc(id)}" data-kind="video"`,'primary sm')}${i.note_path||i.text_path?button(`${ic('note',14)}阅读笔记`,'read',`data-id="${esc(id)}"`,'sm'):''}${videoNoteButton(i)}`}</div>
-          <div class="row secondary">${sourceA(i)}${button('收藏详情','detail',`data-id="${esc(id)}"`,'quiet sm')}${button('兼容播放','prepare-video',`data-id="${esc(id)}"`,'quiet sm')}${button('外部播放器','open',`data-id="${esc(id)}" data-kind="video"`,'quiet sm')}${i.status==='review'?'':videoDeleteButton(i)}</div>${i.status==='review'?'<p class="muted">收件箱预下载，还没有存进视频收藏。</p>':videoNoteHint(i)}</div>
+          <div class="row secondary">${sourceA(i)}${demoButton(id)}${button('收藏详情','detail',`data-id="${esc(id)}"`,'quiet sm')}${button('兼容播放','prepare-video',`data-id="${esc(id)}"`,'quiet sm')}${button('外部播放器','open',`data-id="${esc(id)}" data-kind="video"`,'quiet sm')}${i.status==='review'?'':videoDeleteButton(i)}</div>${i.status==='review'?'<p class="muted">收件箱预下载，还没有存进视频收藏。</p>':videoNoteHint(i)}</div>
       </aside></div>`;
     const v=dialog.querySelector('video');
     // 视频画面出来之前用按比例完整显示的封面占位，避免封面被拉伸裁切。
