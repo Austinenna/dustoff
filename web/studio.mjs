@@ -1,17 +1,27 @@
 import {renderMarkdown} from './markdown.mjs';
 import {remainingLabel,loginFlow} from './login-ui.mjs';
 import {makePlan,nextOccurrence} from './schedule-plan.mjs';
+import {guest,now,snapshotAt,guestApi,resetGuest} from './guest.mjs';
 import {esc,PURPOSES,STATUSES,REASONS,SETTINGS,PLATFORM_LABELS,QUALITY_LABELS,intentLabel,fmt,bytes,duration,titleOf,mediaLabel,resultLabel,runSummary,splitNoteContent,sourceLink,evergreen,decayLabel,postState} from './studio-view.mjs';
 
 const root=document.querySelector('#dustoff-studio'),main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 const token=document.querySelector('meta[name="dustoff-token"]').content;
 const serverMode=document.querySelector('meta[name="dustoff-server"]')?.content==='1';
 if(serverMode){const env=document.querySelector('#env-label');env.textContent='prod';env.className='env prod';env.title='生产服务器';}
+// 演示站：只留看内容的页面；顶部说明数据从哪来、游客的操作存在哪。
+if(guest){
+  const env=document.querySelector('#env-label');env.textContent='demo';env.className='env prod';env.title='演示站';
+  for(const el of [document.querySelector('[data-nav="pipeline"]').closest('.nav-group'),document.querySelector('[data-nav="settings"]'),document.querySelector('#top-run')])el.style.display='none';
+  const bar=document.createElement('div');bar.className='guest-bar';bar.setAttribute('role','note');
+  bar.innerHTML=`<span><b>演示站</b>：内容是作者从自己的收藏里挑出来公开的，数据截至 ${new Date(snapshotAt||Date.now()).toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric'})}。你标的已读、收的素材、做的决定只存在这个浏览器里。</span><button type="button" data-action="guest-reset">清空我的操作</button>`;
+  document.querySelector('.workspace').prepend(bar);
+}
 if(document.querySelector('meta[name="dustoff-access"]')?.content==='1'){const form=document.createElement('form');form.method='post';form.action='auth/logout';form.innerHTML='<button class="button quiet" title="退出登录">退出</button>';document.querySelector('#side-tools').append(form);}
 
 // ── 路由：沿用旧地址，旧书签和 X 授权回调（#account）仍能打开对应页面 ──
 const PAGES={overview:'今日',pending:'收件箱',notes:'知识库',videos:'媒体库',materials:'素材箱',collection:'收藏记录',pipeline:'流水线',health:'健康',settings:'设置'};
-const ALIASES={results:['notes'],run:['pending'],galleries:['videos','gallery'],posts:['videos','post'],schedule:['pipeline','schedule'],history:['pipeline','history'],account:['pipeline','sources'],models:['settings','models'],rules:['settings','rules'],storage:['settings','storage'],api:['settings','api']};
+if(guest)for(const k of ['pipeline','health','settings'])delete PAGES[k];
+const ALIASES={results:['notes'],run:['pending'],galleries:['videos','gallery'],posts:['videos','post'],schedule:['pipeline','schedule'],history:['pipeline','history'],account:['pipeline','sources'],models:['settings','models'],rules:['settings','rules'],storage:['settings','storage'],api:['settings','api'],demo:['settings','demo']};
 const state={route:'overview',overview:null,settings:null,index:null,library:null,insights:null,
   kb:{id:null,page:false,cat:'all',theme:null,concept:null,read:'all',tag:null,platform:'all',type:'all',q:'',search:null,view:'read',kind:'note',list:true},
   media:{tab:'video',platform:'all',q:'',page:1},inbox:{id:null,page:1},
@@ -34,7 +44,9 @@ const PF={douyin:['抖音','抖'],bilibili:['B站','B'],x:['X','𝕏']};
 const pf=(p,label=true)=>{const v=PF[p]||PF.douyin;return `<span class="pf ${PF[p]?p:'douyin'}"><i>${v[1]}</i>${label?v[0]:''}</span>`;};
 const tag=(value,tone='')=>`<span class="tag ${tone}">${esc(value)}</span>`;
 const chip=(html,tone='')=>`<span class="chip ${tone}">${html}</span>`;
-const button=(label,action,attrs='',style='')=>serverMode&&action==='open'?'':`<button type="button" class="btn ${style}" data-action="${action}" ${attrs}>${label}</button>`;
+// 演示站里改动数据、打开本机文件的按钮不显示。
+const GUEST_HIDDEN=['open','delete-video','video-to-note','delete-item','retry','manual-run','prepare-video','demo-pick'];
+const button=(label,action,attrs='',style='')=>(serverMode||guest)&&action==='open'||guest&&GUEST_HIDDEN.includes(action)?'':`<button type="button" class="btn ${style}" data-action="${action}" ${attrs}>${label}</button>`;
 const empty=(text='暂无内容')=>`<div class="empty">${esc(text)}</div>`;
 const sourceA=(item,label='原作品')=>`<a class="btn quiet sm" href="${esc(sourceLink(item))}" target="_blank" rel="noopener noreferrer">${ic('ext',14)}${label}</a>`;
 const kindOf=i=>i.media_type==='gallery'?'图集':i.media_type==='post'?'帖子':duration(i.duration_s);
@@ -51,10 +63,12 @@ function cover(item,{cls='',badge='',pfb=false,ratio=''}={}){
 root.addEventListener('error',e=>{if(e.target.matches?.('.cover img'))e.target.remove();},true);
 function spark(values){const max=Math.max(1,...values),w=100,h=28;const pts=values.map((v,i)=>`${(i/Math.max(1,values.length-1))*w},${h-(v/max)*h*.9-1}`).join(' ');return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:28px;margin-top:4px"><polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;}
 const hm=ts=>{const d=new Date(ts);return Number.isNaN(d.getTime())?'—':d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});};
-function until(ts){const ms=new Date(ts)-Date.now();if(!Number.isFinite(ms))return '';if(ms<=60000)return '即将开始';const m=Math.round(ms/60000),h=Math.floor(m/60);return h?`还有 ${h} 小时 ${m%60} 分`:`还有 ${m} 分钟`;}
+function until(ts){const ms=new Date(ts)-now();if(!Number.isFinite(ms))return '';if(ms<=60000)return '即将开始';const m=Math.round(ms/60000),h=Math.floor(m/60);return h?`还有 ${h} 小时 ${m%60} 分`:`还有 ${m} 分钟`;}
 
 // ── 接口 ──
-async function api(path,data){
+// 演示站的请求先经过 guest.mjs：读者自己的状态在浏览器里，写请求不发给服务器。
+const api=(path,data)=>guest?guestApi(path,data,request):request(path,data);
+async function request(path,data){
   const response=await fetch('api/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-Dustoff-Token':token},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(20000)});
   if(response.status===401){location.href='./';throw new Error('请重新登录控制台');}
   const value=await response.json();if(!response.ok)throw new Error(value.error||'请求失败');return value;
@@ -82,9 +96,10 @@ function syncChrome(){
   const r=o.lastRun?.result;$('#health-dot').hidden=!(r&&(r.error||r.failures?.length||r.paused||Object.keys(r.pausedPlatforms||{}).length))&&!o.failed;
   const s=o.scheduler,card=$('#schedule-card');
   card.innerHTML=s.error?`<span class="row1"><span class="pulse off"></span>自动安排暂不可用</span><small>${esc(s.error).slice(0,60)}</small>`:s.loaded?`<span class="row1"><span class="pulse"></span>自动整理已开启</span><strong>${esc(hm(s.nextRun))}</strong><small>下一轮 · ${esc(until(s.nextRun))}</small>`:`<span class="row1"><span class="pulse off"></span>自动整理已关闭</span><small>可在流水线中开启</small>`;
-  const now=new Date(),hour=now.getHours();
+  const today=new Date(now()),hour=today.getHours();
   $('#greet-word').textContent=hour<5?'夜深了':hour<11?'早上好':hour<13?'中午好':hour<18?'下午好':'晚上好';
-  $('#greet-date').textContent=now.toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'short'});
+  $('#greet-date').textContent=today.toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'short'});
+  if(guest){card.removeAttribute('href');card.innerHTML=`<span class="row1"><span class="pulse off"></span>演示数据</span><strong>${esc(new Date(now()).toLocaleDateString('zh-CN',{month:'long',day:'numeric'}))}</strong><small>截至这一天，不会自动更新</small>`;return;}
   const top=$('#top-run');top.dataset.action=busy()?'go-pipeline':'manual-run';top.innerHTML=`${ic('play',15)}${busy()?'查看本轮进度':'运行一轮'}`;
   root.querySelectorAll('[data-idle]').forEach(b=>{b.disabled=busy();});
   if($('#run-status'))$('#run-status').innerHTML=executionPanel();
@@ -93,6 +108,9 @@ const overviewKey=o=>o&&JSON.stringify([o.notes,o.todayNotes,o.videos,o.gallerie
 async function refreshOverview(){const before=overviewKey(state.overview);state.overview=await api('overview');syncChrome();if(state.route==='overview'&&!dialog.open&&before!==overviewKey(state.overview)){state.today=null;await loadToday();}}
 async function ensureIndex(force=false){if(!state.index||force)state.index=(await api('notes-index')).items;return state.index;}
 async function ensureKnowledge(force=false){if(!state.kn||force)state.kn=await api('knowledge').catch(()=>({ready:false}));return state.kn;}
+// 演示站的挑选状态（正式控制台）：选了哪些、在哪、上次更新得怎样。演示站自己不用。
+async function ensureDemo(force=false){if(guest)return null;if(!state.demo||force)state.demo=await api('demo');return state.demo;}
+const demoButton=id=>{const d=state.demo;if(guest||!d?.configured)return '';const on=d.picks.includes(id);return button(`${ic(on?'check':'spark',14)}${on?'已选进演示站':'放进演示站'}`,'demo-pick',`data-id="${esc(id)}" data-picked="${on?0:1}" title="${on?'点一下从演示站移出；下次更新演示站时生效':'演示站更新时会复制这条的内容，游客能看到'}"`,'quiet sm');};
 async function ensureLibrary(force=false){if(!state.library||force){state.library=await api('library');syncChrome();}return state.library;}
 
 // ── 今日 ──
@@ -102,7 +120,7 @@ async function loadToday(){
   const [index,insights,review,galleries]=await Promise.all([ensureIndex(true),api('insights'),api('items?'+query({status:'review',size:4})),api('items?'+query({galleries:1,size:3})),ensureKnowledge(true)]);
   if(epoch!==pageEpoch)return;state.insights=insights;
   const o=state.overview,s=o.scheduler,p=o.policy,last=runSummary(o.lastRun),r=o.lastRun?.result||{};
-  const weekAgo=Date.now()/1000-7*86400,notes=index.filter(n=>n.has_note&&!n.archive_only),weekNotes=notes.filter(n=>n.at>=weekAgo).length,unread=notes.filter(n=>!n.read_at);
+  const weekAgo=now()/1000-7*86400,notes=index.filter(n=>n.has_note&&!n.archive_only),weekNotes=notes.filter(n=>n.at>=weekAgo).length,unread=notes.filter(n=>!n.read_at);
   const paused=Object.entries(r.pausedPlatforms||{});
   const lede=[o.review?`还有 <b>${o.review}</b> 条等你决定用途`:'',o.pending?`<b>${o.pending}</b> 条在排队整理`:''].filter(Boolean).join('，')+(paused.length?`。${paused.map(([k,v])=>`${esc(PLATFORM_LABELS[k]||k)}暂停：${esc(v)}`).join('；')}`:'')||'收件箱是空的，排队也已清空。';
   const todayNew=o.todayNew||{},newTotal=Object.values(todayNew).reduce((a,b)=>a+b,0);
@@ -112,7 +130,7 @@ async function loadToday(){
   // 推荐综述：没看过或看过之后重写过的，按「读这一页能覆盖几篇未读笔记」排。
   const K=kn(),unreadIds=new Set(unread.map(n=>n.id));
   const pages=K?K.themes.filter(t=>['new','updated'].includes(pageState(t))).map(t=>({t,cover:Object.entries(K.docs).filter(([id,d])=>unreadIds.has(id)&&d.themes.includes(t.id)).length})).sort((a,b)=>b.cover-a.cover||b.t.notes-a.t.notes).slice(0,4):[];
-  const warn=alerts();
+  const warn=guest?[]:alerts();
   const recent=[...o.recentVideos,...galleries.items].sort((a,b)=>(b.updated_at||0)-(a.updated_at||0)).slice(0,6);
   $('#today').innerHTML=`
   <section class="hero">
@@ -121,19 +139,19 @@ async function loadToday(){
       <p class="lede">${lede}${lede.endsWith('。')?'':'。'}</p>
       <div class="hero-cta"><a class="btn primary lg" href="#pending">${ic('inbox',16)}处理收件箱${o.review?` · ${o.review}`:''}</a><a class="btn lg" href="#notes" data-action="kb-unread">${ic('book',16)}读新笔记${unread.length?` · ${unread.length} 篇未读`:''}</a></div>
     </div>
-    <div class="card runcard">
+    ${guest?demoCard(o):`<div class="card runcard">
       <div class="row">${s.loaded?'<span class="pulse"></span>':'<span class="pulse off"></span>'}<b style="font-size:12.5px;font-weight:500">${s.error?'自动安排暂不可用':s.loaded?'自动整理已开启':'自动整理已关闭'}</b>${s.loaded?`<span class="chip" style="margin-left:auto">每 ${s.intervalHours} 小时</span>`:''}</div>
       <div><div class="eyebrow">${busy()?'正在运行':'下一轮'}</div><div class="big">${busy()?'进行中':s.loaded?esc(hm(s.nextRun)):'—'}</div><small>${busy()?`开始于 ${esc(fmt(o.execution.startedAt))}`:s.loaded?`${esc(until(s.nextRun))} · 上一轮${o.lastRun?esc(last.label):'暂无'}`:'在流水线中开启自动整理'}</small></div>
       <div class="ring-row">
         <svg class="ring" viewBox="0 0 54 54"><circle cx="27" cy="27" r="22" stroke="var(--sunken)"/><circle cx="27" cy="27" r="22" stroke="var(--accent)" stroke-dasharray="${C}" stroke-dashoffset="${C*(1-ratio)}" transform="rotate(-90 27 27)" stroke-linecap="round"/><text x="27" y="31" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">${Math.round(ratio*100)}%</text></svg>
         <dl class="kv"><dt>今日额度</dt><dd>${used} / ${total} 条</dd>${['douyin','bilibili','x'].filter(k=>k==='douyin'||o[k==='x'?'x':'bilibili']?.enabled).map(k=>`<dt>${PLATFORM_LABELS[k]}</dt><dd>${o.usedByPlatform?.[k]||0} / ${k==='douyin'?p.daily:k==='x'?o.x.daily:o.bilibili.daily}</dd>`).join('')}<dt>本月成本</dt><dd class="muted" data-cost="month">读取中…</dd></dl>
       </div>
-    </div>
+    </div>`}
   </section>
   <section class="card pipeline-band">
     <a class="stage" href="#collection"><span class="eyebrow"><b>1</b>收进来</span><strong>${newTotal}</strong><small>今天新收藏</small><span class="lanes">${Object.entries(todayNew).map(([k,v])=>`${pf(k)} ${v}`).join(' ')||'暂无'}</span></a>
     <a class="stage ${o.review?'attn':''}" href="#pending"><span class="eyebrow"><b>2</b>等你决定</span><strong>${o.review}</strong><small>需要你选用途</small><span class="lanes">${o.review?'点开逐条处理':'都处理完了'}</span></a>
-    <a class="stage" href="#pipeline"><span class="eyebrow"><b>3</b>排队整理</span><strong>${o.pending}</strong><small>保存视频 · 转写 · 整理</small><span class="lanes">${paused.map(([k])=>chip(`<span class="dot"></span>${esc(PLATFORM_LABELS[k]||k)}暂停中`,'amber')).join('')||(busy()?chip('<span class="dot"></span>正在运行','green'):'')}</span></a>
+    <a class="stage" href="${guest?'#collection':'#pipeline'}"><span class="eyebrow"><b>3</b>排队整理</span><strong>${o.pending}</strong><small>保存视频 · 转写 · 整理</small><span class="lanes">${paused.map(([k])=>chip(`<span class="dot"></span>${esc(PLATFORM_LABELS[k]||k)}暂停中`,'amber')).join('')||(busy()?chip('<span class="dot"></span>正在运行','green'):'')}</span></a>
     <a class="stage" href="#notes"><span class="eyebrow"><b>4</b>变成知识</span><strong>${o.notes}</strong><small>笔记 · 本周 +${weekNotes}</small>${spark(outputs)}</a>
   </section>
   ${warn.length?`<section class="card alert-strip">${warn.join('')}</section>`:''}
@@ -151,7 +169,14 @@ async function loadToday(){
         <div class="r"><div class="sec-head" style="margin-bottom:4px"><h2 style="font-size:13.5px">还没读过的</h2><span class="sub">${unread.length} 篇</span></div>${unread.slice(0,5).map(n=>`<button type="button" class="list-item" data-action="read" data-id="${esc(n.id)}"><span class="unread"></span><span>${esc(n.title)}</span><small>${esc(fmt(n.at))}</small></button>`).join('')||'<p class="muted" style="font-size:13px">都读过了。</p>'}</div></section>`:''}
       <section><div class="sec-head"><h2>最近保存的视频与图集</h2><a class="more" href="#videos">媒体库 ›</a></div><div class="media-grid media-strip">${recent.map(i=>mediaCard(i,{uniform:true})).join('')||empty('选择「保存视频」后，保留的视频会显示在这里')}</div></section>
   </div>`;
-  void fillMonthCost(epoch);
+  if(!guest)void fillMonthCost(epoch);
+}
+// 演示站的今日页右上角：说明数据截至哪天、有多少条，代替运行状态和成本。
+function demoCard(o){
+  const d=o.demo;
+  return `<div class="card runcard"><div class="row"><span class="pulse off"></span><b style="font-size:12.5px;font-weight:500">演示数据</b></div>
+    <div><div class="eyebrow">截至</div><div class="big">${esc(new Date(now()).toLocaleDateString('zh-CN',{month:'numeric',day:'numeric'}))}</div><small>作者从正式数据里挑了 ${d?.picks??o.total} 条公开，之后不会自动更新</small></div>
+    <dl class="kv"><dt>笔记</dt><dd>${o.notes} 篇</dd><dt>视频与图集</dt><dd>${o.videos+(o.galleries||0)} 条</dd><dt>X 原帖</dt><dd>${o.platforms?.x||0} 条</dd><dt>等你决定</dt><dd>${o.review} 条</dd></dl></div>`;
 }
 // ── 成本（AI 网关按单价估算，不是厂商账单）──
 const COST_LABELS={router:'用途判断',asr:'转写',note:'笔记'};
@@ -181,9 +206,9 @@ async function fillItemCost(id,epoch){
 let resurfaceShift=0;
 function pickResurface(notes){
   // 重温：一周前收藏的笔记，未读优先；同一天内固定，点“换一篇”轮换。
-  const old=notes.filter(n=>n.collected_at<Date.now()/1000-7*86400);const pool=old.length?old:notes;if(!pool.length)return null;
+  const old=notes.filter(n=>n.collected_at<now()/1000-7*86400);const pool=old.length?old:notes;if(!pool.length)return null;
   const sorted=[...pool].sort((a,b)=>(!!a.read_at-!!b.read_at)||(a.collected_at-b.collected_at));
-  const day=Math.floor(Date.now()/86400000);return sorted[(day+resurfaceShift)%Math.min(sorted.length,12)];
+  const day=Math.floor(now()/86400000);return sorted[(day+resurfaceShift)%Math.min(sorted.length,12)];
 }
 const CAT_COLORS=['#C2703D','#5B7FC7','#2C8A6A','#8A5BC7','#C79A3D','#C75B6E','#4E9AA8','#7A8C3D'];
 const catColor=c=>c?CAT_COLORS[hue(c)%CAT_COLORS.length]:'var(--faint)';
@@ -211,7 +236,7 @@ function mediaCard(i,{big=false,uniform=false}={}){
 }
 
 // ── 收件箱：只放需要你决定的条目 ──
-function pendingPage(){return `<div class="page">${head('收件箱','模型拿不准的收藏在这里由你决定。键盘 <span class="kbd">N</span> 笔记 · <span class="kbd">V</span> 视频 · <span class="kbd">D</span> 放弃 · <span class="kbd">J</span>/<span class="kbd">K</span> 上下切换',`<span class="chip">${ic('clock',13)}${state.overview.scheduler.loaded?`决定后在下一轮 ${esc(hm(state.overview.scheduler.nextRun))} 处理`:'决定后在下一轮运行时处理'}</span>`)}<div id="inbox">${empty('正在读取…')}</div></div>`;}
+function pendingPage(){return `<div class="page">${head('收件箱','模型拿不准的收藏在这里由你决定。键盘 <span class="kbd">N</span> 笔记 · <span class="kbd">V</span> 视频 · <span class="kbd">D</span> 放弃 · <span class="kbd">J</span>/<span class="kbd">K</span> 上下切换',guest?`<span class="chip">${ic('clock',13)}演示站：你的决定只记在这个浏览器里</span>`:`<span class="chip">${ic('clock',13)}${state.overview.scheduler.loaded?`决定后在下一轮 ${esc(hm(state.overview.scheduler.nextRun))} 处理`:'决定后在下一轮运行时处理'}</span>`)}<div id="inbox">${empty('正在读取…')}</div></div>`;}
 async function loadPending(){
   const epoch=++listEpoch,page=pageEpoch;
   const data=await api('items?'+query({status:'review',page:state.inbox.page,size:20}));
@@ -222,7 +247,7 @@ async function loadPending(){
 }
 function renderInbox(){
   const data=state.inbox.data,o=state.overview,i=data.items.find(x=>x.id===state.inbox.id);
-  const queueLink=`<a class="card queue-link" href="#pipeline">${ic('flow',16)}<span><b>另有 ${o.pending} 条在排队自动处理</b><small>不需要你动手 · ${o.scheduler.loaded?`下一轮 ${esc(hm(o.scheduler.nextRun))} 开始`:'自动整理已关闭，可手动运行'}</small></span><span class="go">在流水线查看 ›</span></a>`;
+  const queueLink=guest?'':`<a class="card queue-link" href="#pipeline">${ic('flow',16)}<span><b>另有 ${o.pending} 条在排队自动处理</b><small>不需要你动手 · ${o.scheduler.loaded?`下一轮 ${esc(hm(o.scheduler.nextRun))} 开始`:'自动整理已关闭，可手动运行'}</small></span><span class="go">在流水线查看 ›</span></a>`;
   if(!i){$('#inbox').innerHTML=`<section class="card" style="padding:48px 24px;text-align:center;margin-bottom:20px"><h2 style="font-size:18px;font-weight:600">收件箱清空了</h2><p class="muted" style="margin-top:6px">需要你判断用途的收藏会出现在这里。</p></section>${queueLink}`;return;}
   const bili=i.platform==='bilibili';
   $('#inbox').innerHTML=`<div class="inbox">
@@ -360,11 +385,12 @@ async function loadPage(){
 }
 async function loadDocument(){
   const epoch=++docEpoch,k=state.kb,list=filtered(),n=state.index.find(x=>x.id===k.id);if(!n)return;
+  await ensureDemo().catch(()=>null);if(epoch!==docEpoch)return;
   if(keptUnread!==n.id)keptUnread=null;
   const pos=list.findIndex(x=>x.id===n.id);
   const bar=formatted=>`<div class="reader-bar">${button(`${ic(k.list?'collapse':'expand',15)}${k.list?'收起列表':'展开列表'}`,'kb-list','title="收起或展开列表（[）"','quiet sm')}${k.list?'':`<span class="pager">${button(ic('up',14),'kb-step','data-step="-1" title="上一篇（K）" aria-label="上一篇"','quiet sm')}<small class="num">${pos+1} / ${list.length}</small>${button(ic('down',14),'kb-step','data-step="1" title="下一篇（J）" aria-label="下一篇"','quiet sm')}</span>`}
     ${n.has_note?`<div class="seg">${[['note','知识笔记'],...(formatted?[['formatted','格式化转写']]:[])].map(([v,l])=>`<button type="button" data-action="kb-kind" data-value="${v}" aria-pressed="${k.kind===v||(!formatted&&v==='note')}">${l}</button>`).join('')}</div>`:'<span style="margin-right:auto"></span>'}
-    ${button(`${ic('check',14)}${n.read_at?'标为未读':'标为已读'}`,'toggle-read',`data-id="${esc(n.id)}"`,'quiet sm')}${button(`${ic('bookmark',14)}加入素材箱`,'add-material',`data-id="${esc(n.id)}" data-kind="${n.media_type==='post'?'post':'note'}" data-from-reader="1"`,'quiet sm')}${n.has_note?button(`${ic('ext',14)}Obsidian`,'open',`data-kind="note" data-id="${esc(n.id)}"`,'quiet sm'):''}${sourceA(n,n.platform==='x'?'原帖':'原视频')}</div>`;
+    ${button(`${ic('check',14)}${n.read_at?'标为未读':'标为已读'}`,'toggle-read',`data-id="${esc(n.id)}"`,'quiet sm')}${button(`${ic('bookmark',14)}加入素材箱`,'add-material',`data-id="${esc(n.id)}" data-kind="${n.media_type==='post'?'post':'note'}" data-from-reader="1"`,'quiet sm')}${n.has_note?button(`${ic('ext',14)}Obsidian`,'open',`data-kind="note" data-id="${esc(n.id)}"`,'quiet sm'):''}${demoButton(n.id)}${sourceA(n,n.platform==='x'?'原帖':'原视频')}</div>`;
   $('#reader').innerHTML=bar(false)+empty('正在读取正文…');$('#reader').scrollTop=0;
   try{
     const doc=await api('document?'+query({id:n.id,kind:n.has_note?'note':'text'}));if(epoch!==docEpoch||state.route!=='notes')return;
@@ -372,7 +398,7 @@ async function loadDocument(){
     const kind=parts.formatted&&k.kind==='formatted'?'formatted':'note';
     const K=kn(),d=kd(n),links=d&&(d.themes.length||d.concepts.length)?`<div class="links">${d.themes.map(id=>{const t=K.themes.find(x=>x.id===id);return t?`<button type="button" class="chip" data-action="kb-theme" data-cat="${esc(t.domain)}" data-value="${t.id}" title="主题：${esc(t.summary)}">${esc(t.name)}</button>`:'';}).join('')}${d.concepts.map(c=>K.concepts[c.id]?`<button type="button" class="chip outline" data-action="kb-facet" data-facet="concept" data-value="${c.id}" title="概念：${esc(K.concepts[c.id].summary)}">${c.role==='主题'?'★ ':''}${esc(K.concepts[c.id].name)}</button>`:'').join('')}</div>`:'';
     const body=n.has_note?renderMarkdown(parts[kind],{headingOffset:1}):`<div class="raw">${esc(doc.content)}</div>`;
-    $('#reader').innerHTML=bar(!!parts.formatted)+`<div class="article"><div class="kicker">${kn()?kd(n)?`<select class="seg-select" data-domain-for="${esc(n.id)}" aria-label="大类" title="${esc(kd(n).manual?'你手动指定的大类':'模型的归类理由：'+kd(n).note)}。可以改">${kn().all.map(c=>`<option ${c===dom(n)?'selected':''}>${esc(c)}</option>`).join('')}${kd(n).manual?'<option value="">交回模型判断</option>':''}</select>`:'':n.category?chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(n.category)}"></span>${esc(n.category)}`):''}${n.decay?chip(decayLabel(n.decay),evergreen(n.decay)?'green':'amber'):''}${n.has_note?'':chip('原始文字稿')}${n.archive_only?chip('只存原帖'):''}</div><h1>${esc(n.title)}</h1><div class="byline">${pf(n.platform)}<span>${esc(n.author||'未知作者')}</span>${n.duration_s?`<span>${esc(duration(n.duration_s))}</span>`:''}<span>收藏 ${esc(fmt(n.collected_at))}</span><span>整理 ${esc(fmt(n.at))}</span>${n.has_note?button('在文件夹中显示','open',`data-kind="folder" data-file-kind="note" data-id="${esc(n.id)}"`,'quiet sm'):''}</div><div class="prose">${body}</div>${links}${n.tags.length?`<div class="tags">${n.tags.map(t=>chip('#'+esc(t),'outline')).join('')}</div>`:''}</div>`;
+    $('#reader').innerHTML=bar(!!parts.formatted)+`<div class="article"><div class="kicker">${kn()?kd(n)?guest?chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(dom(n))}"></span>${esc(dom(n))}`):`<select class="seg-select" data-domain-for="${esc(n.id)}" aria-label="大类" title="${esc(kd(n).manual?'你手动指定的大类':'模型的归类理由：'+kd(n).note)}。可以改">${kn().all.map(c=>`<option ${c===dom(n)?'selected':''}>${esc(c)}</option>`).join('')}${kd(n).manual?'<option value="">交回模型判断</option>':''}</select>`:'':n.category?chip(`<span class="sw" style="width:7px;height:7px;background:${catColor(n.category)}"></span>${esc(n.category)}`):''}${n.decay?chip(decayLabel(n.decay),evergreen(n.decay)?'green':'amber'):''}${n.has_note?'':chip('原始文字稿')}${n.archive_only?chip('只存原帖'):''}</div><h1>${esc(n.title)}</h1><div class="byline">${pf(n.platform)}<span>${esc(n.author||'未知作者')}</span>${n.duration_s?`<span>${esc(duration(n.duration_s))}</span>`:''}<span>收藏 ${esc(fmt(n.collected_at))}</span><span>整理 ${esc(fmt(n.at))}</span>${n.has_note?button('在文件夹中显示','open',`data-kind="folder" data-file-kind="note" data-id="${esc(n.id)}"`,'quiet sm'):''}</div><div class="prose">${body}</div>${links}${n.tags.length?`<div class="tags">${n.tags.map(t=>chip('#'+esc(t),'outline')).join('')}</div>`:''}</div>`;
     const found=kbSearch(),hit=found?.hits.find(h=>h.key===n.id);if(hit)markHits($('#reader .article'),found.marks,hit.tier==='head'?'':hit.heading);
     if(!n.read_at&&keptUnread!==n.id){api('read',{id:n.id,read:true}).then(()=>{n.read_at=Date.now()/1000;if(epoch!==docEpoch)return;document.querySelector(`.kb-item[data-id="${CSS.escape(n.id)}"] .unread`)?.remove();const t=$('#reader [data-action="toggle-read"]');if(t)t.innerHTML=`${ic('check',14)}标为未读`;}).catch(()=>{});}
   }catch(e){if(epoch===docEpoch)$('#reader').innerHTML=bar(false)+empty(e.message);}
@@ -471,13 +497,13 @@ let galleryData=null,galleryIndex=0;
 async function viewGallery(id){
   const epoch=++dialogEpoch;galleryData=null;galleryIndex=0;drawerId=null;
   openDialog(dialogHead('图集')+empty('正在读取图片…'),'modal wide');
-  try{const data=await api('gallery?'+query({id}));if(epoch!==dialogEpoch||!dialog.open)return;galleryData=data;renderGallery();}
+  try{const [data]=await Promise.all([api('gallery?'+query({id})),ensureDemo().catch(()=>null)]);if(epoch!==dialogEpoch||!dialog.open)return;galleryData=data;renderGallery();}
   catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('图集')+empty(e.message);}
 }
 function renderGallery(){
   if(!galleryData)return;const {item,images}=galleryData,id=item.id;
   galleryIndex=Math.max(0,Math.min(images.length-1,galleryIndex));const src='api/gallery-image?'+query({id,index:galleryIndex});
-  dialog.innerHTML=dialogHead(esc(titleOf(item)))+`<div class="gallery-stage"><a href="${src}" target="_blank" rel="noopener" aria-label="打开第 ${galleryIndex+1} 张原图"><img src="${src}" alt="第 ${galleryIndex+1} 张图片"></a></div><div class="gallery-controls">${button('← 上一张','gallery-step',`data-step="-1" ${galleryIndex===0?'disabled':''}`,'quiet')}<span class="num" aria-live="polite">${galleryIndex+1} / ${images.length}</span>${button('下一张 →','gallery-step',`data-step="1" ${galleryIndex===images.length-1?'disabled':''}`,'quiet')}</div><div class="gallery-thumbnails">${images.map((_,n)=>`<button type="button" data-action="gallery-select" data-index="${n}" aria-label="第 ${n+1} 张" aria-pressed="${n===galleryIndex}"><img loading="lazy" src="api/gallery-image?id=${encodeURIComponent(id)}&index=${n}" alt=""></button>`).join('')}</div><div class="gallery-foot"><small>${esc(item.author||'未知作者')} · ${images.length} 张 · ${bytes(item.media_bytes)}</small><div class="row">${button('加入素材箱','add-material',`data-id="${esc(id)}" data-kind="gallery"`,'sm')}<a class="btn quiet sm" href="${src}" target="_blank" rel="noopener">查看原图 ↗</a>${button('打开本地文件夹','open',`data-kind="gallery-folder" data-id="${esc(id)}"`,'quiet sm')}${sourceA(item,'原图集')}</div></div>`;
+  dialog.innerHTML=dialogHead(esc(titleOf(item)))+`<div class="gallery-stage"><a href="${src}" target="_blank" rel="noopener" aria-label="打开第 ${galleryIndex+1} 张原图"><img src="${src}" alt="第 ${galleryIndex+1} 张图片"></a></div><div class="gallery-controls">${button('← 上一张','gallery-step',`data-step="-1" ${galleryIndex===0?'disabled':''}`,'quiet')}<span class="num" aria-live="polite">${galleryIndex+1} / ${images.length}</span>${button('下一张 →','gallery-step',`data-step="1" ${galleryIndex===images.length-1?'disabled':''}`,'quiet')}</div><div class="gallery-thumbnails">${images.map((_,n)=>`<button type="button" data-action="gallery-select" data-index="${n}" aria-label="第 ${n+1} 张" aria-pressed="${n===galleryIndex}"><img loading="lazy" src="api/gallery-image?id=${encodeURIComponent(id)}&index=${n}" alt=""></button>`).join('')}</div><div class="gallery-foot"><small>${esc(item.author||'未知作者')} · ${images.length} 张 · ${bytes(item.media_bytes)}</small><div class="row">${button('加入素材箱','add-material',`data-id="${esc(id)}" data-kind="gallery"`,'sm')}${demoButton(id)}<a class="btn quiet sm" href="${src}" target="_blank" rel="noopener">查看原图 ↗</a>${button('打开本地文件夹','open',`data-kind="gallery-folder" data-id="${esc(id)}"`,'quiet sm')}${sourceA(item,'原图集')}</div></div>`;
   dialog.querySelector('.gallery-thumbnails [aria-pressed=true]')?.scrollIntoView({block:'nearest',inline:'nearest'});
 }
 dialog.addEventListener('keydown',e=>{if(!galleryData||!['ArrowLeft','ArrowRight'].includes(e.key))return;e.preventDefault();galleryIndex+=e.key==='ArrowRight'?1:-1;renderGallery();});
@@ -509,7 +535,7 @@ function videoNoteHint(i){
 }
 // 已有笔记时下载视频只是多留一份，笔记不变。
 const noteVideoQueued=i=>!!i.note_path&&i.processing_mode==='video'&&!['extracted','saved'].includes(i.status);
-function videoKeepButton(i){return i.can_download_video?button(i.media_quality==='high'&&!i.media_deleted?'保留':'下载高清','quick-purpose',`data-id="${esc(i.id)}" data-purpose="video" ${i.pending_intents?'disabled':''}`,'sm'):'';}
+function videoKeepButton(i){return i.can_download_video&&!guest?button(i.media_quality==='high'&&!i.media_deleted?'保留':'下载高清','quick-purpose',`data-id="${esc(i.id)}" data-purpose="video" ${i.pending_intents?'disabled':''}`,'sm'):'';}
 function videoKeepText(i){
   if(noteVideoQueued(i))return i.status==='failed'?'下载未完成，笔记不受影响':'已排队，下一轮下载，笔记不受影响';
   return i.can_download_video?'下一轮下载，笔记继续留在知识库':'';
@@ -586,7 +612,7 @@ function renderMaterials(){
     ${m.topic_id===null?`<span class="suggest" data-suggest="${m.id}" data-item="${esc(m.item)}"><small>正在找合适的选题…</small></span>`:''}
   </article>`;};
   const brief=state.materials.topic==='all'?'':state.materials.topic==='none'?`<section class="card topic-brief"><div style="flex:1"><h2><span class="sw" style="width:10px;height:10px;background:var(--faint)"></span>未归类</h2><p>收进来时没有选题的素材。卡片上有按标签和分类匹配的建议，点「放入」即可。</p></div></section>`:`<section class="card topic-brief"><div style="flex:1;min-width:0"><h2><span class="sw" style="width:10px;height:10px;background:${t.color}"></span>${esc(t.name)}</h2>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="dest">${t.channels.map(c=>chip(esc(c),'blue')).join('')}${chip(`${mine.length} 条素材`)}${chip(`已用 ${mine.filter(m=>m.status==='used').length}`,'green')}</div></div><div class="row">${button('导出 Markdown','export-topic',`data-id="${t.id}"`,'sm')}${button('编辑','topic-edit',`data-id="${t.id}"`,'quiet sm')}</div></section>`;
-  $('#mat-page').innerHTML=head('素材箱','从笔记、视频、图集、X 原帖里挑出来要用的东西，按选题归拢；写公众号、做视频时从这里取，外部服务也能通过接口读取',`<a class="btn" href="#api">${ic('link',14)}外部访问</a>${button(`${ic('spark',14)}新建选题`,'topic-edit','','primary')}`)+`<div class="mat">
+  $('#mat-page').innerHTML=head('素材箱','从笔记、视频、图集、X 原帖里挑出来要用的东西，按选题归拢；写公众号、做视频时从这里取，外部服务也能通过接口读取',`${guest?'':`<a class="btn" href="#api">${ic('link',14)}外部访问</a>`}${button(`${ic('spark',14)}新建选题`,'topic-edit','','primary')}`)+`<div class="mat">
     <nav class="card topic-nav" aria-label="选题"><div class="nav-label" style="padding:4px 10px 6px">选题</div>
       <button type="button" data-action="topic-select" data-value="all" aria-pressed="${state.materials.topic==='all'}"><span class="sw" style="background:var(--ink)"></span><span>全部素材</span><span>${lib.materials.length}</span></button>
       ${topics.map(x=>`<button type="button" data-action="topic-select" data-value="${x.id}" aria-pressed="${String(state.materials.topic)===String(x.id)}"><span class="sw" style="background:${x.color}"></span><span>${esc(x.name)}</span><span>${x.count}</span></button>`).join('')}
@@ -649,12 +675,12 @@ function collectionPage(){
   const s=state.collection,o=state.overview,more=[...['downloaded','transcribed','extracted','skipped','removed'].map(k=>[k,STATUSES[k]]),['baseline','历史基线']];
   return `<div class="page">${head('收藏记录',`全部 ${o.total} 条收藏的处理账本 · 最近同步 ${esc(fmt(o.baseline?.scanned_at))}`,button('刷新','refresh'))}
   <div class="toolbar"><div class="seg" role="group" aria-label="收藏平台">${[['all','全部平台'],...Object.entries(PLATFORM_LABELS)].map(([v,l])=>`<button type="button" data-action="collection-platform" data-value="${v}" aria-pressed="${s.platform===v}">${v==='all'?'':`<span class="platform-dot ${v}"></span>`}${l}</button>`).join('')}</div>
-  <div class="seg">${[['all',`全部 ${o.total}`],['review',`待确认 ${o.review}`],['failed',`失败 ${o.failed}`],['saved',`已保存 ${o.saved||0}`],['pending','排队']].map(([v,l])=>`<button type="button" data-action="collection-filter" data-value="${v}" aria-pressed="${s.status===v}">${l}</button>`).join('')}<select id="collection-status" class="seg-select ${more.some(([k])=>k===s.status)?'on':''}" aria-label="更多状态"><option value="all">更多状态</option>${more.map(([k,l])=>`<option value="${k}" ${s.status===k?'selected':''}>${l}</option>`).join('')}</select></div>
+  <div class="seg">${[['all',`全部 ${o.total}`],['review',`待确认 ${o.review}`],['failed',`失败 ${o.failed}`],['saved',`已保存 ${o.saved||0}`],['pending','排队'],...(state.demo?.configured?[['demo',`已选进演示 ${state.demo.picks.length}`]]:[])].map(([v,l])=>`<button type="button" data-action="collection-filter" data-value="${v}" aria-pressed="${s.status===v}">${l}</button>`).join('')}<select id="collection-status" class="seg-select ${more.some(([k])=>k===s.status)?'on':''}" aria-label="更多状态"><option value="all">更多状态</option>${more.map(([k,l])=>`<option value="${k}" ${s.status===k?'selected':''}>${l}</option>`).join('')}</select></div>
   ${searchField(s.q,'搜索标题、作者或作品 ID','collection-search')}</div><div id="collection-list">${empty('正在读取…')}</div></div>`;
 }
 async function loadCollection(){
   const epoch=++listEpoch,page=pageEpoch,s=state.collection;
-  const data=await api('items?'+query({size:15,q:s.q,status:s.status,page:s.page,platform:s.platform}));if(epoch!==listEpoch||page!==pageEpoch)return;
+  const data=await api('items?'+query({size:15,q:s.q,page:s.page,platform:s.platform,...(s.status==='demo'?{status:'all',demo:1}:{status:s.status})}));if(epoch!==listEpoch||page!==pageEpoch)return;
   s.data=data;s.page=data.page;
   $('#collection-list').innerHTML=data.items.length?`<div class="card table-wrap"><table class="table"><thead><tr><th>收藏内容</th><th>用途</th><th>媒体现状</th><th>来源</th><th>结果</th><th aria-label="操作"></th></tr></thead><tbody>${data.items.map(i=>`<tr><td><button type="button" class="item-title" data-action="detail" data-id="${esc(i.id)}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${esc(kindOf(i))}</small>${i.last_error?`<span class="cell-error">${esc(i.last_error)}</span>`:''}</td><td>${esc(i.media_type==='gallery'?'图集':i.media_type==='post'?'X 原帖':PURPOSES[i.processing_mode]||'尚未分流')}${i.routing_preview?`<span class="suggestion">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)} · 未应用</span>`:''}</td><td class="muted">${esc(mediaLabel(i))}</td><td>${pf(i.platform)}</td><td>${['failed','review'].includes(i.status)&&(i.note_path||i.text_path)?tag(STATUSES[i.status],i.status==='failed'?'danger':'warn')+' ':''}${tag(resultLabel(i),i.status==='failed'?'danger':i.status==='review'?'warn':i.note_path||i.status==='saved'?'green':'')}${i.skip_reason?`<small>${esc(REASONS[i.skip_reason]||i.skip_reason)}</small>`:''}</td><td>${i.media_type==='gallery'&&i.status==='saved'?button('查看','view-gallery',`data-id="${esc(i.id)}"`,'quiet sm'):i.note_path||i.text_path?button('阅读','read',`data-id="${esc(i.id)}"`,'quiet sm'):button('详情','detail',`data-id="${esc(i.id)}"`,'quiet sm')}</td></tr>`).join('')}</tbody></table></div>${pagination(data,'collection')}`:empty(s.q?'没有找到匹配的收藏':'这个筛选下还没有收藏');
 }
@@ -668,33 +694,41 @@ async function detail(id){
   drawerId=id;const epoch=++dialogEpoch;
   openDialog(dialogHead('收藏详情')+empty('正在读取…'),'drawer');
   try{
-    const i=await api('item?'+query({id}));if(epoch!==dialogEpoch||!dialog.open)return;
+    const [i]=await Promise.all([api('item?'+query({id})),ensureDemo().catch(()=>null)]);if(epoch!==dialogEpoch||!dialog.open)return;
     const attrs=`data-id="${esc(id)}" data-idle ${busy()?'disabled':''}`;
     const materialKind=i.media_type==='gallery'?'gallery':i.media_type==='post'?'post':i.note_path?'note':i.media_path&&!i.media_deleted?'video':null;
     dialog.innerHTML=dialogHead('收藏详情')+`<div class="dialog-body">
       ${i.media_type==='post'?'':cover(i,{badge:kindOf(i),pfb:true,ratio:'16/9'})}
       <div><h2 class="title">${esc(titleOf(i))}</h2><p class="muted" style="font-size:12.5px;margin-top:4px">${esc(i.author||'未知作者')} · ${esc(PLATFORM_LABELS[i.platform]||'')} · ${esc(kindOf(i))}</p><div class="row" style="margin-top:10px">${tag(STATUSES[i.status]||i.status,i.status==='failed'?'danger':i.status==='review'?'warn':'')}${tag(mediaLabel(i))}</div></div>
       <section><h3 style="margin-bottom:10px">处理经过</h3>${journey(i)}</section>
-      <section><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3>留下的内容</h3><div class="row" style="gap:2px">${materialKind?button(`${ic('bookmark',14)}加入素材箱`,'add-material',`data-id="${esc(id)}" data-kind="${materialKind}"`,'quiet sm'):''}${sourceA(i)}</div></div>${assetRows(i)}</section>
+      <section><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3>留下的内容</h3><div class="row" style="gap:2px">${materialKind?button(`${ic('bookmark',14)}加入素材箱`,'add-material',`data-id="${esc(id)}" data-kind="${materialKind}"`,'quiet sm'):''}${demoButton(id)}${sourceA(i)}</div></div>${assetRows(i)}</section>
+      ${i.guest_choice?`<p class="intent-note">你在演示站里选了「${esc(i.guest_choice==='discard'?'放弃处理':PURPOSES[i.guest_choice]||i.guest_choice)}」，只记在这个浏览器里，不会真的处理。</p>`:''}
       ${i.media_type==='gallery'||i.media_type==='post'||['extracted','saved'].includes(i.status)||noteVideoQueued(i)?'':`<section><h3 style="margin-bottom:6px">这条收藏用来做什么</h3><p class="muted" style="font-size:12.5px">${esc(i.routing_reason||'用途决定接下来保留视频还是提取知识。')}</p>${i.routing_preview?`<div class="callout">建议：${esc(PURPOSES[i.routing_preview.purpose]||i.routing_preview.purpose)}，尚未应用。${esc(i.routing_preview.reason||'')}</div>`:''}<form id="purpose-form" style="margin-top:10px"><input type="hidden" name="id" value="${esc(id)}"><div class="purpose-options">${['note','video','review'].map(k=>`<label><input type="radio" name="purpose" value="${k}" ${i.processing_mode===k?'checked':''} ${i.can_change_purpose?'':'disabled'} required><span>${PURPOSES[k]}<small>${({note:'转写并整理笔记',video:'只保存高清原声视频',review:'暂不处理，等你确认'})[k]}</small></span></label>`).join('')}</div>${i.platform==='bilibili'&&i.can_change_purpose?`<div style="margin-top:10px">${qualityPicker(i)}</div>`:''}${i.can_change_purpose?`<div class="row" style="margin-top:10px"><button class="btn primary sm">保存用途</button><small>下一轮运行时处理；已有文件保留。</small></div>${i.pending_intents?`<p class="intent-note" style="margin-top:8px">${esc(intentLabel(i.pending_intents))}</p>`:''}`:'<p class="muted" style="font-size:12.5px;margin-top:8px">这条收藏不在可修改用途的处理范围内。</p>'}</form></section>`}
       ${i.last_error?`<section class="callout danger"><b>上次未完成</b><p style="margin-top:4px">${esc(i.last_error)}</p>${i.status==='failed'?`<div style="margin-top:8px">${button('恢复为待办','retry',attrs,'sm')}</div>`:''}</section>`:''}
       ${i.can_discard||i.can_delete||i.skip_reason==='user_discarded'?`<section><h3 style="margin-bottom:6px">处理操作</h3><p class="muted" style="font-size:12.5px">${noteVideoQueued(i)?'取消后这条回到知识笔记，已有文件不动。':i.skip_reason==='user_discarded'?'已放弃处理。重新选择用途并保存即可恢复。':'放弃处理会停止自动处理，保留收藏记录和本地文件。'}${i.can_delete?' 删除记录会从列表移除，不取消原平台收藏。':''}</p><div class="row" style="margin-top:8px">${i.can_discard?button(noteVideoQueued(i)?'取消下载':'放弃处理',noteVideoQueued(i)?'cancel-video':'discard-item',`data-id="${esc(id)}"`,'quiet sm danger'):''}${i.can_delete?button('删除记录','delete-item',attrs,'quiet sm danger'):''}</div></section>`:''}
-      <details><summary>作品信息</summary><dl class="kv" style="font-size:12.5px"><dt>来源</dt><dd>${esc(PLATFORM_LABELS[i.platform]||'抖音')}${i.folders?` · ${esc(JSON.parse(i.folders).join('、'))}`:''}</dd><dt>作品 ID</dt><dd class="mono">${esc(id)}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd><dt>AI 费用</dt><dd data-cost="item">读取中…</dd></dl></details>
+      <details><summary>作品信息</summary><dl class="kv" style="font-size:12.5px"><dt>来源</dt><dd>${esc(PLATFORM_LABELS[i.platform]||'抖音')}${i.folders?` · ${esc(JSON.parse(i.folders).join('、'))}`:''}</dd><dt>作品 ID</dt><dd class="mono">${esc(id)}</dd><dt>处理状态</dt><dd>${esc(STATUSES[i.status]||i.status)}</dd><dt>跳过原因</dt><dd>${esc(REASONS[i.skip_reason]||i.skip_reason||'无')}</dd><dt>更新时间</dt><dd>${esc(fmt(i.updated_at))}</dd>${guest?'':'<dt>AI 费用</dt><dd data-cost="item">读取中…</dd>'}</dl></details>
     </div>`;
-    void fillItemCost(id,epoch);
+    if(!guest)void fillItemCost(id,epoch);
   }catch(e){if(epoch===dialogEpoch&&dialog.open)dialog.innerHTML=dialogHead('收藏详情')+empty(e.message);}
 }
 async function stopProcessing(action,id,keepNote=false){
   if(action==='delete-item'&&!window.confirm('删除这条收藏记录？只会从列表移除，不会取消原平台收藏；此操作不可恢复。'))return;
   if(action==='discard'&&!window.confirm(keepNote?'取消下载高清视频？笔记不受影响。':'放弃处理这条收藏？记录和已有文件会保留，之后仍可重新选择用途。'))return;
   const epoch=dialogEpoch,r=await api(action,{id});
+  if(r.guest){await guestDecided(id);return;}
   if(r.deferred){await refreshOverview();await reloadList();notice(`当前正在运行，已记下“${keepNote?'取消下载':'放弃处理'}”，本轮结束后生效。`);return;}
   if(dialog.open&&epoch===dialogEpoch&&drawerId===id){if(action==='delete-item')dialog.close();else await detail(id);}
   await refreshOverview();await reloadList();
   notice(keepNote?'已取消下载，笔记不受影响。':action==='discard'?'已放弃处理，记录和文件保留；可在收藏详情重新选择用途恢复。':'记录已从列表移除，再次扫描不会重新处理；原平台收藏保持不变。');
 }
+// 演示站：决定只记在浏览器里，收件箱和计数照常变化。
+async function guestDecided(id){
+  if(dialog.open&&drawerId===id)await detail(id);
+  await refreshOverview();await reloadList();notice('已记下你的选择。演示站不会真的处理，只记在这个浏览器里。');
+}
 async function queueMutation(path,data){
   const r=await api(path,data);
+  if(r.guest){await guestDecided(data.id);return;}
   if(r.deferred){await refreshOverview();await reloadList();notice('当前正在运行，已记下这个选择，本轮结束后生效。');return;}
   notice(path==='purpose'?'正在保存用途…':'正在恢复待办…');
   const expected=r.startedAt,originalDrawer=dialogEpoch;
@@ -716,7 +750,7 @@ async function queueMutation(path,data){
 // ── 流水线：运行、队列、来源、自动安排、运行记录 ──
 function executionPanel(){
   const o=state.overview,e=o.execution,last=runSummary(o.lastRun),r=o.lastRun?.result;
-  const kinds={run:'本轮整理',retry:'恢复待办',purpose:'保存用途',discard:'放弃处理','delete-item':'删除记录',login:'扫码登录','session-check':'登录检查','bili-login':'B站扫码登录','bili-session-check':'B站登录检查',quality:'保存画质','apply-intents':'执行记下的操作','video-to-note':'转为笔记','video-delete':'删除视频'};
+  const kinds={run:'本轮整理',retry:'恢复待办',purpose:'保存用途',discard:'放弃处理','delete-item':'删除记录',login:'扫码登录','session-check':'登录检查','bili-login':'B站扫码登录','bili-session-check':'B站登录检查',quality:'保存画质','apply-intents':'执行记下的操作','video-to-note':'转为笔记','demo-build':'更新演示站','video-delete':'删除视频'};
   if(e.running)return `<section class="card live active"><div class="row"><span class="pulse"></span><b style="font-weight:600">正在执行${esc(kinds[e.kind]||'任务')}</b><small>开始于 ${esc(fmt(e.startedAt))}${e.owned?'':' · 由其他入口启动'}</small><span style="margin-left:auto" class="row">${e.owned?button('停止本轮','stop','','sm'):''}<a class="btn quiet sm" href="#history">查看记录 ›</a></span></div><p class="muted" style="font-size:12.5px">可以离开这个页面，运行会在后台继续；结束后笔记、视频和图集会出现在对应栏目。</p></section>`;
   return `<section class="card live"><div class="row">${chip('<span class="dot"></span>空闲')}<b style="font-weight:600">${o.lastRun?`上一轮 ${esc(fmt(o.lastRun.modifiedAt))} · ${esc(last.label)}`:'还没有运行过'}</b>${last.detail&&o.lastRun?`<small>${esc(last.detail).slice(0,120)}</small>`:''}<span style="margin-left:auto" class="row">${button('只继续已有待办','manual-run','data-noscan="1" data-idle','sm')}${button(`${ic('play',14)}运行一轮`,'manual-run','data-idle','primary sm')}</span></div>
     ${r?`<div class="steps">${[['新收藏',r.added??'—','扫描到的新增'],['待确认',r.review??0,'交给你决定'],['保存媒体',(r.saved||0)+(r.galleries||0),`视频 ${r.saved||0} · 图集 ${r.galleries||0}`],['整理笔记',r.notes??0,`剩余待办 ${r.pending??'—'}`]].map(([l,v,s])=>`<div class="step"><small>${l}</small><strong>${esc(v)}</strong><small>${esc(s)}</small></div>`).join('')}</div>`:''}</section>`;
@@ -834,8 +868,8 @@ function field(key){
 const sectionFields=(title,keys,note='')=>`<section class="settings-section"><h2>${title}</h2>${note?`<p class="muted">${note}</p>`:''}<div class="fields">${keys.map(field).join('')}</div></section>`;
 function settingsPage(){
   const t=state.settingsTab,o=state.overview,s=state.settings;
-  const tabs=`<nav class="tabs" aria-label="设置">${[['models','模型服务'],['rules','处理规则'],['storage','文件与空间'],['api','外部访问']].map(([v,l])=>`<a href="#${v}" ${t===v?'aria-current="page"':''}>${l}</a>`).join('')}</nav>`;
-  if(t==='api')return `<div class="page">${head('设置','新配置从下一轮处理开始生效；账号连接在「流水线」的来源卡片里')}${tabs}<div id="api-tab">${empty('正在读取…')}</div></div>`;
+  const tabs=`<nav class="tabs" aria-label="设置">${[['models','模型服务'],['rules','处理规则'],['storage','文件与空间'],['api','外部访问'],['demo','演示站']].map(([v,l])=>`<a href="#${v}" ${t===v?'aria-current="page"':''}>${l}</a>`).join('')}</nav>`;
+  if(t==='api'||t==='demo')return `<div class="page">${head('设置','新配置从下一轮处理开始生效；账号连接在「流水线」的来源卡片里')}${tabs}<div id="${t}-tab">${empty('正在读取…')}</div></div>`;
   let content='';
   if(t==='models')content=`<div class="model-grid">${[['用途判断','决定一条收藏保存视频还是整理笔记',SETTINGS.models.slice(0,3)],['语音转写','把口播转成文字；B站有字幕时不调用',SETTINGS.models.slice(3,6)],['笔记整理','从文字稿整理成知识笔记',SETTINGS.models.slice(6,11)]].map(([title,desc,keys])=>`<section class="card model-card"><span class="model-mark">${title.slice(0,1)}</span><div><h3 style="font-size:15px;font-weight:600">${title}</h3><p class="muted" style="font-size:12.5px">${desc}</p></div>${keys.map(field).join('')}</section>`).join('')}</div><section class="card card-pad"><details><summary>转写热词、请求超时与直连配置</summary><div class="fields">${SETTINGS.models.slice(11).map(field).join('')}</div></details></section>`;
   if(t==='storage')content=`<div class="storage-summary">${[['保留的视频与图集',o.storage.savedUsed],['临时媒体缓存',o.storage.used],['磁盘可用',o.storage.available]].map(([l,v])=>`<div class="card"><small>${l}</small><strong>${esc(bytes(v))}</strong></div>`).join('')}</div><p class="muted" style="font-size:12.5px;margin-bottom:16px">封面与播放副本缓存：${bytes(o.storage.previewUsed)} · 最多 512 MiB，自动回收，可重新生成；原视频不受影响。</p>${o.storage.error?`<div class="callout">部分空间信息未能读取：${esc(o.storage.error)}</div>`:''}<section class="card card-pad" style="margin-bottom:16px">${sectionFields('保存位置',SETTINGS.storage.slice(0,3),'修改目录只影响新产物，已有文件不会搬迁。')}<div class="row">${button('打开笔记目录 ↗','open','data-kind="notes-folder"','sm')}${button('打开运行日志目录 ↗','open','data-kind="runs-folder"','sm')}</div></section><section class="card card-pad">${sectionFields('空间与保留',SETTINGS.storage.slice(3),'视频与图集收藏独立保存，不自动清理；缓存按现有清理规则回收。')}<details><summary>数据与缓存路径</summary><dl class="kv" style="font-size:12.5px">${[['运行数据',s.home],['账本数据库',s.database],['媒体缓存',s.media]].map(([name,path])=>`<dt>${name}</dt><dd class="mono">${esc(path)}</dd>`).join('')}</dl></details></section>`;
@@ -847,6 +881,20 @@ async function loadApiTab(){
   const base=new URL('api/v1/',location.href).href.replace(/\/$/,'');
   $('#api-tab').innerHTML=`<div class="grid2"><section class="card card-pad"><div class="sec-head"><h2>访问令牌</h2><span class="sub">明文只在创建时显示一次</span><span style="margin-left:auto">${button('新建令牌','token-new','','primary sm')}</span></div>${tokens.length?tokens.map(t=>`<div class="token-row ${t.revoked_at?'revoked':''}"><span><b>${esc(t.name)}</b><small class="mono">dsk_••••${esc(t.hint)}</small></span>${tag(t.scope==='write'?'读素材 + 标记已用':'只读素材',t.scope==='write'?'warn':'blue')}<small>${t.revoked_at?`已吊销 ${esc(fmt(t.revoked_at))}`:t.last_used_at?`最近使用 ${esc(fmt(t.last_used_at))}`:'尚未使用'}</small>${t.revoked_at?'<span></span>':button('吊销','token-revoke',`data-id="${t.id}"`,'quiet sm danger')}</div>`).join(''):'<p class="muted" style="font-size:13px">还没有令牌。给每个外部服务单独建一个，不用时吊销即可。</p>'}<p class="muted" style="font-size:12.5px;margin-top:14px">令牌只能访问 <span class="mono">/api/v1/</span> 下的素材接口，不能操作收藏、运行或设置；每个令牌每分钟最多 120 次请求，调用记录写在 console/api-access.jsonl。</p></section>
     <section class="card card-pad"><div class="sec-head"><h2>接口</h2><span class="sub">请求头 Authorization: Bearer &lt;令牌&gt;</span></div>${[['GET','/topics','选题列表'],['GET','/materials?topic=&status=&kind=&limit=','素材列表；topic=none 为未归类'],['GET','/materials?since=<秒>&after=<id>','增量拉取：返回此后新增或修改的素材，带 next 用于翻页'],['GET','/materials/{id}','单条素材：摘录、备注、来源链接、笔记全文、媒体清单'],['GET','/materials/{id}/media/{n}','下载视频（n=0）或图集第 n 张，同样用令牌认证'],['POST','/materials/{id}/usage','标记已用：{channel, title, url}，需要写权限']].map(([m,u,d])=>`<div class="endpoint"><span class="m ${m==='POST'?'write':''}">${m}</span><span><code>${esc(u)}</code><small>${d}</small></span></div>`).join('')}<pre class="log" style="margin-top:14px">curl -H "Authorization: Bearer dsk_…" \\\n  "${esc(base)}/materials?status=todo"</pre></section></div>`;
+}
+
+// 演示站：挑了哪些、上次更新的结果，以及更新按钮。挑选在收藏详情、笔记阅读区、图集里点「放进演示站」。
+async function loadDemoTab(){
+  const epoch=pageEpoch,d=await ensureDemo(true),list=d.configured&&d.picks.length?await api('items?'+query({demo:1,status:'all',size:50})):{items:[],total:0};if(epoch!==pageEpoch)return;
+  const st=d.status,info=d.info,c=info?.counts;
+  const result=!st?'还没有更新过':st.ok?`${esc(fmt(st.at))} 更新成功`:`${esc(fmt(st.at))} 更新失败：${esc(st.error)}`;
+  const pages=info?.pages,pageLine=pages?`综述：保留 ${pages.kept} 页，沿用上一版 ${pages.reused} 页，新写 ${pages.written} 页${pages.failed?`，失败 ${pages.failed} 页`:''}${pages.skipped?`；${esc(pages.skipped)}`:''}`:'';
+  $('#demo-tab').innerHTML=!d.configured?`<section class="card card-pad"><div class="sec-head"><h2>演示站</h2></div><div class="callout">${esc(d.error||'还没有设置演示数据目录。在 dustoff.conf 里加上 DUST_DEMO_HOME（演示数据放在哪，必须和正式数据分开），需要的话再加 DUST_DEMO_URL（演示站地址）。')}</div></section>`:`<div class="grid2">
+    <section class="card card-pad"><div class="sec-head"><h2>演示站</h2><span class="sub">游客不用密码就能看的那一份</span>${d.url?`<a class="btn quiet sm" style="margin-left:auto" href="${esc(d.url)}" target="_blank" rel="noopener">打开演示站 ↗</a>`:''}</div>
+      <dl class="kv" style="font-size:13px"><dt>已选</dt><dd>${d.picks.length} 条</dd><dt>上次更新</dt><dd>${result}</dd>${c?`<dt>演示站里现在有</dt><dd>笔记 ${c.notes} · 视频 ${c.videos} · 图集 ${c.galleries} · X 原帖 ${c.posts} · 待决定 ${c.review}</dd>`:''}${pageLine?`<dt>综述</dt><dd>${pageLine.replace(/^综述：/,'')}</dd>`:''}</dl>
+      <div class="row" style="margin-top:14px">${button(`${ic('play',14)}更新演示站`,'demo-build',`data-idle ${busy()||!d.picks.length?'disabled':''}`,'primary sm')}<small>按现在选的重新生成，进度在流水线里看</small></div></section>
+    <section class="card card-pad"><div class="sec-head"><h2>怎么挑</h2></div><p class="muted" style="font-size:12.5px;line-height:1.8">在收藏详情、笔记阅读区、图集里点「放进演示站」，再点一次移出。挑完点「更新演示站」才会生效，之前的演示站继续可以看。<br>更新时只复制选中作品的记录和文件。主题综述是把整个主题的笔记合写的，出处里有没选的笔记时，按选中的笔记重写，要调用模型；笔记没变的综述沿用上一版。<br>已读、素材箱、令牌、登录状态、配置都不会复制。</p></section></div>
+    <section class="card" style="margin-top:20px"><div class="sec-head" style="padding:16px 18px 6px;margin:0"><h2>已选的作品</h2><span class="sub">${list.total} 条${list.total>50?' · 显示最近 50 条，全部在「收藏记录 → 已选进演示」':''}</span></div>${list.items.length?`<div class="table-wrap"><table class="table"><tbody>${list.items.map(i=>`<tr><td><button type="button" class="item-title" data-action="detail" data-id="${esc(i.id)}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${esc(kindOf(i))}</small></td><td>${pf(i.platform)}</td><td>${tag(resultLabel(i))}</td><td>${button('移出','demo-pick',`data-id="${esc(i.id)}" data-picked="0"`,'quiet sm')}</td></tr>`).join('')}</tbody></table></div>`:`<p class="muted" style="font-size:13px;padding:0 18px 18px">还没有选。</p>`}</section>`;
 }
 
 // ── 弹窗与路由 ──
@@ -862,6 +910,7 @@ function resolve(hash){
 }
 async function go(hash){
   clearTimeout(searchTimer);const [route,sub]=resolve(hash);
+  if(guest&&!PAGES[route])return navigate('overview');
   if(route!==state.route){window.scrollTo({top:0,behavior:'instant'});}
   const epoch=++pageEpoch;++listEpoch;++docEpoch;++logEpoch;
   if(dialog.open)dialog.close();closePalette();
@@ -875,11 +924,11 @@ async function go(hash){
   $('#topbar').hidden=route!=='overview';
   main.innerHTML=empty('正在读取…');syncChrome();
   try{
-    const [o,settings]=await Promise.all([api('overview'),route==='settings'&&state.settingsTab!=='api'?api('settings'):null]);
+    const [o,settings]=await Promise.all([api('overview'),route==='settings'&&!['api','demo'].includes(state.settingsTab)?api('settings'):null,route==='collection'?ensureDemo().catch(()=>null):null]);
     if(epoch!==pageEpoch)return;state.overview=o;if(settings)state.settings=settings;syncChrome();
     main.innerHTML=({overview:overviewPage,pending:pendingPage,notes:notesPage,videos:videosPage,materials:materialsPage,collection:collectionPage,pipeline:pipelinePage,health:healthPage,settings:settingsPage})[route]();
     paintIcons(main);
-    if(route==='overview')await loadToday();else if(route==='pending')await loadPending();else if(route==='notes')await loadNotes();else if(route==='videos')await loadMedia();else if(route==='materials')await loadMaterials();else if(route==='collection')await loadCollection();else if(route==='pipeline')await loadPipeline(sub);else if(route==='health')await loadHealth();else if(route==='settings'&&state.settingsTab==='api')await loadApiTab();
+    if(route==='overview')await loadToday();else if(route==='pending')await loadPending();else if(route==='notes')await loadNotes();else if(route==='videos')await loadMedia();else if(route==='materials')await loadMaterials();else if(route==='collection')await loadCollection();else if(route==='pipeline')await loadPipeline(sub);else if(route==='health')await loadHealth();else if(route==='settings'&&state.settingsTab==='api')await loadApiTab();else if(route==='settings'&&state.settingsTab==='demo')await loadDemoTab();
     if(!state.library)ensureLibrary().catch(()=>{});
   }catch(e){if(epoch===pageEpoch)main.innerHTML=`<div class="page">${head(PAGES[route])}${empty(e.message)}<div class="row" style="justify-content:center">${button('重新读取','refresh')}</div></div>`;}
 }
@@ -898,7 +947,7 @@ function renderPalette(raw){
   const notes=s?[...s.themes.map(t=>({g:'主题',label:t.name,icon:'book',sub:t.page?'有综述':t.domain,run:()=>openTheme(t.domain,t.id)})),...s.hits.filter(h=>h.kind!=='bare').slice(0,8).map(hitItem),...s.hits.filter(h=>h.kind==='bare').slice(0,5).map(hitItem)]
     :(state.index||[]).filter(n=>q&&[n.title,n.author,...n.tags].join(' ').toLowerCase().includes(q)).slice(0,8).map(n=>({g:'笔记',label:n.title,icon:'note',sub:n.category||'',run:()=>openNote(n.id)}));
   const id=/^(x?\d{6,}|BV[0-9A-Za-z]{10})$/.test(raw.trim())?[{g:'作品 ID',label:`查看作品 ${raw.trim()}`,icon:'list',run:()=>detail(raw.trim())}]:[];
-  const acts=[{g:'操作',label:busy()?'查看本轮进度':'运行一轮',icon:'play',run:()=>busy()?navigate('pipeline'):manualRun()},{g:'操作',label:'切换明暗',icon:'moon',run:toggleTheme}].filter(a=>!q||a.label.includes(q));
+  const acts=[...(guest?[]:[{g:'操作',label:busy()?'查看本轮进度':'运行一轮',icon:'play',run:()=>busy()?navigate('pipeline'):manualRun()}]),{g:'操作',label:'切换明暗',icon:'moon',run:toggleTheme}].filter(a=>!q||a.label.includes(q));
   paletteItems=[...id,...pages,...notes,...acts];paletteIndex=Math.min(paletteIndex,Math.max(0,paletteItems.length-1));
   let g='';$('#palette-results').innerHTML=paletteItems.map((it,n)=>{const h=it.g!==g?`<div class="grp">${it.g}</div>`:'';g=it.g;return h+`<button type="button" class="opt" data-action="palette-run" data-index="${n}" aria-selected="${n===paletteIndex}">${ic(it.icon,16)}<span>${it.re?hl(it.label,it.re):esc(it.label)}${it.snip?`<i class="snip">${snip(it.snip)}</i>`:''}</span>${it.sub?`<small>${esc(it.sub)}</small>`:''}</button>`;}).join('')||empty('没有结果');
 }
@@ -988,6 +1037,9 @@ root.addEventListener('click',async event=>{
     else if(a==='export-topic')exportTopic(id);
     else if(a==='token-new')openDialog(dialogHead('新建访问令牌')+`<form class="dialog-body" id="token-form"><label class="field">名称<input name="name" maxlength="40" required placeholder="例如：写作助手"></label><div class="field">权限<div class="opts"><button type="button" data-action="pick" data-value="read" aria-pressed="true">只读素材</button><button type="button" data-action="pick" data-value="write" aria-pressed="false">读素材 + 标记已用</button></div></div><div class="row" style="justify-content:flex-end">${button('取消','close-dialog','','quiet')}<button class="btn primary">创建</button></div></form>`,'modal');
     else if(a==='token-revoke'){if(!window.confirm('吊销这个令牌？使用它的服务会立即无法访问。'))return;await api('token-revoke',{id:Number(id)});await loadApiTab();notice('令牌已吊销');}
+    else if(a==='demo-pick'){const picked=b.dataset.picked==='1';await api('demo-pick',{id,picked});await ensureDemo(true);if(state.route==='settings'&&state.settingsTab==='demo')await loadDemoTab();else if(state.route==='collection'&&state.collection.status==='demo')await loadCollection();else if(b.isConnected)b.outerHTML=demoButton(id);notice(picked?'已放进演示站，下次更新演示站时生效':'已从演示站移出，下次更新演示站时生效');return;}
+    else if(a==='demo-build'){await mutate('demo-build',{},'演示站开始更新，进度可以在流水线里看。');setTimeout(()=>{if(state.route==='settings'&&state.settingsTab==='demo')loadDemoTab().catch(()=>{});},1500);}
+    else if(a==='guest-reset'){if(!window.confirm('清空你在演示站里的已读、素材和决定？'))return;resetGuest();state.index=null;state.library=null;await go(location.hash.slice(1)||'overview');notice('已清空');}
     else if(a==='copy-secret'){await navigator.clipboard.writeText(b.dataset.value);notice('已复制');}
   }catch(e){notice(e.message,true);}finally{if(b.isConnected&&b.tagName==='BUTTON')b.disabled=b.hasAttribute('data-idle')&&busy();}
 });

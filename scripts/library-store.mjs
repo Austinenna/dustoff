@@ -1,4 +1,4 @@
-// 资料库数据：已读记录、选题、素材和对外访问令牌。
+// 资料库数据：已读记录、选题、素材、选进演示站的作品和对外访问令牌。
 // 与收藏账本分开存放在 library.sqlite：这些都是用户在控制台里的操作，控制台直接读写，
 // 不经过流水线锁，也不影响账本迁移。作品只按 ID 引用，笔记和媒体文件不复制。
 import { DatabaseSync } from 'node:sqlite';
@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS materials (
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_materials_topic ON materials(topic_id, status);
 CREATE INDEX IF NOT EXISTS idx_materials_updated ON materials(updated_at, id);
+-- 选进演示站的作品。演示站每次更新时只复制这些作品的记录和文件。
+CREATE TABLE IF NOT EXISTS demo_picks (item TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS api_tokens (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, hint TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, scope TEXT NOT NULL,
   created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER);
@@ -179,6 +181,15 @@ export function createLibrary(home, { now = () => Math.floor(Date.now() / 1000),
     return scores.sort((a, b) => b.score - a.score).slice(0, 3);
   }
 
+  // ── 演示站 ──
+  function demoPicks() { return all('SELECT item FROM demo_picks ORDER BY created_at, item').map(r => r.item); }
+  function setDemoPick(item, picked) {
+    if (!validItemId(item)) throw new HttpError(400, '作品 ID 不正确');
+    if (picked) run('INSERT OR IGNORE INTO demo_picks(item, created_at) VALUES(?, ?)', item, now());
+    else run('DELETE FROM demo_picks WHERE item=?', item);
+    return { item, picked: !!picked };
+  }
+
   // ── 对外访问令牌 ──
   const tokenRow = r => ({ id: r.id, name: r.name, hint: r.hint, scope: r.scope, created_at: r.created_at, last_used_at: r.last_used_at, revoked_at: r.revoked_at });
   function tokens() { return all('SELECT * FROM api_tokens ORDER BY revoked_at IS NOT NULL, created_at DESC').map(tokenRow); }
@@ -207,5 +218,5 @@ export function createLibrary(home, { now = () => Math.floor(Date.now() / 1000),
   }
 
   function close() { if (db) { db.close(); db = null; } }
-  return { file, readIds, setRead, pageReads, setPageRead, topics, topic, saveTopic, deleteTopic, materials, material, addMaterial, updateMaterial, removeMaterial, recordUsage, suggest, tokens, createToken, revokeToken, verifyToken, close };
+  return { file, readIds, setRead, pageReads, setPageRead, topics, topic, saveTopic, deleteTopic, materials, material, addMaterial, updateMaterial, removeMaterial, recordUsage, suggest, demoPicks, setDemoPick, tokens, createToken, revokeToken, verifyToken, close };
 }

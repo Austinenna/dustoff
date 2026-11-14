@@ -20,17 +20,22 @@ import { addIntent, listIntents } from './scripts/intent-store.mjs';
 import { CALLBACK_PATH, appConfig, exchangeCode, recordSession as recordXSession, saveToken, startAuthorization } from './scripts/sources/x/auth.mjs';
 import { createClient as createXClient } from './scripts/sources/x/client.mjs';
 import { costSummary, gatewayConfig, itemCost } from './scripts/gateway.mjs';
+import { demoHome, readBuildStatus, readDemoInfo } from './scripts/make-demo.mjs';
 const QUALITY_VALUES=['','64','80','116','120','0'];
 const ROOT=dirname(fileURLToPath(import.meta.url));
 // 登录类任务：抖音沿用原名，B 站加前缀；B 站任务在 console-session.mjs 中按平台参数分派。
 const LOGIN_KINDS=['login','session-check','login-window','bili-login','bili-session-check'],WINDOW_KINDS=['login','login-window','bili-login'];
 const encode=value=>JSON.stringify(value,(_,v)=>typeof v==='bigint'?Number(v):v);
-export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,xFetch=fetch,gatewayFetch=fetch,publicUrl=process.env.DUST_PUBLIC_URL||'',serverMode=process.env.DUST_SERVER_MODE==='1',openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
+// guest：演示站。数据目录是 make-demo.mjs 生成的演示数据，不要密码，只能看；不启动定时，不执行任何任务。
+export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=spawn,xFetch=fetch,gatewayFetch=fetch,publicUrl=process.env.DUST_PUBLIC_URL||'',serverMode=process.env.DUST_SERVER_MODE==='1',guest=process.env.DUST_GUEST==='1',openFile=(args)=>new Promise((resolve,reject)=>execFile('/usr/bin/open',args,{timeout:10000},(err)=>err?reject(err):resolve()))}={}) {
   const external=publicUrl?new URL(publicUrl):null;
   if(external&&(external.protocol!=='https:'||external.username||external.password||external.search||external.hash||!/^\/[a-zA-Z0-9/_-]*$/.test(external.pathname)))throw new Error('公网地址必须为不含凭据、查询参数的 HTTPS 地址');
   const basePath=external?external.pathname.replace(/\/+$/,''):'';
-  const access=createConsoleAccess({home,enabled:!!external});
-  const store=createStore(home);
+  const access=createConsoleAccess({home,enabled:!!external&&!guest});
+  // 演示站的「现在」固定在演示数据生成的那一刻；demo.json 变了说明数据换过，重新读取。
+  let demoInfo=null,demoKey=null;
+  const clock=()=>guest&&demoInfo?.snapshot_at?demoInfo.snapshot_at:Date.now();
+  const store=createStore(home,{now:clock});
   const library=createLibrary(home);
   // 知识库索引由 knowledge.mjs 生成；还没跑过时文件不存在，这里不替它新建。
   const knowledge=createKnowledge(home);
@@ -41,7 +46,18 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
   const knowledgeSearch=(q,limit)=>existsSync(knowledge.file)?knowledge.search(String(q||'').slice(0,200),{limit:Math.min(Math.max(Number(limit)||30,1),300)}):{ready:false};
   const knowledgePage=id=>{const page=existsSync(knowledge.file)&&knowledge.page(id);if(!page)throw new HttpError(404,'这个主题还没有综述页');return page;};
   const media=createMediaService({store,home});
-  scheduler ||= createScheduler({home,root});
+  scheduler ||= guest?{status:()=>({loaded:false,time:null,intervalHours:null,nextRun:null})}:createScheduler({home,root});
+  function freshen(){
+    let text=null;try{text=readFileSync(join(home,'demo.json'),'utf8');}catch{}
+    if(text===demoKey)return;
+    demoKey=text;try{demoInfo=text&&JSON.parse(text);}catch{demoInfo=null;}
+    knowledge.close();   // 数据目录整个换过，旧的连接还指着旧文件
+  }
+  // 演示站：生产控制台里选进演示站的作品，以及上次更新的结果。
+  function demoState(){
+    let target=null,error=null;try{target=demoHome(home,store.cfg());}catch(e){error=e.message;}
+    return {configured:!!target,error,url:store.cfg()('DUST_DEMO_URL',''),picks:library.demoPicks(),status:readBuildStatus(home),info:target?readDemoInfo(target):null};
+  }
   const token=randomBytes(32).toString('hex');
   let active=null,lastAction=null,origin,auth=null,scheduleStartupWarning=null;
   const actionsDir=localPath(join(home,'console'));
@@ -117,6 +133,11 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       if(!Number.isInteger(n)||n<1||n>store.policy().daily)throw new HttpError(400,`本轮处理数量须为 1–${store.policy().daily}`);
       if(body.noScan!==undefined&&typeof body.noScan!=='boolean')throw new HttpError(400,'只继续待办选项无效');
       script=join(root,'run.mjs');args=['--limit',String(n),...(body.noScan?['--no-scan']:[])];
+    } else if(kind==='demo-build'){
+      const d=demoState();
+      if(!d.configured)throw new HttpError(400,d.error||'还没有设置演示数据目录（DUST_DEMO_HOME）');
+      if(!d.picks.length)throw new HttpError(400,'还没有选进演示站的作品');
+      script=join(root,'scripts','make-demo.mjs');args=[];
     } else if(LOGIN_KINDS.includes(kind)){
       const bili=kind.startsWith('bili-');
       script=join(root,'scripts','console-session.mjs');args=[kind.endsWith('session-check')?'check':kind==='login-window'?'window':'login',...(bili?['bilibili']:[])];
@@ -225,28 +246,71 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
       throw new HttpError(404,'接口不存在');
     }catch(e){if(res.headersSent){res.destroy();return;}done(e.status||400,{error:store.redact(e.message||'请求失败')});}
   }
+  // ── 演示站接口：只读，只放行看内容用到的接口；读者自己的已读、素材箱存在游客浏览器里。 ──
+  const GUEST_EMPTY={'/api/library':{topics:[],materials:[],unsorted:0},'/api/suggest':{suggestions:[]}};
+  function guestOverview(){
+    const o=store.overview();
+    return {...o,paths:null,storage:{savedUsed:o.storage.savedUsed},session:{},login:null,needsLogin:false,lock:{running:false},lastRun:null,
+      bilibili:{...o.bilibili,session:{},folders:[]},x:{...o.x,configured:false,connected:false,username:null,online:null},
+      execution:{running:false,owned:false,kind:null,startedAt:null,lastAction:null},scheduler:{loaded:false,error:null,warning:null},demo:demoInfo};
+  }
+  async function guestApi(req,res,path,url,send,headers){
+    if(['GET','HEAD'].includes(req.method)&&path==='/api/video'){await streamMedia(req,res,media.video(url.searchParams.get('id'),url.searchParams.get('compatible')==='1'),headers);return;}
+    if(['GET','HEAD'].includes(req.method)&&path==='/api/gallery-image'){await streamMedia(req,res,store.galleryFile(url.searchParams.get('id'),url.searchParams.get('index')??0),headers);return;}
+    if(req.method==='GET'&&path==='/api/video-poster'){await streamMedia(req,res,await media.poster(url.searchParams.get('id')),headers);return;}
+    const params=Object.fromEntries(url.searchParams);let result;
+    if(req.method==='POST'){
+      // 浏览器放不了的视频要转一份兼容副本，只写演示目录里的缓存。
+      if(path!=='/api/video-prepare')throw new HttpError(403,'演示站只能看，不能改');
+      const received=Buffer.from(String(req.headers['x-dustoff-token']||''));
+      if(req.headers.origin!==origin||received.length!==token.length||!timingSafeEqual(received,Buffer.from(token)))throw new HttpError(403,'操作来源无效，请刷新页面');
+      result=media.prepare((await body(req)).id);
+    } else if(req.method!=='GET')throw new HttpError(405,'请求方式不支持');
+    else if(GUEST_EMPTY[path])result=GUEST_EMPTY[path];
+    else switch(path){
+      case '/api/overview':result=guestOverview();break;
+      case '/api/items':{const {demo,...rest}=params;result=store.listItems(rest);break;}
+      case '/api/queue':result=store.pendingItems();break;
+      case '/api/item':result=store.item(params.id);break;
+      case '/api/gallery':result=store.gallery(params.id);break;
+      case '/api/document':result=store.document(params.id,params.kind);break;
+      case '/api/video-status':result=media.status(params.id);break;
+      case '/api/insights':result=store.insights({id:params.id});break;
+      case '/api/notes-index':result={items:store.notesIndex().items.map(i=>({...i,read_at:null}))};break;
+      case '/api/knowledge':result=existsSync(knowledge.file)?{ready:true,...knowledge.catalog(),pageReads:{}}:{ready:false};break;
+      case '/api/knowledge-page':result=knowledgePage(params.id);break;
+      case '/api/search':result=knowledgeSearch(params.q,params.limit);break;
+      // 游客在浏览器里收的素材，要靠这个补上作品标题和封面。
+      case '/api/summaries':result={items:[...store.summaries(String(params.ids||'').split(',').slice(0,500)).values()]};break;
+      default:throw new HttpError(404,'演示站没有这个接口');
+    }
+    // 服务器上的目录不给游客看。
+    send(200,JSON.parse(store.redact(result).split(JSON.stringify(home).slice(1,-1)).join('')));
+  }
   async function body(req){let size=0,parts=[];for await(const data of req){size+=data.length;if(size>32*1024)throw new HttpError(413,'请求内容过大');parts.push(data);}try{return JSON.parse(Buffer.concat(parts).toString('utf8')||'{}');}catch{throw new HttpError(400,'请求不是有效 JSON');}}
   const server=createServer(async(req,res)=>{
     const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
     const send=(code,value,type='application/json; charset=utf-8')=>{res.writeHead(code,{...headers,'Content-Type':type});res.end(type.startsWith('application/json')?encode(value):value);};
     try {
       if(req.headers.host!==new URL(origin).host)throw new HttpError(403,'请使用配置的控制台地址');
-      {const u=new URL(req.url,origin);if(req.method==='GET'&&u.pathname===basePath+CALLBACK_PATH){await xCallback(u,res,send);return;}}
+      if(!guest){const u=new URL(req.url,origin);if(req.method==='GET'&&u.pathname===basePath+CALLBACK_PATH){await xCallback(u,res,send);return;}}
       if(req.headers['sec-fetch-site']==='cross-site')throw new HttpError(403,'不接受跨站请求');
       const url=new URL(req.url,origin);let path=url.pathname;
       if(basePath){if(path===basePath){res.setHeader('Location',basePath+'/');send(308,'','text/plain');return;}if(!path.startsWith(basePath+'/'))throw new HttpError(404,'页面不存在');path=path.slice(basePath.length);}
-      if(path.startsWith('/api/v1/')){await externalApi(req,res,path,url,send);return;}
+      if(guest)freshen();
+      if(path.startsWith('/api/v1/')){if(guest)throw new HttpError(404,'接口不存在');await externalApi(req,res,path,url,send);return;}
       if(await access.handle(req,res,path,{origin,basePath,send}))return;
       if(req.method==='GET'&&/^\/fonts\/[a-z0-9-]+\.woff2$/.test(path)){
         const file=join(root,'web',path.slice(1));if(!existsSync(file))throw new HttpError(404,'页面不存在');
         res.writeHead(200,{...headers,'Content-Type':'font/woff2','Cache-Control':'public, max-age=604800'});res.end(readFileSync(file));return;
       }
-      if(req.method==='GET'&&['/','/studio.mjs','/studio.css','/studio-view.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs','/remote-login.mjs','/remote-login.css'].includes(path)) {
+      if(req.method==='GET'&&['/','/studio.mjs','/studio.css','/studio-view.mjs','/guest.mjs','/schedule-plan.mjs','/markdown.mjs','/login-ui.mjs','/remote-login.mjs','/remote-login.css'].includes(path)) {
         const name=path==='/'?'studio.html':path.slice(1),types={html:'text/html; charset=utf-8',js:'text/javascript; charset=utf-8',mjs:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8'};
-        let content=readFileSync(join(root,name==='schedule-plan.mjs'?'scripts':'web',name),'utf8');if(path==='/')content=content.replace('__CSRF_TOKEN__',token).replace('__SERVER_MODE__',serverMode?'1':'0').replace('__ACCESS_CONTROL__',external?'1':'0');
+        let content=readFileSync(join(root,name==='schedule-plan.mjs'?'scripts':'web',name),'utf8');if(path==='/')content=content.replace('__CSRF_TOKEN__',token).replace('__SERVER_MODE__',serverMode?'1':'0').replace('__ACCESS_CONTROL__',external&&!guest?'1':'0').replace('__GUEST__',guest?'1':'0').replace('__NOW__',String(guest?clock():''));
         send(200,content,types[name.split('.').pop()]);return;
       }
       if(!path.startsWith('/api/'))throw new HttpError(404,'页面不存在');
+      if(guest){await guestApi(req,res,path,url,send,headers);return;}
       if(req.method==='GET'&&path==='/api/login-frame'){
         const frame=await browserRequest({action:'frame'});send(200,Buffer.from(frame.image,'base64'),'image/jpeg');return;
       }
@@ -278,7 +342,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
           if(!state().running&&listIntents(home).length)try{start('apply-intents');}catch{}
           result={...store.overview(),execution:state(),scheduler:scheduleState()};break;
         }
-        case '/api/items':result=store.listItems(params);break;
+        case '/api/items':result=store.listItems(params.demo==='1'?{...params,ids:library.demoPicks()}:params);break;
         case '/api/gallery':result=store.gallery(params.id);break;
         case '/api/video-status':result=media.status(params.id);break;
         case '/api/queue':result=store.pendingItems();break;
@@ -293,6 +357,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/suggest':result={suggestions:suggestions(params.id)};break;
         case '/api/insights':result=store.insights({id:params.id});break;
         case '/api/tokens':result={tokens:library.tokens()};break;
+        case '/api/demo':result=demoState();break;
         case '/api/runs':result={runs:store.runs()};break;
         case '/api/costs':try{result=await costs();}catch(e){throw new HttpError(502,e.message);}break;
         case '/api/item-cost':try{result=await itemCost(params.id,{config:gatewayConfig(store.cfg()),fetchImpl:gatewayFetch});}catch(e){throw new HttpError(502,e.message);}break;
@@ -338,6 +403,8 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/material':result=enrich([library.addMaterial(data)])[0];break;
         case '/api/material-update':result=enrich([library.updateMaterial(data.id,data)])[0];break;
         case '/api/material-delete':result=library.removeMaterial(data.id);break;
+        case '/api/demo-pick':store.item(data.id);result=library.setDemoPick(data.id,data.picked!==false);break;
+        case '/api/demo-build':result=start('demo-build');break;
         case '/api/token':result=library.createToken(data);break;
         case '/api/token-revoke':result=library.revokeToken(data.id);break;
         case '/api/x-authorize':result=xAuthorize();break;
@@ -378,7 +445,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     server.listen(port,'127.0.0.1',()=>{
       origin=external?.origin||`http://127.0.0.1:${server.address().port}`;
       // 仅后台服务成功启动时恢复定时；页面请求和重复打开启动器均不会执行这里。
-      try {if(store.cfg()('DUST_AUTO_SCHEDULE','1')!=='0'&&!scheduler.status().loaded)scheduler.start();}
+      try {if(!guest&&store.cfg()('DUST_AUTO_SCHEDULE','1')!=='0'&&!scheduler.status().loaded)scheduler.start();}
       catch(error){scheduleStartupWarning=`自动开启定时失败：${error.message}。可在此重新开启。`;console.error(scheduleStartupWarning);}
       resolve(origin+basePath);
     });

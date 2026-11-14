@@ -74,7 +74,8 @@ export function liveLock(home = DUST_HOME) {
   try { process.kill(pid,0); return { running:true, pid }; }
   catch(e) { return { running:e.code !== 'ESRCH', pid, stale:e.code === 'ESRCH' }; }
 }
-export function createStore(home = DUST_HOME) {
+// now：当前时间（毫秒）。演示站把它固定在快照那一刻，今日、本周、最近 14 天都按那天算。
+export function createStore(home = DUST_HOME, { now = Date.now } = {}) {
   home = localPath(home);
   const confFile = join(home,'dustoff.conf');
   const conf = () => loadConf(confFile);
@@ -152,6 +153,8 @@ export function createStore(home = DUST_HOME) {
       const columns=new Set(db.prepare('PRAGMA table_info(items)').all().map(c=>c.name));
       const conversion=columns.has('delete_after_note')?'COALESCE(delete_after_note,0)':'0';
       const where=["COALESCE(skip_reason,'')!='user_deleted'"],values=[];
+      // ids：只看这几条（收藏记录里「已选进演示」）。
+      if(Array.isArray(params.ids)){const ids=params.ids.filter(validItemId).slice(0,5000);if(!ids.length)return {items:[],total:0,page:1,pages:1,size};where.push(`id IN (${ids.map(()=>'?').join(',')})`);values.push(...ids);}
       if(params.platform&&params.platform!=='all'){if(!PLATFORMS[params.platform])throw new HttpError(400,'平台无效');where.push('platform=?');values.push(params.platform);}
       if(params.galleries==='1')where.push("media_type='gallery' AND status='saved' AND media_path IS NOT NULL AND COALESCE(media_deleted,0)=0");
       else if(params.videos==='1')where.push(savedVideoWhere(conversion));
@@ -246,7 +249,7 @@ export function createStore(home = DUST_HOME) {
     const codes={0:0,1:0,2:0,5:0};for(const r of recent)codes[r.exit]=(codes[r.exit]||0)+1;
     const seconds=recent.map(r=>r.seconds).filter(Number.isFinite);
     const longest=recent.reduce((a,r)=>!a||r.seconds>a.seconds?r:a,null);
-    const weekAgo=Date.now()-7*86400_000,groups=new Map();
+    const weekAgo=now()-7*86400_000,groups=new Map();
     for(const r of history)if(Date.parse(r.started)>=weekAgo)for(const f of r.failures||[]){
       // 同类错误归为一组：去掉作品 ID、数字和引号内的具体内容。
       const key=String(f.error||'处理失败').replace(/\d{6,}/g,'').replace(/[“"'][^“"']*[”"']/g,'').replace(/\d+/g,'N').slice(0,60).trim()||'处理失败';
@@ -254,7 +257,7 @@ export function createStore(home = DUST_HOME) {
       g.count++;if(f.id)g.ids.add(f.id);if(f.platform)g.platforms.add(f.platform);groups.set(key,g);
     }
     const failures=[...groups.values()].map(g=>({reason:g.reason,items:g.ids.size,count:g.count,platforms:[...g.platforms],sample:[...g.ids].slice(0,3)})).sort((a,b)=>b.items-a.items||b.count-a.count).slice(0,8);
-    const days=[];const today=new Date();today.setHours(0,0,0,0);
+    const days=[];const today=new Date(now());today.setHours(0,0,0,0);
     for(let n=13;n>=0;n--){const d=new Date(today);d.setDate(d.getDate()-n);days.push({day:d.toLocaleDateString('sv-SE'),start:d.getTime()/1000});}
     const output=readDb(db=>{
       if(!has(db,'items'))return days.map(d=>({day:d.day,notes:0,saved:0}));
@@ -311,7 +314,7 @@ export function createStore(home = DUST_HOME) {
   function runs(){const dir=join(home,'runs');if(!existsSync(dir))return [];return readdirSync(dir).filter(n=>/^\d{8}T\d{6}(?:-\d+)?-(run|collect|extract|notes|console-action)$/.test(n)).sort().reverse().slice(0,150).map(id=>{const p=localPath(join(dir,id));return {id,modifiedAt:statSync(p).mtimeMs,result:readJson(join(p,'result.json'))};}).map(r=>JSON.parse(redact(r)));}
   function runDetail(id){if(!runs().some(r=>r.id===id))throw new HttpError(404,'运行记录不存在或已过保留期');return {id,log:tail(join(home,'runs',id,'run.log')),result:readJson(join(home,'runs',id,'result.json'))};}
   function overview(){
-    const date=new Date(),day=[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');
+    const date=new Date(now()),day=[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');
     const midnight=new Date(date.getFullYear(),date.getMonth(),date.getDate()).getTime()/1000;
     const totals=readDb(db=>{
       const out={total:0,notes:0,todayNotes:0,pending:0,failed:0,usedToday:0,baseline:null,statuses:[]};
@@ -343,14 +346,14 @@ export function createStore(home = DUST_HOME) {
     const login=readJson(join(home,'console','login.json'));
     const flag=existsSync(join(home,'NEEDS_LOGIN'));
     const p=policy(),biliFolders=readJson(join(home,'bilibili','folders.json'));
-    const bilibili={enabled:p.bilibili.enabled,session:sessionSummary(readJson(join(home,'state','bilibili-session.json')),Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),
+    const bilibili={enabled:p.bilibili.enabled,session:sessionSummary(readJson(join(home,'state','bilibili-session.json')),now()/1000,Number(get('DUST_WARN_DAYS',7))),
       startAt:totals.biliState?.start_at??null,scannedAt:totals.biliState?.scanned_at??null,folders:biliFolders?.folders||[],usedToday:totals.usedByPlatform?.bilibili||0,daily:p.bilibili.daily};
     // X 只回传连接状态，不回传令牌。
     const xSession=readJson(join(home,'state','x-session.json'))||{};
     const x={enabled:p.x.enabled,configured:!!get('DUST_X_CLIENT_ID',''),connected:existsSync(join(home,'x','token.json')),username:xSession.username||totals.xState?.username||null,
       online:xSession.online||null,onlineCheckedAt:xSession.online_checked_at||null,lastCheckAt:xSession.last_check_at||null,scannedAt:totals.xState?.scanned_at??null,complete:!!totals.xState?.complete,usedToday:totals.usedByPlatform?.x||0,daily:p.x.daily};
     delete totals.biliState;delete totals.xState;
-    return {...totals,bilibili,x,day,policy:p,lock:liveLock(home),storage,session:sessionSummary(session,Date.now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:notes.items,recentVideos:videos.items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
+    return {...totals,bilibili,x,day,policy:p,lock:liveLock(home),storage,session:sessionSummary(session,now()/1000,Number(get('DUST_WARN_DAYS',7))),login,needsLogin:flag,paths:{notes:get('DUST_NOTES',FIELDS.DUST_NOTES.fallback),text:get('DUST_TEXT',join(home,'text')),media,saved:localPath(get('DUST_SAVED_MEDIA',join(home,'saved-media'))),home},recent:notes.items,recentVideos:videos.items,lastRun:runs().find(r=>!r.id.endsWith('-console-action'))||null};
   }
   return {home,settings,saveSettings,overview,listItems,pendingItems,notesIndex,itemMeta,summaries,insights,item,document,fileFor,gallery,galleryFile,runs,runDetail,tail,redact,cfg,policy};
 }
