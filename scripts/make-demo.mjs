@@ -11,7 +11,9 @@
 // 知识库索引里这些笔记的大类和概念。主题综述是把主题下全部笔记合写的，会带出没选的笔记，
 // 所以只保留出处全在选中笔记里的综述，其余按选中的笔记重写（要调模型）；上一版演示站里
 // 笔记没变的综述直接沿用，不重写。运行记录只留每轮的时间、退出码和数量，不带作品和错误。
-// 不复制：已读、素材箱、令牌、登录状态、配置和密钥。
+// 标了「排队样例」的待决定作品，在演示站里摆成排队整理（正式数据不改）。
+// 素材箱另外生成演示用的样例：按知识库主题建选题，收几篇选中的笔记和摘录。
+// 不复制：已读、正式素材箱、令牌、登录状态、配置和密钥。
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, statSync, linkSync, copyFileSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
@@ -62,7 +64,7 @@ export async function buildDemo({ home = DUST_HOME, target, cfg = makeCfg({ conf
   home = localPath(home);
   target = target ? checkTarget(target, home) : demoHome(home, cfg);
   if (!target) throw new Error('还没有设置演示数据目录（DUST_DEMO_HOME）');
-  const library = createLibrary(home), picks = library.demoPicks(); library.close();
+  const library = createLibrary(home), picks = library.demoPicks(), queued = library.demoQueued(); library.close();
   if (!picks.length) throw new Error('还没有选进演示站的作品');
   const ledgerFile = localPath(process.env.DUST_DB || join(home, 'index.sqlite'));
   if (!existsSync(ledgerFile)) throw new Error('正式数据里还没有收藏账本');
@@ -91,11 +93,22 @@ export async function buildDemo({ home = DUST_HOME, target, cfg = makeCfg({ conf
       }
       // 错误信息里可能有服务器路径，演示站不需要。
       db.exec('UPDATE items SET last_error=NULL');
+      // 排队样例：还在等决定的作品摆成「已选笔记、等下一轮整理」，放回队列。
+      const queueCols = tables.has('daily_queue') ? new Set(db.prepare('PRAGMA table_info(daily_queue)').all().map(c => c.name)) : null;
+      for (const id of queued) {
+        const r = db.prepare("SELECT platform FROM items WHERE id=? AND status='review'").get(id);
+        if (!r) continue;
+        db.prepare("UPDATE items SET status='pending', processing_mode='note', attempts=0 WHERE id=?").run(id);
+        if (queueCols && !db.prepare('SELECT 1 FROM daily_queue WHERE id=?').get(id)) {
+          if (queueCols.has('platform')) db.prepare("INSERT INTO daily_queue(id,metadata,enqueued,platform) VALUES(?,'{}',?,?)").run(id, Math.floor(now() / 1000), r.platform);
+          else db.prepare("INSERT INTO daily_queue(id,metadata,enqueued) VALUES(?,'{}',?)").run(id, Math.floor(now() / 1000));
+        }
+      }
       rows = db.prepare('SELECT id,status,media_type,processing_mode,note_path,text_path,media_path,media_deleted FROM items').all();
     } finally { db.close(); }
     const counts = { items: rows.length, notes: rows.filter(r => r.note_path).length, videos: rows.filter(r => r.media_type === 'video' && (r.status === 'saved' || r.processing_mode === 'video')).length,
-      galleries: rows.filter(r => r.media_type === 'gallery').length, posts: rows.filter(r => r.media_type === 'post').length, review: rows.filter(r => r.status === 'review').length };
-    onLog(`选进演示站 ${picks.length} 条，账本里找到 ${rows.length} 条：笔记 ${counts.notes}，视频 ${counts.videos}，图集 ${counts.galleries}，X 原帖 ${counts.posts}，待决定 ${counts.review}`);
+      galleries: rows.filter(r => r.media_type === 'gallery').length, posts: rows.filter(r => r.media_type === 'post').length, review: rows.filter(r => r.status === 'review').length, queued: rows.filter(r => r.status === 'pending').length };
+    onLog(`选进演示站 ${picks.length} 条，账本里找到 ${rows.length} 条：笔记 ${counts.notes}，视频 ${counts.videos}，图集 ${counts.galleries}，X 原帖 ${counts.posts}，待决定 ${counts.review}，排队 ${counts.queued}`);
     if (dryRun) { rmSync(stage, { recursive: true, force: true }); return { dryRun: true, picks: picks.length, counts }; }
 
     // ── 文件：按正式数据的目录结构放进演示目录 ──
@@ -207,13 +220,17 @@ export async function buildDemo({ home = DUST_HOME, target, cfg = makeCfg({ conf
       try { raw.prepare('UPDATE docs SET path=? || substr(path, ?) WHERE substr(path, 1, ?)=?').run(target + sep, stage.length + 2, stage.length + 1, stage + sep); raw.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } finally { raw.close(); }
     }
 
+    // ── 素材箱样例 ──
+    const materials = sampleMaterials(stage, now);
+    onLog(`素材箱样例：选题 ${materials.topics} 个，素材 ${materials.materials} 条`);
+
     // ── 收尾：路径改成正式位置，写说明，整体替换 ──
     const fix = new DatabaseSync(join(stage, 'index.sqlite'));
     try {
       for (const col of ['note_path', 'text_path', 'media_path']) fix.prepare(`UPDATE items SET ${col}=? || substr(${col}, ?) WHERE substr(${col}, 1, ?)=?`).run(target + sep, stage.length + 2, stage.length + 1, stage + sep);
       fix.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     } finally { fix.close(); }
-    const info = { version: 1, build: randomBytes(8).toString('hex'), built_at: new Date(now()).toISOString(), snapshot_at: now(), picks: picks.length, counts, pages };
+    const info = { version: 1, build: randomBytes(8).toString('hex'), built_at: new Date(now()).toISOString(), snapshot_at: now(), picks: picks.length, counts, pages, materials };
     writeFileSync(join(stage, 'demo.json'), JSON.stringify(info, null, 2) + '\n', { mode: 0o600 });
     const old = target + '.old';
     rmSync(old, { recursive: true, force: true });
@@ -223,6 +240,61 @@ export async function buildDemo({ home = DUST_HOME, target, cfg = makeCfg({ conf
     onLog(`演示数据已更新：${target}`);
     return info;
   } catch (e) { rmSync(stage, { recursive: true, force: true }); throw e; }
+}
+
+// 摘录：笔记正文里第一句成段的话（跳过属性、标题、列表、引用和表格），最多 140 字。
+export function excerptOf(text) {
+  const body = String(text).replace(/^---\n[\s\S]*?\n---\n/, '');
+  for (const raw of body.split('\n')) {
+    const line = raw.trim();
+    if (!line || /^(#|>|[-*+] |\d+[.、] |\||!\[|```|<|---)/.test(line)) continue;
+    const plain = line.replace(/\*\*|__|`/g, '').replace(/\[\[([^\]|]*)(\|[^\]]*)?\]\]/g, '$1').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    if (plain.length < 12) continue;
+    if (plain.length <= 140) return plain;
+    const cut = plain.slice(0, 140), end = Math.max(...['。', '！', '？', '；'].map(c => cut.lastIndexOf(c)));
+    return end >= 40 ? cut.slice(0, end + 1) : cut + '…';
+  }
+  return '';
+}
+
+// 素材箱样例：笔记最多的两个知识库主题各建一个选题，收三篇笔记（一篇只进一个选题）和其中一段摘录；
+// 再收一条视频、一个图集放在未归类。内容都取自选中的作品，备注留空，不替作者编话。
+function sampleMaterials(stage, now) {
+  const at = Math.floor(now() / 1000), lib = createLibrary(stage, { now: () => at, path: join(stage, 'library.sqlite') }), out = { topics: 0, materials: 0 };
+  const ledger = new DatabaseSync(join(stage, 'index.sqlite'), { readOnly: true });
+  const rows = new Map(ledger.prepare('SELECT id,status,media_type,note_path,media_path,media_deleted FROM items ORDER BY collected_at DESC, id').all().map(r => [r.id, r]));
+  ledger.close();
+  const add = (item, kind, topic_id, excerpt) => { out.materials++; return lib.addMaterial({ item, kind, topic_id, excerpt }); };
+  try {
+    let themes = [];
+    if (existsSync(join(stage, 'knowledge.sqlite'))) {
+      const kb = new DatabaseSync(join(stage, 'knowledge.sqlite'), { readOnly: true });
+      try {
+        themes = kb.prepare('SELECT t.id, t.name, t.summary, count(*) n FROM themes t JOIN doc_themes d ON d.theme_id=t.id GROUP BY t.id HAVING n>=2 ORDER BY n DESC, t.id').all()
+          .map(t => ({ ...t, items: kb.prepare('SELECT item FROM doc_themes WHERE theme_id=? ORDER BY item').all(t.id).map(r => r.item) }));
+      } finally { kb.close(); }
+    }
+    const used = new Set();
+    for (const t of themes) {
+      if (out.topics === 2) break;
+      const notes = t.items.filter(i => rows.get(i)?.note_path && existsSync(rows.get(i).note_path) && !used.has(i)).slice(0, 3);
+      if (notes.length < 2 || lib.topics().some(x => x.name === t.name.slice(0, 40))) continue;   // 不同大类可能有同名主题
+      const topic = lib.saveTopic({ name: t.name.slice(0, 40), description: t.summary.slice(0, 500) }); out.topics++;
+      for (const i of notes) { used.add(i); add(i, rows.get(i).media_type === 'post' ? 'post' : 'note', topic.id); }
+      for (const i of notes) {
+        const quote = excerptOf(readFileSync(rows.get(i).note_path, 'utf8'));
+        if (!quote) continue;
+        const m = add(i, 'excerpt', topic.id, quote);
+        if (out.topics === 1) lib.updateMaterial(m.id, { status: 'using' });   // 看板的「在用」一栏也有一条
+        break;
+      }
+    }
+    for (const type of ['video', 'gallery']) {
+      const r = [...rows.values()].find(r => r.media_type === type && r.status === 'saved' && r.media_path && !r.media_deleted && existsSync(r.media_path));
+      if (r) add(r.id, type, null);
+    }
+  } finally { lib.close(); }
+  return out;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

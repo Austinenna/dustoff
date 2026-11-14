@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS materials (
 CREATE INDEX IF NOT EXISTS idx_materials_topic ON materials(topic_id, status);
 CREATE INDEX IF NOT EXISTS idx_materials_updated ON materials(updated_at, id);
 -- 选进演示站的作品。演示站每次更新时只复制这些作品的记录和文件。
-CREATE TABLE IF NOT EXISTS demo_picks (item TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+-- queued：待决定的作品在演示站里摆成「排队整理」，给游客看排队的样子；正式数据不改。
+CREATE TABLE IF NOT EXISTS demo_picks (item TEXT PRIMARY KEY, created_at INTEGER NOT NULL, queued INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS api_tokens (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, hint TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, scope TEXT NOT NULL,
   created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER);
@@ -52,6 +53,7 @@ export function createLibrary(home, { now = () => Math.floor(Date.now() / 1000),
     db = new DatabaseSync(file);
     db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000; PRAGMA foreign_keys=ON');
     db.exec(SCHEMA);
+    if (!db.prepare('PRAGMA table_info(demo_picks)').all().some(c => c.name === 'queued')) db.exec('ALTER TABLE demo_picks ADD COLUMN queued INTEGER NOT NULL DEFAULT 0');
     return db;
   }
   const one = (sql, ...args) => open().prepare(sql).get(...args);
@@ -183,11 +185,12 @@ export function createLibrary(home, { now = () => Math.floor(Date.now() / 1000),
 
   // ── 演示站 ──
   function demoPicks() { return all('SELECT item FROM demo_picks ORDER BY created_at, item').map(r => r.item); }
-  function setDemoPick(item, picked) {
+  function demoQueued() { return all('SELECT item FROM demo_picks WHERE queued=1 ORDER BY created_at, item').map(r => r.item); }
+  function setDemoPick(item, picked, queued = false) {
     if (!validItemId(item)) throw new HttpError(400, '作品 ID 不正确');
-    if (picked) run('INSERT OR IGNORE INTO demo_picks(item, created_at) VALUES(?, ?)', item, now());
+    if (picked) run('INSERT INTO demo_picks(item, created_at, queued) VALUES(?, ?, ?) ON CONFLICT(item) DO UPDATE SET queued=excluded.queued', item, now(), queued ? 1 : 0);
     else run('DELETE FROM demo_picks WHERE item=?', item);
-    return { item, picked: !!picked };
+    return { item, picked: !!picked, queued: !!picked && !!queued };
   }
 
   // ── 对外访问令牌 ──
@@ -218,5 +221,5 @@ export function createLibrary(home, { now = () => Math.floor(Date.now() / 1000),
   }
 
   function close() { if (db) { db.close(); db = null; } }
-  return { file, readIds, setRead, pageReads, setPageRead, topics, topic, saveTopic, deleteTopic, materials, material, addMaterial, updateMaterial, removeMaterial, recordUsage, suggest, demoPicks, setDemoPick, tokens, createToken, revokeToken, verifyToken, close };
+  return { file, readIds, setRead, pageReads, setPageRead, topics, topic, saveTopic, deleteTopic, materials, material, addMaterial, updateMaterial, removeMaterial, recordUsage, suggest, demoPicks, demoQueued, setDemoPick, tokens, createToken, revokeToken, verifyToken, close };
 }

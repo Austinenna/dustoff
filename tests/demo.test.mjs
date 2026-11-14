@@ -15,20 +15,21 @@ import { buildDemo } from '../scripts/make-demo.mjs';
 
 const SNAPSHOT = Date.parse('2026-11-14T12:00:00+08:00');
 const sha = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
-// 虚构的正式数据：笔记 1、2、7 和图集 4、待决定的 5、X 原帖 x6 选进演示站，笔记 3 没选。
+// 虚构的正式数据：笔记 1、2、7 和图集 4、待决定的 5、X 原帖 x6 选进演示站，笔记 3 没选；待决定的 8 选进来摆成排队。
 // 主题 A（1、2、3）和主题 C（1、2、3、7）的综述出处里有没选的 3；主题 B（1、2、7）的全在选中的笔记里。
 function fixture() {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'dustoff-demo-'))), home = join(base, 'prod'), demo = join(base, 'demo');
   mkdirSync(home);
   const init = spawnSync(process.execPath, ['--input-type=module', '-e', `import {db} from ${JSON.stringify(new URL('../scripts/ledger.mjs', import.meta.url).href)};db().close();`], { env: { ...process.env, DUST_HOME: home }, encoding: 'utf8' });
   assert.equal(init.status, 0, init.stderr);
-  for (const d of ['notes', 'text', 'saved-media/4/images', 'saved-media/.review/5', 'runs']) mkdirSync(join(home, d), { recursive: true });
+  for (const d of ['notes', 'text', 'saved-media/4/images', 'saved-media/.review/5', 'saved-media/.review/8', 'runs']) mkdirSync(join(home, d), { recursive: true });
   const note = id => { writeFileSync(join(home, 'notes', `${id}.md`), `---\n标题: "笔记${id}"\n---\n# 核心观点\n\n第 ${id} 篇讲剪辑节拍的正文，内容足够长。`); writeFileSync(join(home, 'text', `${id}.txt`), `第 ${id} 篇的原稿。`); };
   for (const id of ['1', '2', '3', '7', 'x6']) note(id);
   writeFileSync(join(home, 'text', '1.words.json'), '[]');
   writeFileSync(join(home, 'saved-media', '4', 'images', '001.jpg'), 'jpg');
   writeFileSync(join(home, 'saved-media', '4', 'images', 'gallery.json'), JSON.stringify({ version: 1, id: '4', images: [{ index: 0, file: '001.jpg', ext: 'jpg', width: 3, height: 4, bytes: 3 }] }));
   writeFileSync(join(home, 'saved-media', '.review', '5', 'video.mp4'), 'mp4');
+  writeFileSync(join(home, 'saved-media', '.review', '8', 'video.mp4'), 'mp4');
   const db = new DatabaseSync(join(home, 'index.sqlite'));
   db.exec('CREATE TABLE daily_state(name TEXT PRIMARY KEY,value TEXT); CREATE TABLE daily_queue(id TEXT PRIMARY KEY,metadata TEXT,enqueued INTEGER); CREATE TABLE daily_usage(day TEXT,id TEXT,PRIMARY KEY(day,id));');
   db.prepare('INSERT INTO daily_state VALUES(?,?)').run('baseline', JSON.stringify({ created_at: 1, scanned_at: 2, anchors: ['3'] }));
@@ -38,6 +39,7 @@ function fixture() {
   for (const [n, id] of ['1', '2', '3', '7'].entries()) add.run(id, 'douyin', `原标题${id}`, 'extracted', 'video', 'note', SNAPSHOT / 1000 - 86400 * (n + 1), SNAPSHOT / 1000 - 3600, join(home, 'notes', `${id}.md`), join(home, 'text', `${id}.txt`), join(home, 'media', id, 'video.mp4'), 1, `读不到 ${home}/media/${id}`);
   add.run('4', 'douyin', '图集', 'saved', 'gallery', 'gallery', 1, null, null, null, join(home, 'saved-media', '4', 'images', 'gallery.json'), 0, null);
   add.run('5', 'douyin', '待决定的视频', 'review', 'video', 'review', 1, null, null, null, join(home, 'saved-media', '.review', '5', 'video.mp4'), 0, null);
+  add.run('8', 'douyin', '另一条待决定', 'review', 'video', 'review', 1, null, null, null, join(home, 'saved-media', '.review', '8', 'video.mp4'), 0, null);
   add.run('x6', 'x', '原帖', 'extracted', 'post', 'note', 1, 1, join(home, 'notes', 'x6.md'), join(home, 'text', 'x6.txt'), null, 0, null);
   db.close();
   writeFileSync(join(home, 'runs', 'history.jsonl'), [
@@ -62,6 +64,8 @@ function fixture() {
   raw.close(); kb.close();
   const lib = createLibrary(home);
   for (const id of ['1', '2', '7', '4', '5', 'x6']) lib.setDemoPick(id, true);
+  lib.setDemoPick('8', true, true);
+  lib.saveTopic({ name: '作者自己的选题' }); lib.addMaterial({ item: '1', kind: 'note' });
   lib.setRead('1', true);
   lib.close();
   return { home, demo, cleanup: () => rmSync(base, { recursive: true, force: true }) };
@@ -79,11 +83,13 @@ test('演示数据：只复制选中的作品和文件，路径改到演示目�
   try {
     const calls = [], info = await buildDemo({ home: f.home, fetchImpl: pageModel(calls), now: () => SNAPSHOT, onLog: quiet });
     assert.equal(info.snapshot_at, SNAPSHOT);
-    assert.deepEqual(info.counts, { items: 6, notes: 4, videos: 0, galleries: 1, posts: 1, review: 1 });
+    assert.deepEqual(info.counts, { items: 7, notes: 4, videos: 0, galleries: 1, posts: 1, review: 1, queued: 1 });
     assert.ok(!existsSync(f.demo + '.next') && !existsSync(f.demo + '.old'));
     const db = new DatabaseSync(join(f.demo, 'index.sqlite'), { readOnly: true });
     const rows = new Map(db.prepare('SELECT * FROM items').all().map(r => [r.id, r]));
-    assert.deepEqual([...rows.keys()].sort(), ['1', '2', '4', '5', '7', 'x6']);
+    assert.deepEqual([...rows.keys()].sort(), ['1', '2', '4', '5', '7', '8', 'x6']);
+    assert.deepEqual([rows.get('8').status, rows.get('8').processing_mode], ['pending', 'note']);   // 排队样例
+    assert.equal(rows.get('8').media_path, join(f.demo, 'saved-media', '.review', '8', 'video.mp4'));
     assert.equal(rows.get('1').note_path, join(f.demo, 'notes', '1.md'));
     assert.equal(rows.get('4').media_path, join(f.demo, 'saved-media', '4', 'images', 'gallery.json'));
     assert.equal(rows.get('5').media_path, join(f.demo, 'saved-media', '.review', '5', 'video.mp4'));
@@ -94,15 +100,22 @@ test('演示数据：只复制选中的作品和文件，路径改到演示目�
     assert.ok(existsSync(join(f.demo, 'saved-media', '4', 'images', '001.jpg')) && existsSync(join(f.demo, 'text', '1.words.json')));
     assert.ok(!existsSync(join(f.demo, 'notes', '3.md')));
     assert.equal(statSync(join(f.demo, 'notes', '1.md')).ino, statSync(join(f.home, 'notes', '1.md')).ino);   // 同一磁盘用硬链接
-    assert.deepEqual(db.prepare('SELECT id FROM daily_queue').all().map(r => r.id), ['5']);
+    assert.deepEqual(db.prepare('SELECT id FROM daily_queue ORDER BY id').all().map(r => r.id), ['5', '8']);
     assert.equal(db.prepare('SELECT count(*) n FROM daily_usage').get().n, 0);
     const state = Object.fromEntries(db.prepare('SELECT name,value FROM daily_state').all().map(r => [r.name, JSON.parse(r.value)]));
     assert.deepEqual(state, { baseline: { created_at: 1, scanned_at: 2 }, 'baseline:x': { version: 1, scanned_at: 3, complete: true } });
     db.close();
     const history = readFileSync(join(f.demo, 'runs', 'history.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
     assert.deepEqual(history, [{ run: 'r1', version: 'abc', started: '2026-11-13T02:00:00Z', seconds: 60, exit: 2, notes: 1 }]);   // 快照之后的不带，失败明细和暂停原因不带
-    // 已读、素材、令牌不复制
-    assert.ok(!existsSync(join(f.demo, 'library.sqlite')) && !existsSync(join(f.demo, 'dustoff.conf')));
+    // 已读、正式素材箱、令牌不复制；素材箱是按知识库主题生成的样例：主题 B 的三篇笔记和一段摘录，图集放未归类。
+    assert.ok(!existsSync(join(f.demo, 'dustoff.conf')));
+    const lib = createLibrary(f.demo);
+    assert.equal(lib.readIds().size, 0); assert.equal(lib.tokens().length, 0);
+    assert.deepEqual(lib.topics().map(t => [t.name, t.description, t.count]), [['主题B', '主题B说明', 4]]);
+    assert.deepEqual(lib.materials().map(m => [m.item, m.kind, m.topic_id && 'B', m.status, m.memo]).sort(), [['1', 'excerpt', 'B', 'using', ''], ['1', 'note', 'B', 'todo', ''], ['2', 'note', 'B', 'todo', ''], ['4', 'gallery', null, 'todo', ''], ['7', 'note', 'B', 'todo', '']]);
+    assert.equal(lib.materials({ kind: 'excerpt' })[0].excerpt, '第 1 篇讲剪辑节拍的正文，内容足够长。');
+    lib.close();
+    assert.deepEqual(info.materials, { topics: 1, materials: 5 });
     // 知识库：没选的笔记和只属于它的概念删掉；综述出处全在选中笔记里的保留，带出没选笔记的删掉，够 3 篇的按选中的重写。
     const kb = new DatabaseSync(join(f.demo, 'knowledge.sqlite'), { readOnly: true });
     assert.deepEqual(kb.prepare('SELECT item FROM docs ORDER BY item').all().map(r => r.item), ['1', '2', '7', 'x6']);
@@ -151,7 +164,7 @@ test('演示站：不要密码、只能看；「现在」固定在快照那天�
     assert.match(s.html, new RegExp(`name="dustoff-now" content="${SNAPSHOT}"`));
     const o = (await s.get('overview')).body;
     assert.equal(o.day, '2026-11-14');
-    assert.equal(o.total, 6); assert.equal(o.review, 1);
+    assert.equal(o.total, 7); assert.equal(o.review, 1); assert.equal(o.pending, 1);
     assert.equal(o.paths, null); assert.equal(o.x.username, null); assert.equal(o.scheduler.loaded, false); assert.equal(o.demo.snapshot_at, SNAPSHOT);
     assert.ok(!JSON.stringify(o).includes(f.demo));
     const item = (await s.get('item?id=1')).body;
@@ -159,7 +172,9 @@ test('演示站：不要密码、只能看；「现在」固定在快照那天�
     assert.ok(!JSON.stringify((await s.get('document?id=1&kind=note')).body).includes(f.demo));
     assert.equal((await s.get('item?id=3')).status, 404);
     assert.ok((await s.get('notes-index')).body.items.every(n => n.read_at === null));   // 作者自己的已读不带过来
-    assert.deepEqual((await s.get('library')).body, { topics: [], materials: [], unsorted: 0 });
+    const sample = (await s.get('library')).body;
+    assert.deepEqual([sample.topics.map(t => t.name), sample.materials.length], [['主题B'], 5]);
+    assert.deepEqual((await s.get('items?status=pending')).body.items.map(i => i.id), ['8']);
     assert.deepEqual((await s.get('summaries?ids=1,3')).body.items.map(i => i.id), ['1']);
     assert.equal((await s.get('search?q=节拍')).body.ready, true);
     for (const path of ['tokens', 'settings', 'costs', 'runs', 'log?kind=console', 'session', 'demo']) assert.equal((await s.get(path)).status, 404, path);
@@ -169,7 +184,8 @@ test('演示站：不要密码、只能看；「现在」固定在快照那天�
     const lib = createLibrary(f.home); lib.setDemoPick('5', false); lib.close();
     await buildDemo({ home: f.home, fetchImpl: pageModel([]), now: () => SNAPSHOT + 86400000, onLog: quiet });
     const next = (await s.get('overview')).body;
-    assert.equal(next.total, 5); assert.equal(next.day, '2026-11-15');
+    assert.equal(next.total, 6); assert.equal(next.day, '2026-11-15');
+    assert.equal((await s.get('library')).body.materials.length, 5);   // 换过数据也读新的素材样例
   } finally { await s.close(); f.cleanup(); }
 });
 
@@ -181,12 +197,16 @@ test('正式控制台：在收藏里标记放进演示站，筛出已选的，�
   try {
     let d = (await s.get('demo')).body;
     assert.equal(d.configured, true); assert.equal(d.url, 'https://example.test/demo/');
-    assert.deepEqual([...d.picks].sort(), ['1', '2', '4', '5', '7', 'x6']);
-    assert.deepEqual((await s.post('demo-pick', { id: '3', picked: true })).body, { item: '3', picked: true });
+    assert.deepEqual([...d.picks].sort(), ['1', '2', '4', '5', '7', '8', 'x6']);
+    assert.deepEqual(d.queued, ['8']);
+    assert.deepEqual((await s.post('demo-pick', { id: '5', picked: true, queued: true })).body, { item: '5', picked: true, queued: true });
+    assert.deepEqual((await s.get('demo')).body.queued, ['5', '8']);
+    await s.post('demo-pick', { id: '5', picked: true, queued: false });
+    assert.deepEqual((await s.post('demo-pick', { id: '3', picked: true })).body, { item: '3', picked: true, queued: false });
     assert.equal((await s.post('demo-pick', { id: '999', picked: true })).status, 404);
-    assert.equal((await s.get('items?demo=1&size=50')).body.total, 7);
+    assert.equal((await s.get('items?demo=1&size=50')).body.total, 8);
     await s.post('demo-pick', { id: '3', picked: false });
-    assert.equal((await s.get('items?demo=1&size=50')).body.total, 6);
+    assert.equal((await s.get('items?demo=1&size=50')).body.total, 7);
     assert.equal((await s.post('demo-build', {})).status, 200);
     assert.match(spawned[0][0], /scripts\/make-demo\.mjs$/);
   } finally { await s.close(); f.cleanup(); }

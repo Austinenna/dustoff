@@ -21,7 +21,7 @@ if(document.querySelector('meta[name="dustoff-access"]')?.content==='1'){const f
 // ── 路由：沿用旧地址，旧书签和 X 授权回调（#account）仍能打开对应页面 ──
 const PAGES={overview:'今日',pending:'收件箱',notes:'知识库',videos:'媒体库',materials:'素材箱',collection:'收藏记录',pipeline:'流水线',health:'健康',settings:'设置'};
 if(guest)for(const k of ['pipeline','health','settings'])delete PAGES[k];
-const ALIASES={results:['notes'],run:['pending'],galleries:['videos','gallery'],posts:['videos','post'],schedule:['pipeline','schedule'],history:['pipeline','history'],account:['pipeline','sources'],models:['settings','models'],rules:['settings','rules'],storage:['settings','storage'],api:['settings','api'],demo:['settings','demo']};
+const ALIASES={results:['notes'],run:['pending'],galleries:['videos','gallery'],posts:['videos','post'],schedule:['pipeline','schedule'],history:['pipeline','history'],account:['pipeline','sources'],models:['settings','models'],rules:['settings','rules'],storage:['settings','storage'],api:['settings','api'],demo:['settings','demo'],queue:['collection','pending']};
 const state={route:'overview',overview:null,settings:null,index:null,library:null,insights:null,
   kb:{id:null,page:false,cat:'all',theme:null,concept:null,read:'all',tag:null,platform:'all',type:'all',q:'',search:null,view:'read',kind:'note',list:true},
   media:{tab:'video',platform:'all',q:'',page:1},inbox:{id:null,page:1},
@@ -151,7 +151,7 @@ async function loadToday(){
   <section class="card pipeline-band">
     <a class="stage" href="#collection"><span class="eyebrow"><b>1</b>收进来</span><strong>${newTotal}</strong><small>今天新收藏</small><span class="lanes">${Object.entries(todayNew).map(([k,v])=>`${pf(k)} ${v}`).join(' ')||'暂无'}</span></a>
     <a class="stage ${o.review?'attn':''}" href="#pending"><span class="eyebrow"><b>2</b>等你决定</span><strong>${o.review}</strong><small>需要你选用途</small><span class="lanes">${o.review?'点开逐条处理':'都处理完了'}</span></a>
-    <a class="stage" href="${guest?'#collection':'#pipeline'}"><span class="eyebrow"><b>3</b>排队整理</span><strong>${o.pending}</strong><small>保存视频 · 转写 · 整理</small><span class="lanes">${paused.map(([k])=>chip(`<span class="dot"></span>${esc(PLATFORM_LABELS[k]||k)}暂停中`,'amber')).join('')||(busy()?chip('<span class="dot"></span>正在运行','green'):'')}</span></a>
+    <a class="stage" href="${guest?'#queue':'#pipeline'}"><span class="eyebrow"><b>3</b>排队整理</span><strong>${o.pending}</strong><small>保存视频 · 转写 · 整理</small><span class="lanes">${paused.map(([k])=>chip(`<span class="dot"></span>${esc(PLATFORM_LABELS[k]||k)}暂停中`,'amber')).join('')||(busy()?chip('<span class="dot"></span>正在运行','green'):'')}</span></a>
     <a class="stage" href="#notes"><span class="eyebrow"><b>4</b>变成知识</span><strong>${o.notes}</strong><small>笔记 · 本周 +${weekNotes}</small>${spark(outputs)}</a>
   </section>
   ${warn.length?`<section class="card alert-strip">${warn.join('')}</section>`:''}
@@ -891,10 +891,10 @@ async function loadDemoTab(){
   const pages=info?.pages,pageLine=pages?`综述：保留 ${pages.kept} 页，沿用上一版 ${pages.reused} 页，新写 ${pages.written} 页${pages.failed?`，失败 ${pages.failed} 页`:''}${pages.skipped?`；${esc(pages.skipped)}`:''}`:'';
   $('#demo-tab').innerHTML=!d.configured?`<section class="card card-pad"><div class="sec-head"><h2>演示站</h2></div><div class="callout">${esc(d.error||'还没有设置演示数据目录。在 dustoff.conf 里加上 DUST_DEMO_HOME（演示数据放在哪，必须和正式数据分开），需要的话再加 DUST_DEMO_URL（演示站地址）。')}</div></section>`:`<div class="grid2">
     <section class="card card-pad"><div class="sec-head"><h2>演示站</h2><span class="sub">游客不用密码就能看的那一份</span>${d.url?`<a class="btn quiet sm" style="margin-left:auto" href="${esc(d.url)}" target="_blank" rel="noopener">打开演示站 ↗</a>`:''}</div>
-      <dl class="kv" style="font-size:13px"><dt>已选</dt><dd>${d.picks.length} 条</dd><dt>上次更新</dt><dd>${result}</dd>${c?`<dt>演示站里现在有</dt><dd>笔记 ${c.notes} · 视频 ${c.videos} · 图集 ${c.galleries} · X 原帖 ${c.posts} · 待决定 ${c.review}</dd>`:''}${pageLine?`<dt>综述</dt><dd>${pageLine.replace(/^综述：/,'')}</dd>`:''}</dl>
+      <dl class="kv" style="font-size:13px"><dt>已选</dt><dd>${d.picks.length} 条</dd><dt>上次更新</dt><dd>${result}</dd>${c?`<dt>演示站里现在有</dt><dd>笔记 ${c.notes} · 视频 ${c.videos} · 图集 ${c.galleries} · X 原帖 ${c.posts} · 待决定 ${c.review} · 排队 ${c.queued??0}${info.materials?` · 素材样例 ${info.materials.materials}`:''}</dd>`:''}${pageLine?`<dt>综述</dt><dd>${pageLine.replace(/^综述：/,'')}</dd>`:''}</dl>
       <div class="row" style="margin-top:14px">${button(`${ic('play',14)}更新演示站`,'demo-build',`data-idle ${busy()||!d.picks.length?'disabled':''}`,'primary sm')}<small>按现在选的重新生成，进度在流水线里看</small></div></section>
-    <section class="card card-pad"><div class="sec-head"><h2>怎么挑</h2></div><p class="muted" style="font-size:12.5px;line-height:1.8">在收藏详情、笔记阅读区、图集里点「放进演示站」，再点一次移出。挑完点「更新演示站」才会生效，之前的演示站继续可以看。<br>更新时只复制选中作品的记录和文件。主题综述是把整个主题的笔记合写的，出处里有没选的笔记时，按选中的笔记重写，要调用模型；笔记没变的综述沿用上一版。<br>已读、素材箱、令牌、登录状态、配置都不会复制。</p></section></div>
-    <section class="card" style="margin-top:20px"><div class="sec-head" style="padding:16px 18px 6px;margin:0"><h2>已选的作品</h2><span class="sub">${list.total} 条${list.total>50?' · 显示最近 50 条，全部在「收藏记录 → 已选进演示」':''}</span></div>${list.items.length?`<div class="table-wrap"><table class="table"><tbody>${list.items.map(i=>`<tr><td><button type="button" class="item-title" data-action="detail" data-id="${esc(i.id)}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${esc(kindOf(i))}</small></td><td>${pf(i.platform)}</td><td>${tag(resultLabel(i))}</td><td>${button('移出','demo-pick',`data-id="${esc(i.id)}" data-picked="0"`,'quiet sm')}</td></tr>`).join('')}</tbody></table></div>`:`<p class="muted" style="font-size:13px;padding:0 18px 18px">还没有选。</p>`}</section>`;
+    <section class="card card-pad"><div class="sec-head"><h2>怎么挑</h2></div><p class="muted" style="font-size:12.5px;line-height:1.8">在收藏详情、笔记阅读区、图集里点「放进演示站」，再点一次移出。挑完点「更新演示站」才会生效，之前的演示站继续可以看。<br>更新时只复制选中作品的记录和文件。主题综述是把整个主题的笔记合写的，出处里有没选的笔记时，按选中的笔记重写，要调用模型；笔记没变的综述沿用上一版。<br>收件箱里待决定的作品选进来就在演示站的收件箱里；点「演示里排队」改成显示在排队整理里，正式数据不变。<br>素材箱放的是按知识库主题自动生成的样例，你的素材箱不复制。已读、令牌、登录状态、配置也不复制。</p></section></div>
+    <section class="card" style="margin-top:20px"><div class="sec-head" style="padding:16px 18px 6px;margin:0"><h2>已选的作品</h2><span class="sub">${list.total} 条${list.total>50?' · 显示最近 50 条，全部在「收藏记录 → 已选进演示」':''}</span></div>${list.items.length?`<div class="table-wrap"><table class="table"><tbody>${list.items.map(i=>`<tr><td><button type="button" class="item-title" data-action="detail" data-id="${esc(i.id)}">${esc(titleOf(i))}</button><small>${esc(i.author||'未知作者')} · ${esc(kindOf(i))}</small></td><td>${pf(i.platform)}</td><td>${tag(d.queued.includes(i.id)?'演示里排队':resultLabel(i))}</td><td>${i.status==='review'?button(d.queued.includes(i.id)?'改回收件箱':'演示里排队','demo-queue',`data-id="${esc(i.id)}" data-queued="${d.queued.includes(i.id)?0:1}" title="只改演示站里的样子，正式数据不变；下次更新演示站时生效"`,'quiet sm'):''}${button('移出','demo-pick',`data-id="${esc(i.id)}" data-picked="0"`,'quiet sm')}</td></tr>`).join('')}</tbody></table></div>`:`<p class="muted" style="font-size:13px;padding:0 18px 18px">还没有选。</p>`}</section>`;
 }
 
 // ── 弹窗与路由 ──
@@ -919,6 +919,7 @@ async function go(hash){
   state.route=route;
   if(route==='videos'&&sub)state.media={...state.media,tab:sub,page:1};
   if(route==='settings'&&sub)state.settingsTab=sub;
+  if(route==='collection'&&sub)state.collection={...state.collection,status:sub,page:1};
   root.dataset.page=route;document.title=`${PAGES[route]} · dustoff`;
   document.body.classList.toggle('fit',route==='notes'&&state.kb.view==='read');
   $('#topbar').hidden=route!=='overview';
@@ -1038,6 +1039,7 @@ root.addEventListener('click',async event=>{
     else if(a==='token-new')openDialog(dialogHead('新建访问令牌')+`<form class="dialog-body" id="token-form"><label class="field">名称<input name="name" maxlength="40" required placeholder="例如：写作助手"></label><div class="field">权限<div class="opts"><button type="button" data-action="pick" data-value="read" aria-pressed="true">只读素材</button><button type="button" data-action="pick" data-value="write" aria-pressed="false">读素材 + 标记已用</button></div></div><div class="row" style="justify-content:flex-end">${button('取消','close-dialog','','quiet')}<button class="btn primary">创建</button></div></form>`,'modal');
     else if(a==='token-revoke'){if(!window.confirm('吊销这个令牌？使用它的服务会立即无法访问。'))return;await api('token-revoke',{id:Number(id)});await loadApiTab();notice('令牌已吊销');}
     else if(a==='demo-pick'){const picked=b.dataset.picked==='1';await api('demo-pick',{id,picked});await ensureDemo(true);if(state.route==='settings'&&state.settingsTab==='demo')await loadDemoTab();else if(state.route==='collection'&&state.collection.status==='demo')await loadCollection();else if(b.isConnected)b.outerHTML=demoButton(id);notice(picked?'已放进演示站，下次更新演示站时生效':'已从演示站移出，下次更新演示站时生效');return;}
+    else if(a==='demo-queue'){const queued=b.dataset.queued==='1';await api('demo-pick',{id,picked:true,queued});await loadDemoTab();notice(queued?'演示站里会显示在排队整理，下次更新演示站时生效':'演示站里会显示在收件箱，下次更新演示站时生效');return;}
     else if(a==='demo-build'){await mutate('demo-build',{},'演示站开始更新，进度可以在流水线里看。');setTimeout(()=>{if(state.route==='settings'&&state.settingsTab==='demo')loadDemoTab().catch(()=>{});},1500);}
     else if(a==='guest-reset'){if(!window.confirm('清空你在演示站里的已读、素材和决定？'))return;resetGuest();state.index=null;state.library=null;await go(location.hash.slice(1)||'overview');notice('已清空');}
     else if(a==='copy-secret'){await navigator.clipboard.writeText(b.dataset.value);notice('已复制');}

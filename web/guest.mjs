@@ -7,7 +7,8 @@ export const now=()=>guest&&snapshot?snapshot:Date.now();
 export const snapshotAt=snapshot;
 
 const KEY='dustoff.demo',COLORS=['#C2703D','#5B7FC7','#8A5BC7','#2C8A6A','#C79A3D','#C75B6E','#4E9AA8','#7A8C3D'];
-const fresh=()=>({reads:{},pageReads:{},topics:[],materials:[],choices:{},next:1});
+// seeded：素材箱样例已经复制过来了。游客删掉样例不会再冒出来；「清空我的操作」后重新复制。
+const fresh=()=>({reads:{},pageReads:{},topics:[],materials:[],choices:{},next:1,seeded:false});
 let mine=fresh();
 try{const saved=JSON.parse(localStorage.getItem(KEY));if(saved&&typeof saved==='object')mine={...fresh(),...saved};}catch{} // 存储不可用时只在本页有效
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(mine));}catch{}};
@@ -44,8 +45,17 @@ function updateMaterial(data){
   if(data.excerpt!==undefined&&m.kind==='excerpt')m.excerpt=text(data.excerpt,'摘录',4000)||fail('摘录不能为空');
   m.updated_at=sec();save();return m;
 }
+// 第一次用素材箱时，把演示数据里的样例选题和素材复制到这个浏览器里，之后和游客自己收的一样能改能删。
+async function seed(request){
+  if(mine.seeded)return;
+  const sample=await request('library'),ids=new Map();
+  for(const t of sample.topics){const id=mine.next++;ids.set(t.id,id);mine.topics.push({id,name:t.name,description:t.description,channels:t.channels,color:t.color,created_at:t.created_at,updated_at:t.updated_at});}
+  for(const m of sample.materials)mine.materials.push({id:mine.next++,item:m.item,kind:m.kind,topic_id:m.topic_id==null?null:ids.get(m.topic_id)??null,status:m.status,excerpt:m.excerpt,memo:m.memo,usage:m.usage,created_at:m.created_at,updated_at:m.updated_at});
+  mine.seeded=true;save();
+}
 // 素材箱：本地的素材配上服务器上的作品摘要（标题、封面、平台）。
 async function library(request){
+  await seed(request);
   const ids=[...new Set(mine.materials.map(m=>m.item))];
   const found=ids.length?new Map((await request('summaries?ids='+encodeURIComponent(ids.join(',')))).items.map(i=>[i.id,i])):new Map();
   const materials=[...mine.materials].sort((a,b)=>b.updated_at-a.updated_at||b.id-a.id).map(m=>({...m,source:found.get(m.item)||{id:m.item,missing:true,title:'这条作品已不在演示站里'}}));
@@ -67,6 +77,7 @@ export async function guestApi(path,data,request){
     if(name==='item')value.guest_choice=mine.choices[value.id]||null;
     return value;
   }
+  if(/^(topic|material)/.test(name))await seed(request);
   switch(name){
     case 'read':if(data.read)mine.reads[data.id]=sec();else delete mine.reads[data.id];save();return {item:data.id,read:!!data.read};
     case 'page-read':{

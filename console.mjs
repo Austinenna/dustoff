@@ -51,12 +51,12 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     let text=null;try{text=readFileSync(join(home,'demo.json'),'utf8');}catch{}
     if(text===demoKey)return;
     demoKey=text;try{demoInfo=text&&JSON.parse(text);}catch{demoInfo=null;}
-    knowledge.close();   // 数据目录整个换过，旧的连接还指着旧文件
+    knowledge.close();library.close();   // 数据目录整个换过，旧的连接还指着旧文件
   }
   // 演示站：生产控制台里选进演示站的作品，以及上次更新的结果。
   function demoState(){
     let target=null,error=null;try{target=demoHome(home,store.cfg());}catch(e){error=e.message;}
-    return {configured:!!target,error,url:store.cfg()('DUST_DEMO_URL',''),picks:library.demoPicks(),status:readBuildStatus(home),info:target?readDemoInfo(target):null};
+    return {configured:!!target,error,url:store.cfg()('DUST_DEMO_URL',''),picks:library.demoPicks(),queued:library.demoQueued(),status:readBuildStatus(home),info:target?readDemoInfo(target):null};
   }
   const token=randomBytes(32).toString('hex');
   let active=null,lastAction=null,origin,auth=null,scheduleStartupWarning=null;
@@ -247,7 +247,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     }catch(e){if(res.headersSent){res.destroy();return;}done(e.status||400,{error:store.redact(e.message||'请求失败')});}
   }
   // ── 演示站接口：只读，只放行看内容用到的接口；读者自己的已读、素材箱存在游客浏览器里。 ──
-  const GUEST_EMPTY={'/api/library':{topics:[],materials:[],unsorted:0},'/api/suggest':{suggestions:[]}};
+  const GUEST_EMPTY={'/api/suggest':{suggestions:[]}};
   function guestOverview(){
     const o=store.overview();
     return {...o,paths:null,storage:{savedUsed:o.storage.savedUsed},session:{},login:null,needsLogin:false,lock:{running:false},lastRun:null,
@@ -269,6 +269,8 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
     else if(GUEST_EMPTY[path])result=GUEST_EMPTY[path];
     else switch(path){
       case '/api/overview':result=guestOverview();break;
+      // 演示数据里的素材箱样例，游客第一次打开时复制到自己的浏览器里。
+      case '/api/library':result=existsSync(library.file)?{topics:library.topics(),materials:library.materials()}:{topics:[],materials:[]};break;
       case '/api/items':{const {demo,...rest}=params;result=store.listItems(rest);break;}
       case '/api/queue':result=store.pendingItems();break;
       case '/api/item':result=store.item(params.id);break;
@@ -403,7 +405,7 @@ export function createConsole({home=DUST_HOME,scheduler,root=ROOT,spawnProcess=s
         case '/api/material':result=enrich([library.addMaterial(data)])[0];break;
         case '/api/material-update':result=enrich([library.updateMaterial(data.id,data)])[0];break;
         case '/api/material-delete':result=library.removeMaterial(data.id);break;
-        case '/api/demo-pick':store.item(data.id);result=library.setDemoPick(data.id,data.picked!==false);break;
+        case '/api/demo-pick':store.item(data.id);result=library.setDemoPick(data.id,data.picked!==false,data.queued===true);break;
         case '/api/demo-build':result=start('demo-build');break;
         case '/api/token':result=library.createToken(data);break;
         case '/api/token-revoke':result=library.revokeToken(data.id);break;
